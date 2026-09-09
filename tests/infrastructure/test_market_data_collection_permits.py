@@ -26,8 +26,12 @@ from tests.infrastructure.test_market_data_worker_service import (  # noqa: F401
 
 
 @pytest.fixture
-async def permits(workers):  # noqa: F811
+async def permits(workers, tmp_path, monkeypatch):  # noqa: F811
   (first, second), _ = workers
+  monkeypatch.setattr(
+    "quantx_infrastructure.services.market_data_collection_permit_store.market_data_staging_root",
+    lambda: tmp_path,
+  )
   request, device = str(uuid4()), str(uuid4())
   payload = {
     "operation": "bars",

@@ -124,7 +124,7 @@ async def test_dev_does_not_wait_for_nonexistent_production_and_completed_plan_i
       "SELECT status FROM market_data_request WHERE request_id=:id",
       {"id": production},
     )
-  ).scalar_one() == "QUEUED"
+  ).scalar_one() == "DELIVERED"
 
 
 @pytest.mark.parametrize(
@@ -200,3 +200,130 @@ async def test_registered_plan_version_cannot_change_without_reconciliation(perm
   assert (
     await execute(first, "SELECT count(*) FROM market_data_collection_permit")
   ).scalar_one() == 0
+
+
+async def test_full_request_slots_allow_continuation_but_not_a_third_request(permits):
+  first, _, store, device, units = permits
+  original = str(units[0].request_id)
+  await store.register(original)
+  grant = await finish_next(store, device)
+  assert str(grant.unit.request_id) == original
+  other = await add_request(first, device, development=False, days=1)
+  await execute(
+    first,
+    "UPDATE market_data_request SET status='UPLOADED' WHERE request_id=:id",
+    {"id": other},
+  )
+  development = await add_request(first, device, development=True, days=1)
+  await store.register(development)
+  await execute(first, "UPDATE market_data_collection_schedule SET production_streak=4")
+  # Development is due but cannot create a third retained request. The admitted
+  # production request must be able to finish and release capacity.
+  grant = await finish_next(store, device)
+  assert str(grant.unit.request_id) == original and grant.unit.unit_index == 1
+  await execute(
+    first,
+    "UPDATE market_data_request SET status='COMPLETED' WHERE request_id=:id",
+    {"id": other},
+  )
+  assert str((await finish_next(store, device)).unit.request_id) == development
+
+
+async def test_requeued_request_keeps_its_admission_and_low_disk_issues_nothing(
+  permits, monkeypatch
+):
+  first, _, store, device, units = permits
+  await store.register(str(units[0].request_id))
+  await finish_next(store, device)
+  await execute(
+    first,
+    "UPDATE market_data_request SET status='QUEUED' WHERE request_id=:id",
+    {"id": str(units[0].request_id)},
+  )
+  other = await add_request(first, device, development=False, days=1)
+  await execute(
+    first,
+    "UPDATE market_data_request SET status='UPLOADED' WHERE request_id=:id",
+    {"id": other},
+  )
+  third = await add_request(first, device, development=False, days=1)
+  await store.register(third)
+  # Low-level issuance also enforces the same slot bound.
+  from quantx_contracts.collection_permit import (
+    CollectionUnit,
+    plan_historical_work_units,
+  )
+
+  payload = {
+    "operation": "bars",
+    "stock_list": ["000002.SZ"],
+    "periods": ["1m"],
+    "start_time": "20260901",
+    "end_time": "20260901",
+  }
+  assert (
+    await store.issue(
+      device_id=device,
+      unit=CollectionUnit.from_payload(
+        third, 0, plan_historical_work_units(payload)[0]
+      ),
+    )
+    is None
+  )
+  monkeypatch.setattr(
+    "quantx_infrastructure.services.market_data_capacity.staging_free_bytes",
+    lambda root: 0,
+  )
+  assert (
+    await store.issue_next(
+      device_id=device, collection_allowed=True, development_allowed=True
+    )
+    is None
+  )
+  assert (
+    await execute(
+      first, "SELECT count(*) FROM market_data_collection_permit WHERE state='ISSUED'"
+    )
+  ).scalar_one() == 0
+
+
+async def test_failed_requests_release_pipeline_slots_but_files_remain_budgeted(
+  permits,
+  monkeypatch,
+):
+  first, _, store, device, units = permits
+  for _ in range(2):
+    failed = await add_request(first, device, development=False, days=1)
+    await execute(
+      first,
+      "UPDATE market_data_request SET status='FAILED',received_chunks=1 WHERE request_id=:id",
+      {"id": failed},
+    )
+    directory = store.staging_root / failed
+    directory.mkdir()
+    (directory / "chunk").write_bytes(b"x")
+  await store.register(str(units[0].request_id))
+  from quantx_infrastructure.services import market_data_capacity as capacity
+
+  monkeypatch.setattr(
+    capacity,
+    "MAX_MARKET_DATA_STAGING_BYTES",
+    capacity.MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES,
+  )
+  assert (
+    await store.issue_next(
+      device_id=device, collection_allowed=True, development_allowed=True
+    )
+    is None
+  )
+  monkeypatch.setattr(
+    capacity,
+    "MAX_MARKET_DATA_STAGING_BYTES",
+    capacity.MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES + 2,
+  )
+  assert (
+    await store.issue_next(
+      device_id=device, collection_allowed=True, development_allowed=True
+    )
+    is not None
+  )

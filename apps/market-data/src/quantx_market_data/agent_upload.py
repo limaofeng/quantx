@@ -8,9 +8,7 @@ import hmac
 import json
 import logging
 import os
-import shutil
 import uuid
-from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -24,6 +22,17 @@ from quantx_infrastructure.models.agent_runtime import (
   MarketDataTransfer,
 )
 from quantx_infrastructure.services import market_data_staging as _market_data_staging
+from quantx_infrastructure.services.market_data_capacity import (
+  MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES,
+  MAX_MARKET_DATA_STAGING_BYTES,
+  MIN_MARKET_DATA_STAGING_FREE_BYTES,
+)
+from quantx_infrastructure.services.market_data_capacity import (
+  staging_free_bytes as _market_data_staging_free_bytes,
+)
+from quantx_infrastructure.services.market_data_capacity import (
+  staging_usage_bytes as _market_data_staging_usage_bytes,
+)
 from sqlalchemy import func, select
 
 logger = logging.getLogger(__name__)
@@ -44,9 +53,6 @@ MAX_MARKET_DATA_CHUNK_RECORDS = 5000
 # Agent bounds allow at most 99 record-bound emissions, 22 byte-bound
 # emissions, and one final chunk; round the proven 122 ceiling up slightly.
 MAX_MARKET_DATA_CHUNKS = 128
-MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES = 256 * 1024 * 1024
-MAX_MARKET_DATA_STAGING_BYTES = 1024 * 1024 * 1024
-MIN_MARKET_DATA_STAGING_FREE_BYTES = 512 * 1024 * 1024
 _MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset({"QUEUED", "DELIVERED", "RECEIVING"})
 _MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
   {"UPLOADED", "PROCESSING", "BLOCKED", "COMPLETED"}
@@ -84,30 +90,6 @@ async def _read_limited_body(
     if len(body) > limit:
       raise HTTPException(status_code=413, detail="行情批次超过大小限制")
   return bytes(body)
-
-
-def _market_data_staging_usage_bytes(root: Path) -> int:
-  """Return actual retained bytes, failing closed on linked staging content."""
-  if not root.exists():
-    return 0
-  if root.is_symlink() or _is_reparse_point(root):
-    raise RuntimeError("unsafe market-data staging root")
-  resolved_root = root.resolve()
-  total = 0
-  for path in root.rglob("*"):
-    if path.is_symlink() or _is_reparse_point(path):
-      raise RuntimeError("market-data staging contains a reparse point")
-    if not path.is_file():
-      continue
-    resolved = path.resolve()
-    if resolved_root not in resolved.parents:
-      raise RuntimeError("market-data staging file escaped its root")
-    total += path.stat().st_size
-  return total
-
-
-def _market_data_staging_free_bytes(root: Path) -> int:
-  return int(shutil.disk_usage(root).free)
 
 
 async def _market_data_manifest_is_complete(db, market_request) -> bool:

@@ -6,6 +6,7 @@ Candidate selection uses persistent unit progress; session health/window eligibi
 is supplied by the history transport. The store does not infer those facts.
 """
 
+import asyncio
 from uuid import UUID, uuid4
 
 from quantx_contracts.collection_permit import (
@@ -17,10 +18,17 @@ from quantx_contracts.collection_permit import (
 )
 from sqlalchemy import text
 
+from quantx_infrastructure.services.market_data_capacity import (
+  MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE,
+  collection_has_capacity,
+)
+from quantx_infrastructure.services.market_data_staging import market_data_staging_root
+
 
 class CollectionPermitStore:
   def __init__(self, worker_store):
     self.worker = worker_store
+    self.staging_root = market_data_staging_root()
 
   async def _lock(self, connection):
     await self.worker._guard_ingestion_owner(connection)
@@ -47,6 +55,23 @@ class CollectionPermitStore:
       await self._lock(connection)
       return await self._issue(connection, device_id=device_id, unit=unit)
 
+  async def _admitted(self, connection):
+    return (
+      (
+        await connection.execute(
+          text("""
+      SELECT request_id,device_id,status FROM market_data_request r
+      WHERE status IN ('DELIVERED','RECEIVING','UPLOADED','PROCESSING')
+        OR (status='QUEUED' AND (
+          COALESCE(received_chunks,0)>0 OR EXISTS (
+            SELECT 1 FROM market_data_collection_permit p WHERE p.request_id=r.request_id)))
+    """)
+        )
+      )
+      .mappings()
+      .all()
+    )
+
   async def _issue(self, connection, *, device_id, unit):
     request = (
       (
@@ -65,6 +90,27 @@ class CollectionPermitStore:
       raise ValueError("collection source identity mismatch")
     if request["status"] not in {"QUEUED", "DELIVERED", "RECEIVING"}:
       raise ValueError("collection source is not eligible")
+    admitted = await self._admitted(connection)
+    device_requests = {
+      row["request_id"] for row in admitted if row["device_id"] == device_id
+    }
+    if (
+      str(unit.request_id) not in device_requests
+      and len(device_requests) >= MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE
+    ):
+      await self.worker._guard_ingestion_owner(connection)
+      return None
+    collecting = {
+      row["request_id"]
+      for row in admitted
+      if row["status"] in {"QUEUED", "DELIVERED", "RECEIVING"}
+    }
+    collecting.add(str(unit.request_id))
+    if not await asyncio.to_thread(
+      collection_has_capacity, self.staging_root, collecting
+    ):
+      await self.worker._guard_ingestion_owner(connection)
+      return None
     payload = request["request_payload"]
     units = plan_historical_work_units(payload)
     if (
@@ -147,6 +193,13 @@ class CollectionPermitStore:
         "development": request["development_only"],
         "expires": grant.expires_at,
       },
+    )
+    await connection.execute(
+      text("""
+      UPDATE market_data_request SET status='DELIVERED',updated_at=clock_timestamp()
+      WHERE request_id=:request AND status='QUEUED'
+    """),
+      {"request": str(unit.request_id)},
     )
     await self.worker._guard_ingestion_owner(connection)
     return grant
@@ -268,6 +321,10 @@ class CollectionPermitStore:
       if blocked:
         await self.worker._guard_ingestion_owner(connection)
         return None
+      admitted = await self._admitted(connection)
+      device_requests = [
+        row["request_id"] for row in admitted if row["device_id"] == device_id
+      ]
       row = (
         (
           await connection.execute(
@@ -279,12 +336,19 @@ class CollectionPermitStore:
         WHERE r.device_id=:device AND r.status IN ('QUEUED','DELIVERED','RECEIVING')
           AND p.next_unit_index < p.unit_count
           AND (NOT r.development_only OR :development)
+          AND (:has_slot OR r.request_id=ANY(CAST(:admitted AS TEXT[])))
         ORDER BY CASE WHEN s.production_streak >= 4 THEN NOT r.development_only
                       ELSE r.development_only END,
           r.created_at,r.request_id
         LIMIT 1 FOR UPDATE OF r
       """),
-            {"device": device_id, "development": development_allowed},
+            {
+              "device": device_id,
+              "development": development_allowed,
+              "has_slot": len(device_requests)
+              < MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE,
+              "admitted": device_requests,
+            },
           )
         )
         .mappings()
