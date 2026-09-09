@@ -5,6 +5,8 @@
 
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -22,6 +24,17 @@ from .timeseries_connection import (
 )
 
 logger = logging.getLogger(__name__)
+_external_write_retry_owner: ContextVar[bool] = ContextVar("external_write_retry_owner", default=False)
+
+
+@contextmanager
+def single_write_attempt():
+  """The durable ingestion phase owns retries, including synchronous writes."""
+  token = _external_write_retry_owner.set(True)
+  try:
+    yield
+  finally:
+    _external_write_retry_owner.reset(token)
 
 
 class TimeSeriesOperations:
@@ -32,6 +45,8 @@ class TimeSeriesOperations:
 
   def _execute_with_retry(self, operation, *args, **kwargs):
     """带重试的操作执行"""
+    if _external_write_retry_owner.get():
+      return operation(*args, **kwargs)
     last_exception = None
 
     for attempt in range(self.connection.max_retries + 1):
@@ -190,9 +205,14 @@ class TimeSeriesOperations:
       logger.debug(f"写入DataFrame数据成功: {len(dataframe)}条")
 
     except NonRetryableWriteError:
-      logger.exception("写入DataFrame数据失败：InfluxDB WAL 处于不可重试状态")
+      logger.error("写入DataFrame数据失败：InfluxDB WAL 处于不可重试状态")
       raise
     except Exception as e:
+      if _external_write_retry_owner.get():
+        self.connection._stats["errors"] += 1
+        if is_fatal_wal_error(e):
+          raise NonRetryableWriteError("DEPENDENCY_WRITE_CAPACITY_BLOCKED") from None
+        raise WriteError("DEPENDENCY_WRITE_FAILED") from None
       logger.error(f"写入DataFrame数据失败: {e}")
       self.connection._stats["errors"] += 1
       if is_fatal_wal_error(e):

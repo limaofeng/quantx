@@ -204,7 +204,7 @@ AGENT_CONTROL_CPU_WORKERS = 2
 
 _MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset({"QUEUED", "DELIVERED", "RECEIVING"})
 _MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
-  {"UPLOADED", "PROCESSING", "COMPLETED"}
+  {"UPLOADED", "PROCESSING", "BLOCKED", "COMPLETED"}
 )
 _MARKET_DATA_INFLIGHT_STATUSES = frozenset(
   {"DELIVERED", "RECEIVING", "UPLOADED", "PROCESSING"}
@@ -2641,14 +2641,23 @@ async def _next_market_data_request(
       (await db.scalars(
         select(MarketDataRequest.status)
         .where(
-          MarketDataRequest.device_id == device_id,
-          MarketDataRequest.status.in_(_MARKET_DATA_INFLIGHT_STATUSES),
+          or_(
+            and_(MarketDataRequest.device_id == device_id,
+                 MarketDataRequest.status.in_(_MARKET_DATA_INFLIGHT_STATUSES)),
+            and_(MarketDataRequest.status == "BLOCKED",
+                 MarketDataRequest.ingestion_progress["reason_code"].astext.in_((
+                   "DEPENDENCY_QUERY_CAPACITY_BLOCKED", "DEPENDENCY_AUTH_BLOCKED",
+                   "DEPENDENCY_WRITE_CAPACITY_BLOCKED",
+                   "DEPENDENCY_READBACK_UNAVAILABLE", "DEPENDENCY_WRITE_UNAVAILABLE",
+                 ))),
+          ),
         )
         .limit(MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE)
       )).all()
     )
     if (
       any(status in _MARKET_DATA_NATIVE_DISPATCH_STATUSES for status in inflight_statuses)
+      or "BLOCKED" in inflight_statuses
       or len(inflight_statuses) >= MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE
     ):
       return None

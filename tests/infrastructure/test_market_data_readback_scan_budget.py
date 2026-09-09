@@ -121,6 +121,14 @@ def test_provider_failure_is_sanitized_and_not_misclassified():
   assert "secret" not in str(error)
 
 
+@pytest.mark.parametrize("message", ["unauthenticated", "403 Forbidden", "permission denied"])
+def test_authentication_failure_blocks_without_provider_details(message):
+  error = v._query_failure(RuntimeError(message + " credential=secret"), "SELECT 1")
+  assert isinstance(error, v.MarketDataPersistenceBlockedError)
+  assert error.reason_code == "DEPENDENCY_AUTH_BLOCKED"
+  assert "secret" not in str(error)
+
+
 def test_empty_source_scan_splits_without_claiming_uploaded_rows():
   conn = Connection([RuntimeError(SCAN_ERROR), rows([]), rows([])])
   result = v._read_empty_group_bounded(

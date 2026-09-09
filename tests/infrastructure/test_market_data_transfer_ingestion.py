@@ -2,11 +2,13 @@ import asyncio
 import gzip
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
+from quantx_application.market_data.ingestion import transition
 from quantx_contracts import (
   HISTORICAL_BAR_NO_DATA_REASON,
   HISTORICAL_TICK_ORDINAL_FIELD,
@@ -331,6 +333,21 @@ class AtomicRequestStore:
     self.claim_token: str | None = None
     self.transitions = ["UPLOADED"]
     self._lock = asyncio.Lock()
+    self.progress = None
+
+  async def mutate_market_data_ingestion(
+    self, request_id, *, claim_token, action, values=None
+  ):
+    if self.status != "PROCESSING" or self.claim_token != claim_token:
+      raise RuntimeError("market-data ingestion claim was lost")
+    self.progress = transition(self.progress, action, values or {}, datetime.now())
+    if self.progress["blocked"] or action == "defer":
+      self.status = "BLOCKED" if self.progress["blocked"] else "UPLOADED"
+      self.error = self.progress["reason_code"]
+      self.claim_token = None
+      self.release_count += 1
+      self.transitions.append(self.status)
+    return self.progress
 
   async def claim_market_data_request(self, request_id: str) -> str | None:
     assert request_id == "request-1"
@@ -908,7 +925,7 @@ async def test_claim_success_persists_ingestion_audit() -> None:
     "code_summaries": [],
   }
 
-  async def ingest(_store, request_id):
+  async def ingest(_store, request_id, *, progress=None):
     assert _store is store
     assert request_id == "request-1"
     return audit
@@ -928,7 +945,7 @@ async def test_claim_success_persists_ingestion_audit() -> None:
 async def test_validation_failure_is_terminal_but_influx_failure_is_retryable() -> None:
   invalid_store = AtomicRequestStore()
 
-  async def invalid(_store, _request_id):
+  async def invalid(_store, _request_id, *, progress=None):
     raise ingestion.MarketDataValidationError("bad immutable payload")
 
   invalid_result = await ingestion.claim_ingest_and_finish_market_data_request(
@@ -942,7 +959,7 @@ async def test_validation_failure_is_terminal_but_influx_failure_is_retryable() 
 
   retry_store = AtomicRequestStore()
 
-  async def unavailable(_store, _request_id):
+  async def unavailable(_store, _request_id, *, progress=None):
     raise RuntimeError("Influx unavailable")
 
   retry_result = await ingestion.claim_ingest_and_finish_market_data_request(
@@ -953,7 +970,7 @@ async def test_validation_failure_is_terminal_but_influx_failure_is_retryable() 
   assert retry_result == {
     "status": "retryable",
     "request_id": "request-1",
-    "reason": "RuntimeError: Influx unavailable",
+    "reason": "DEPENDENCY_OPERATION_FAILED",
   }
   assert retry_store.transitions == ["UPLOADED", "PROCESSING", "UPLOADED"]
   assert retry_store.release_count == 1
@@ -975,7 +992,7 @@ async def test_readback_failures_release_the_claim_for_retry(
 ) -> None:
   store = AtomicRequestStore()
 
-  async def fail_readback(_store, _request_id):
+  async def fail_readback(_store, _request_id, *, progress=None):
     raise failure
 
   result = await ingestion.claim_ingest_and_finish_market_data_request(
@@ -995,7 +1012,7 @@ async def test_cancellation_releases_claim_without_marking_transfer_failed() -> 
   store = AtomicRequestStore()
   entered = asyncio.Event()
 
-  async def ingest(_store, _request_id):
+  async def ingest(_store, _request_id, *, progress=None):
     entered.set()
     await asyncio.Event().wait()
 
@@ -1017,7 +1034,7 @@ async def test_cancellation_releases_claim_without_marking_transfer_failed() -> 
 
 
 @pytest.mark.asyncio
-async def test_lost_claim_stops_ingestion_and_is_classified_retryable(
+async def test_lost_claim_stops_ingestion_without_mutating_new_owner(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   class LostLeaseStore(AtomicRequestStore):
@@ -1036,7 +1053,7 @@ async def test_lost_claim_stops_ingestion_and_is_classified_retryable(
   ingestion_cancelled = asyncio.Event()
   monkeypatch.setattr(ingestion, "MARKET_DATA_CLAIM_RENEW_SECONDS", 0)
 
-  async def ingest(_store, _request_id):
+  async def ingest(_store, _request_id, *, progress=None):
     try:
       await asyncio.Event().wait()
     finally:
@@ -1049,8 +1066,8 @@ async def test_lost_claim_stops_ingestion_and_is_classified_retryable(
   )
 
   assert result is not None
-  assert result["status"] == "retryable"
-  assert "claim was lost" in result["reason"]
+  assert result["status"] == "unclaimed"
+  assert result["reason"] == "INGESTION_CLAIM_LOST"
   assert ingestion_cancelled.is_set()
   assert store.status == "PROCESSING"
   assert store.claim_token == "claim-2"
@@ -1097,7 +1114,7 @@ async def test_concurrent_consumers_only_ingest_one_claim() -> None:
   entered_ingestion = asyncio.Event()
   ingestion_count = 0
 
-  async def ingest(_store, _request_id):
+  async def ingest(_store, _request_id, *, progress=None):
     nonlocal ingestion_count
     ingestion_count += 1
     entered_ingestion.set()

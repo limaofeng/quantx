@@ -102,7 +102,7 @@ async def test_write_cancel_joins_sent_write_before_claim_release(monkeypatch):
 
   store.release_market_data_request_claim = release_claim
 
-  async def ingest(_store, _request):
+  async def ingest(_store, _request, *, progress=None):
     return await ingestion.save_market_data_period(period="1m", market_data={})
 
   task = asyncio.create_task(

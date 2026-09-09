@@ -237,7 +237,7 @@ async def test_ingestion_claim_released_only_after_cancelled_reader_closes():
 
   store.release_market_data_request_claim = release_claim
 
-  async def ingest(_store, _request):
+  async def ingest(_store, _request, *, progress=None):
     return await v._await_readback(
       v._read_expected_key_group_once,
       batches=[batch("A"), batch("B")],

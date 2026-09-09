@@ -503,6 +503,7 @@ async def test_recoverable_market_data_requests_include_uploaded_and_stale_proce
   assert "updated_at < :stale_before" in connection.statement
   assert connection.parameters == {
     "stale_before": now - timedelta(minutes=5),
+    "now": now,
     "limit": 2,
   }
 
@@ -586,6 +587,7 @@ async def test_market_data_processing_claim_can_be_renewed_and_released(
     "request_id": "request-1",
     "claim_token": "claim-token-1",
     "updated_at": now,
+    "stale_before": now - timedelta(minutes=5),
   }
 
   assert (
@@ -603,6 +605,7 @@ async def test_market_data_processing_claim_can_be_renewed_and_released(
     "claim_token": "claim-token-1",
     "error": "Influx unavailable",
     "updated_at": now,
+    "stale_before": now - timedelta(minutes=5),
   }
 
 
@@ -622,7 +625,7 @@ async def test_finish_market_data_request_writes_unambiguous_terminal_state(
     error="transfer failed",
   )
 
-  assert "CASE" not in connection.statement
+  assert "SET status = :status" in connection.statement
   assert "completed_at = :completed_at" in connection.statement
   assert "status NOT IN ('COMPLETED', 'FAILED')" in connection.statement
   assert "RETURNING status" in connection.statement

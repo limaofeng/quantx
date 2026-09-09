@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from quantx_worker.prefector.flows import durable_agent_flows
@@ -86,7 +86,7 @@ async def test_sector_membership_upload_uses_audit_only_ingestion(monkeypatch) -
   result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
   assert result == {"operation": "sector_instruments"}
-  ingest.assert_awaited_once_with(store, "request-1")
+  ingest.assert_awaited_once_with(store, "request-1", progress=None)
   records.assert_not_awaited()
 
 
@@ -351,6 +351,9 @@ async def test_interrupted_market_ingestion_is_reclaimed(monkeypatch) -> None:
     def __init__(self):
       self.claimed = False
 
+    async def mutate_market_data_ingestion(self, *args, **kwargs):
+      return {"blocked": False}
+
     async def create_market_data_request(self, payload):
       assert payload == {"operation": "bars"}
       return "request-1"
@@ -470,68 +473,6 @@ async def test_market_data_wait_timeout_keeps_durable_status(monkeypatch) -> Non
   }
 
 
-@pytest.mark.asyncio
-async def test_market_data_wait_crosses_preexisting_failed_retry_chain(
-  monkeypatch,
-) -> None:
-  class FakeStore:
-    async def create_market_data_request(self, payload):
-      assert payload == {"operation": "bars"}
-      return "request-0"
-
-    async def market_data_request(self, request_id):
-      hop = int(request_id.rsplit("-", maxsplit=1)[1])
-      if hop < 4:
-        return {"status": "FAILED", "processing_error": f"old failure {hop}"}
-      return {
-        "status": "COMPLETED",
-        "ingestion_result": {"records_received": 1, "records_saved": 1},
-      }
-
-    async def close(self):
-      return None
-
-  recovery_hops: list[int] = []
-
-  async def recover(
-    _store,
-    *,
-    payload,
-    request_id,
-    reopen_attempted,
-    retry_hops,
-    device_id,
-  ):
-    assert payload == {"operation": "bars"}
-    assert request_id == f"request-{retry_hops}"
-    assert device_id is None
-    recovery_hops.append(retry_hops)
-    next_hop = retry_hops + 1
-    return f"request-{next_hop}", next_hop, True
-
-  monkeypatch.setattr(
-    durable_agent_flows,
-    "DurableRuntimeStore",
-    FakeStore,
-  )
-  monkeypatch.setattr(
-    durable_agent_flows,
-    "recover_failed_market_data_request",
-    recover,
-  )
-
-  result = await durable_agent_flows._request_and_wait(
-    {"operation": "bars"},
-    timeout_seconds=1,
-  )
-
-  assert recovery_hops == [0, 1, 2, 3]
-  assert result == {
-    "status": "completed",
-    "request_id": "request-4",
-    "records_received": 1,
-    "records_saved": 1,
-  }
 
 
 @pytest.mark.asyncio
@@ -586,6 +527,7 @@ async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(
 @pytest.mark.asyncio
 async def test_explicit_reprocess_claims_uploaded_request(monkeypatch) -> None:
   store = SimpleNamespace(
+    mutate_market_data_ingestion=AsyncMock(return_value={"blocked": False}),
     market_data_request_status=AsyncMock(return_value="UPLOADED"),
     claim_market_data_request=AsyncMock(return_value="claim-token-1"),
     finish_market_data_request=AsyncMock(),
@@ -613,7 +555,7 @@ async def test_explicit_reprocess_claims_uploaded_request(monkeypatch) -> None:
   result = await durable_agent_flows.reprocess_uploaded_market_data_request("request-1")
 
   store.claim_market_data_request.assert_awaited_once_with("request-1")
-  ingestion.assert_awaited_once_with(store, "request-1")
+  ingestion.assert_awaited_once_with(store, "request-1", progress=ANY)
   store.finish_market_data_request.assert_awaited_once_with(
     "request-1",
     status="COMPLETED",
@@ -663,6 +605,7 @@ async def test_explicit_reprocess_returns_ingestion_failure_to_failed(
   monkeypatch,
 ) -> None:
   store = SimpleNamespace(
+    mutate_market_data_ingestion=AsyncMock(return_value={"blocked": False}),
     market_data_request_status=AsyncMock(return_value="UPLOADED"),
     claim_market_data_request=AsyncMock(return_value="claim-token-1"),
     finish_market_data_request=AsyncMock(),
@@ -681,14 +624,16 @@ async def test_explicit_reprocess_returns_ingestion_failure_to_failed(
     ingestion,
   )
 
-  with pytest.raises(RuntimeError, match="did not complete.*Influx unavailable"):
+  with pytest.raises(RuntimeError, match="did not complete.*DEPENDENCY_OPERATION_FAILED"):
     await durable_agent_flows.reprocess_uploaded_market_data_request("request-1")
 
-  store.release_market_data_request_claim.assert_awaited_once_with(
+  store.mutate_market_data_ingestion.assert_awaited_with(
     "request-1",
     claim_token="claim-token-1",
-    error="RuntimeError: Influx unavailable",
+    action="defer",
+    values={"reason_code": "DEPENDENCY_OPERATION_FAILED", "blocked": False, "diagnostic": {}},
   )
+  store.release_market_data_request_claim.assert_not_awaited()
   store.finish_market_data_request.assert_not_awaited()
   store.close.assert_awaited_once()
 

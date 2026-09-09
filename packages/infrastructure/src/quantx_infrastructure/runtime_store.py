@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
+from quantx_application.market_data.ingestion import transition as ingestion_transition
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -175,7 +176,13 @@ class DurableRuntimeStore:
             SELECT request_id, status, processing_error, updated_at
             FROM market_data_request
             WHERE device_id = :device_id
-              AND status IN ('UPLOADED', 'PROCESSING')
+              AND (status IN ('UPLOADED', 'PROCESSING') OR (
+                status = 'BLOCKED' AND ingestion_progress ->> 'reason_code' IN (
+                  'DEPENDENCY_QUERY_CAPACITY_BLOCKED', 'DEPENDENCY_AUTH_BLOCKED',
+                  'DEPENDENCY_WRITE_CAPACITY_BLOCKED', 'DEPENDENCY_READBACK_UNAVAILABLE',
+                  'DEPENDENCY_WRITE_UNAVAILABLE'
+                )
+              ))
               AND COALESCE(processing_error, '') <> ''
             ORDER BY created_at
             LIMIT 1
@@ -387,6 +394,7 @@ class DurableRuntimeStore:
             SELECT r.request_id, r.request_payload, r.status, r.expected_chunks,
                    r.development_only,
                    r.received_chunks, r.processing_error, r.ingestion_result,
+                   r.ingestion_progress,
                    r.created_at, h.updated_at AS history_updated_at,
                    h.details -> 'historyProgress' AS history_progress,
                    h.details ->> 'sessionActive' AS history_session_active,
@@ -631,14 +639,17 @@ class DurableRuntimeStore:
             """
             SELECT request_id
             FROM market_data_request
-            WHERE status = 'UPLOADED'
-               OR (status = 'PROCESSING' AND updated_at < :stale_before)
+            WHERE (status = 'UPLOADED'
+               OR (status = 'PROCESSING' AND updated_at < :stale_before))
+              AND (ingestion_progress ->> 'next_retry_at' IS NULL OR
+                   CAST(ingestion_progress ->> 'next_retry_at' AS timestamp) <= :now)
             ORDER BY updated_at ASC, created_at ASC
             LIMIT :limit
             """
           ),
           {
             "stale_before": stale_before,
+            "now": _utcnow(),
             "limit": bounded_limit,
           },
         )
@@ -734,6 +745,12 @@ class DurableRuntimeStore:
              SET status = :status,
                  processing_error = :error,
                  ingestion_result = CAST(:ingestion_result AS JSON),
+                 ingestion_progress = CASE
+                   WHEN CAST(:status AS VARCHAR) = 'COMPLETED' AND ingestion_progress IS NOT NULL
+                   THEN ingestion_progress || jsonb_build_object(
+                     'phase', 'VERIFIED', 'last_progress_at', CAST(CAST(:completed_at AS TIMESTAMP) AS TEXT),
+                     'reason_code', NULL, 'next_retry_at', NULL)
+                   ELSE ingestion_progress END,
                  processing_claim_token = NULL,
                  completed_at = :completed_at,
                  updated_at = :completed_at
@@ -747,6 +764,7 @@ class DurableRuntimeStore:
                  OR (
                    status = 'PROCESSING'
                    AND processing_claim_token = CAST(:claim_token AS TEXT)
+                   AND updated_at >= CAST(:completed_at AS timestamp) - INTERVAL '5 minutes'
                  )
                )
              RETURNING status
@@ -909,6 +927,8 @@ class DurableRuntimeStore:
                 processing_claim_token = :claim_token,
                 updated_at = :updated_at
             WHERE request_id = :request_id
+              AND (ingestion_progress ->> 'next_retry_at' IS NULL OR
+                   CAST(ingestion_progress ->> 'next_retry_at' AS timestamp) <= :updated_at)
               AND (
                 status = 'UPLOADED'
                 OR (
@@ -928,6 +948,99 @@ class DurableRuntimeStore:
         )
       ).scalar_one_or_none()
     return str(value) if value is not None else None
+
+  async def mutate_market_data_ingestion(
+    self,
+    request_id: str,
+    *,
+    claim_token: str,
+    action: str,
+    values: dict[str, Any] | None = None,
+  ) -> dict[str, Any]:
+    """Apply one progress transition only while this ingestion lease is valid."""
+    now = _utcnow()
+    async with self.engine.begin() as connection:
+      row = (
+        (
+          await connection.execute(
+            text("""
+        SELECT ingestion_progress FROM market_data_request
+        WHERE request_id = :id AND status = 'PROCESSING'
+          AND processing_claim_token = :token AND updated_at >= :stale_before
+        FOR UPDATE
+      """),
+            {
+              "id": request_id,
+              "token": claim_token,
+              "stale_before": now - timedelta(minutes=5),
+            },
+          )
+        )
+        .mappings()
+        .one_or_none()
+      )
+      if row is None:
+        raise RuntimeError("market-data ingestion claim was lost")
+      progress = ingestion_transition(
+        row["ingestion_progress"], action, values or {}, now
+      )
+      status = (
+        "BLOCKED"
+        if progress["blocked"]
+        else ("UPLOADED" if action == "defer" else "PROCESSING")
+      )
+      await connection.execute(
+        text("""
+        UPDATE market_data_request SET ingestion_progress = CAST(:progress AS JSONB),
+          status = :status, processing_error = :reason,
+          processing_claim_token = CASE WHEN CAST(:status AS VARCHAR) = 'PROCESSING'
+                                       THEN processing_claim_token ELSE NULL END,
+          updated_at = :now
+        WHERE request_id = :id
+      """),
+        {
+          "id": request_id,
+          "progress": json.dumps(progress),
+          "status": status,
+          "reason": progress["reason_code"],
+          "now": now,
+        },
+      )
+      return progress
+
+  async def resume_blocked_market_data_request(
+    self, request_id: str, *, reason: str
+  ) -> dict[str, Any]:
+    """Explicit recovery preserves the frozen manifest, checkpoints and attempt history."""
+    now = _utcnow()
+    async with self.engine.begin() as connection:
+      row = (
+        (
+          await connection.execute(
+            text("""
+        SELECT ingestion_progress FROM market_data_request
+        WHERE request_id = :id AND status = 'BLOCKED' FOR UPDATE
+      """),
+            {"id": request_id},
+          )
+        )
+        .mappings()
+        .one_or_none()
+      )
+      if row is None or not row["ingestion_progress"]:
+        raise RuntimeError("market-data request is not blocked with ingestion evidence")
+      progress = ingestion_transition(
+        row["ingestion_progress"], "resume", {"reason": reason}, now
+      )
+      await connection.execute(
+        text("""
+        UPDATE market_data_request SET ingestion_progress = CAST(:progress AS JSONB),
+          status = 'UPLOADED', processing_error = NULL, updated_at = :now
+        WHERE request_id = :id
+      """),
+        {"id": request_id, "progress": json.dumps(progress), "now": now},
+      )
+      return progress
 
   async def renew_market_data_request_claim(
     self,
@@ -950,6 +1063,7 @@ class DurableRuntimeStore:
             WHERE request_id = :request_id
               AND status = 'PROCESSING'
               AND processing_claim_token = :claim_token
+              AND updated_at >= :stale_before
             RETURNING request_id
             """
           ),
@@ -957,6 +1071,7 @@ class DurableRuntimeStore:
             "request_id": request_id,
             "claim_token": normalized_claim_token,
             "updated_at": _utcnow(),
+            "stale_before": _utcnow() - timedelta(minutes=5),
           },
         )
       ).scalar_one_or_none()
@@ -987,6 +1102,7 @@ class DurableRuntimeStore:
             WHERE request_id = :request_id
               AND status = 'PROCESSING'
               AND processing_claim_token = :claim_token
+              AND updated_at >= :stale_before
             RETURNING request_id
             """
           ),
@@ -995,6 +1111,7 @@ class DurableRuntimeStore:
             "claim_token": normalized_claim_token,
             "error": str(error or "")[:2000] or None,
             "updated_at": _utcnow(),
+            "stale_before": _utcnow() - timedelta(minutes=5),
           },
         )
       ).scalar_one_or_none()

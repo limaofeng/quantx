@@ -31,9 +31,6 @@ from quantx_infrastructure.services.divid_factor_service import (
   DividFactorService,
 )
 from quantx_infrastructure.services.financial_service import FinancialService
-from quantx_infrastructure.services.market_data_request_service import (
-  recover_failed_market_data_request,
-)
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   claim_ingest_and_finish_market_data_request,
   ingest_uploaded_bar_request,
@@ -255,7 +252,6 @@ async def _request_and_wait(
   agent_device_id: str = "",
   required_capabilities: Optional[list[str]] = None,
   idempotency_scope: str = "",
-  retry_failed_requests: bool = True,
   on_created: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
   from quantx_infrastructure.config.settings import settings
@@ -282,8 +278,6 @@ async def _request_and_wait(
     request_id = await store.create_market_data_request(payload, **request_kwargs)
     if on_created:
       await on_created(request_id)
-    reopen_attempted: set[str] = set()
-    retry_hops = 0
     try:
       request_logger = get_run_logger()
     except MissingContextError:
@@ -349,34 +343,12 @@ async def _request_and_wait(
           "request_id": request_id,
           **ingestion_result,
         }
-      if status == "FAILED":
-        if not retry_failed_requests:
-          return {
-            "status": "failed",
-            "request_id": request_id,
-            "reason": request.get("processing_error"),
-          }
-        recovery = await recover_failed_market_data_request(
-          store,
-          payload=payload,
-          request_id=request_id,
-          reopen_attempted=reopen_attempted,
-          retry_hops=retry_hops,
-          device_id=agent_device_id or None,
-        )
-        if recovery is None:
-          return {
-            "status": "failed",
-            "request_id": request_id,
-            "reason": request.get("processing_error"),
-          }
-        old_request_id = request_id
-        request_id, retry_hops, _ = recovery
-        if observer := observation.get():
-          observer.requests.pop(old_request_id, None)
-        if on_created:
-          await on_created(request_id)
-        continue
+      if status == "BLOCKED":
+        return {"status": "blocked", "request_id": request_id,
+                "reason": request.get("processing_error")}
+      if status in {"FAILED", "CANCELLED"}:
+        return {"status": status.lower(), "request_id": request_id,
+                "reason": request.get("processing_error")}
       if status in {"UPLOADED", "PROCESSING"}:
         convergence = await claim_ingest_and_finish_market_data_request(
           store,
@@ -418,6 +390,7 @@ async def _request_and_wait(
 async def _ingest_uploaded_request(
   store: DurableRuntimeStore,
   request_id: str,
+  *, progress=None,
 ) -> dict[str, Any]:
   _, payload, _ = await load_uploaded_request_manifest(store, request_id)
   operation = str(payload.get("operation") or "bars")
@@ -426,7 +399,7 @@ async def _ingest_uploaded_request(
   if operation == "bars":
     destination = str(payload.get("destination") or "influxdb").strip().lower()
     if destination != "influxdb":
-      return await ingest_uploaded_market_data_request(store, request_id)
+      return await ingest_uploaded_market_data_request(store, request_id, progress=progress)
     from quantx_infrastructure.services import (
       market_data_transfer_ingestion as ingestion,
     )
@@ -445,9 +418,10 @@ async def _ingest_uploaded_request(
       request_id,
       save_period=save_observed,
       verify_persistence=verify_observed,
+      progress=progress,
     )
   if operation == "sector_instruments":
-    return await ingest_uploaded_market_data_request(store, request_id)
+    return await ingest_uploaded_market_data_request(store, request_id, progress=progress)
   _, _, records = await load_uploaded_request_records(store, request_id)
   if operation == "divid_factors":
     frames, stock_codes, start_ex_date, end_ex_date = _normalize_divid_factor_records(

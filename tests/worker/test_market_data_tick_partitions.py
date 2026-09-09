@@ -42,7 +42,7 @@ async def test_month_range_is_split_through_public_request_gateway(monkeypatch):
     (["600036.SH", "000001.SZ"], day, day) for day in ("20260803", "20260831")
   ]
   assert [p["periods"] for p, _ in calls] == [["tick"], ["1d"], ["tick"]]
-  assert all(k.get("retry_failed_requests") is False for p, k in calls if p["periods"] == ["tick"])
+  assert all("retry_failed_requests" not in k for p, k in calls)
   assert len({k["idempotency_scope"] for _, k in calls}) == 3
 
 
@@ -85,15 +85,13 @@ async def test_failed_tick_request_is_not_reopened(monkeypatch):
     ),
     close=AsyncMock(),
   )
-  recovery = AsyncMock(side_effect=AssertionError("must not retry"))
   monkeypatch.setattr(durable, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(durable, "recover_failed_market_data_request", recovery)
   result = await durable._request_and_wait(
-    {"operation": "bars"}, retry_failed_requests=False
+    {"operation": "bars"}
   )
   assert result["status"] == "failed"
   assert result["request_id"] == "same-request"
-  recovery.assert_not_awaited()
+  store.create_market_data_request.assert_awaited_once()
 
 
 async def test_empty_tick_gateway_failure_identifies_day_and_symbol(monkeypatch):

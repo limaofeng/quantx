@@ -114,6 +114,10 @@ def _query_failure(
 ) -> MarketDataPersistenceQueryError:
   # Inspect provider text locally; never propagate credentials or raw error chains.
   if re.search(
+    r"\b(unauthenticated|unauthorized|forbidden|permission denied)\b", str(exc), re.I
+  ):
+    return MarketDataPersistenceBlockedError("DEPENDENCY_AUTH_BLOCKED")
+  if re.search(
     r"scan\s+\d+\s+Parquet files.*exceeding.*file limit", str(exc), re.I | re.S
   ):
     return MarketDataPersistenceCapacityError(

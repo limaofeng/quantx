@@ -11,63 +11,9 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
   claim_ingest_and_finish_market_data_request,
 )
 
-_MAX_FAILED_REQUEST_RETRY_HOPS = 32
 # v2 separates replay supplements from completed v1 transfers created before
 # the corrected QMT intraday download boundary was deployed.
 _T_TRADE_REPLAY_SUPPLEMENT_SCOPE = "t-trade-replay-supplement-v2"
-
-
-def _failed_request_retry_scope(request_id: str) -> str:
-  """Derive one stable retry generation from the poisoned request it replaces."""
-
-  return f"market-data-failed-retry:{request_id}"
-
-
-async def recover_failed_market_data_request(
-  store: DurableRuntimeStore,
-  *,
-  payload: dict[str, Any],
-  request_id: str,
-  reopen_attempted: set[str],
-  retry_hops: int,
-  device_id: str | None = None,
-) -> tuple[str, int, bool] | None:
-  """Reopen one failed transfer or derive one bounded retry generation.
-
-  The returned boolean says whether a replacement request was selected.
-  ``None`` means the retry chain reached its hard safety bound.
-  """
-  if request_id not in reopen_attempted:
-    reopen_attempted.add(request_id)
-    try:
-      await store.reopen_failed_market_data_request(request_id)
-    except RuntimeError:
-      # Another consumer may have reopened or completed it after our read.
-      # Re-read before deriving a replacement generation.
-      current = await store.market_data_request(request_id)
-      current_status = str((current or {}).get("status") or "MISSING").upper()
-      if current is not None and current_status != "FAILED":
-        return request_id, retry_hops, False
-    else:
-      return request_id, retry_hops, False
-
-  if retry_hops >= _MAX_FAILED_REQUEST_RETRY_HOPS:
-    return None
-  create_kwargs: dict[str, Any] = {
-    "idempotency_scope": _failed_request_retry_scope(request_id),
-  }
-  if device_id is not None:
-    create_kwargs["device_id"] = device_id
-  source_request = await store.market_data_request(request_id)
-  if source_request is None:
-    return None
-  if source_request.get("development_only"):
-    create_kwargs["development_only"] = True
-  replacement_id = await store.create_market_data_request(
-    payload,
-    **create_kwargs,
-  )
-  return replacement_id, retry_hops + 1, True
 
 
 def build_sync_lock_key(complete_key: str) -> str:
@@ -206,9 +152,6 @@ async def queue_agent_market_data(
       device_id=device_id,
       idempotency_scope=idempotency_scope,
     )
-    reopen_attempted: set[str] = set()
-    retry_hops = 0
-    newly_queued_retry_ids: set[str] = set()
     while True:
       request = await store.market_data_request(request_id)
       status = str((request or {}).get("status") or "MISSING").upper()
@@ -224,37 +167,18 @@ async def queue_agent_market_data(
           "device_id": device_id,
           **ingestion_result,
         }
-      if status == "FAILED":
-        if request_id in newly_queued_retry_ids:
-          return {
-            "status": "failed",
-            "request_id": request_id,
-            "device_id": device_id,
-            "reason": (request or {}).get("processing_error"),
-          }
-        recovery = await recover_failed_market_data_request(
-          store,
-          payload=payload,
-          request_id=request_id,
-          reopen_attempted=reopen_attempted,
-          retry_hops=retry_hops,
-          device_id=device_id,
-        )
-        if recovery is None:
-          return {
-            "status": "failed",
-            "request_id": request_id,
-            "device_id": device_id,
-            "reason": "market-data failed-request retry chain exceeded safe limit",
-          }
-        request_id, retry_hops, replacement_created = recovery
-        if replacement_created:
-          replacement = await store.market_data_request(request_id)
-          if replacement is None:
-            raise RuntimeError("行情数据重试请求已不存在")
-          if str(replacement.get("status") or "MISSING").upper() != "FAILED":
-            newly_queued_retry_ids.add(request_id)
-        continue
+      if status == "BLOCKED":
+        return {
+          "status": "blocked",
+          "request_id": request_id,
+          "reason": request.get("processing_error"),
+        }
+      if status in {"FAILED", "CANCELLED"}:
+        return {
+          "status": status.lower(),
+          "request_id": request_id,
+          "reason": request.get("processing_error"),
+        }
       if status in {"UPLOADED", "PROCESSING"}:
         ingestion = await claim_ingest_and_finish_market_data_request(
           store,
@@ -272,19 +196,14 @@ async def queue_agent_market_data(
             "status": "success",
             "device_id": device_id,
           }
-        if ingestion.get("status") == "retryable":
+        if ingestion.get("status") in {"retryable", "unclaimed"}:
           return {
             **ingestion,
             "status": "queued",
             "device_id": device_id,
           }
-        # A reopened complete transfer can still fail validation or storage.
-        # Its terminal FAILED state is eligible for a fresh retry generation.
-        if request_id in reopen_attempted:
-          continue
         return {
           **ingestion,
-          "status": "failed",
           "device_id": device_id,
         }
       return {
@@ -301,7 +220,6 @@ async def request_agent_market_data(
   payload: dict[str, Any],
   timeout_seconds: float = 600,
   idempotency_scope: str = "",
-  retry_failed_requests: bool = True,
 ) -> dict[str, Any]:
   """Request, ingest, and terminally converge one idempotent XTData transfer."""
   from quantx_infrastructure.config.settings import settings
@@ -318,9 +236,6 @@ async def request_agent_market_data(
     if idempotency_scope:
       create_kwargs["idempotency_scope"] = idempotency_scope
     request_id = await store.create_market_data_request(payload, **create_kwargs)
-    reopen_attempted: set[str] = set()
-    retry_hops = 0
-    newly_queued_retry_ids: set[str] = set()
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
       request = await store.market_data_request(request_id)
@@ -338,38 +253,18 @@ async def request_agent_market_data(
           "request_id": request_id,
           **ingestion_result,
         }
-      if status == "FAILED":
-        # A request created during this invocation already received one fresh
-        # Agent attempt.  Return its concrete failure instead of spinning and
-        # producing an unbounded retry chain in one caller deadline.
-        if not retry_failed_requests or request_id in newly_queued_retry_ids:
-          return {
-            "status": "failed",
-            "request_id": request_id,
-            "reason": request.get("processing_error"),
-          }
-
-        recovery = await recover_failed_market_data_request(
-          store,
-          payload=payload,
-          request_id=request_id,
-          reopen_attempted=reopen_attempted,
-          retry_hops=retry_hops,
-        )
-        if recovery is None:
-          return {
-            "status": "failed",
-            "request_id": request_id,
-            "reason": "market-data failed-request retry chain exceeded safe limit",
-          }
-        request_id, retry_hops, replacement_created = recovery
-        if replacement_created:
-          replacement = await store.market_data_request(request_id)
-          if replacement is None:
-            raise RuntimeError("行情数据重试请求已不存在")
-          if str(replacement.get("status") or "MISSING").upper() != "FAILED":
-            newly_queued_retry_ids.add(request_id)
-        continue
+      if status == "BLOCKED":
+        return {
+          "status": "blocked",
+          "request_id": request_id,
+          "reason": request.get("processing_error"),
+        }
+      if status in {"FAILED", "CANCELLED"}:
+        return {
+          "status": status.lower(),
+          "request_id": request_id,
+          "reason": request.get("processing_error"),
+        }
       if status in {"UPLOADED", "PROCESSING"}:
         ingestion = await claim_ingest_and_finish_market_data_request(
           store,
@@ -383,12 +278,6 @@ async def request_agent_market_data(
             }
           if ingestion["status"] == "retryable":
             await asyncio.sleep(1)
-            continue
-          # A structurally complete transfer that was reopened can still fail
-          # checksum/decoding/persistence validation.  Let the next loop create
-          # a new deterministic Agent retry generation instead of reusing the
-          # same poisoned transfer forever.
-          if request_id in reopen_attempted:
             continue
           return ingestion
       await asyncio.sleep(1)

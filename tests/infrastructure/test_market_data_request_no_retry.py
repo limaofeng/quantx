@@ -3,27 +3,37 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from quantx_infrastructure.services import market_data_request_service as service
 
 
-async def test_failed_request_returns_once_without_reopening(monkeypatch):
+@pytest.mark.parametrize("status", ["FAILED", "BLOCKED", "CANCELLED"])
+@pytest.mark.parametrize("queued", [False, True])
+async def test_failed_request_returns_once_without_reopening(
+  monkeypatch, status, queued
+):
   store = SimpleNamespace(
     create_market_data_request=AsyncMock(return_value="request-1"),
     market_data_request=AsyncMock(
-      return_value={"status": "FAILED", "processing_error": "date unavailable"}
+      return_value={"status": status, "processing_error": "date unavailable"}
+    ),
+    available_market_data_device=AsyncMock(return_value="device-1"),
+    reopen_failed_market_data_request=AsyncMock(
+      side_effect=AssertionError("must not reopen")
     ),
     close=AsyncMock(),
   )
-  recover = AsyncMock(side_effect=AssertionError("retry was disabled"))
   monkeypatch.setattr(service, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(service, "recover_failed_market_data_request", recover)
-  result = await service.request_agent_market_data(
+  request = (
+    service.queue_agent_market_data if queued else service.request_agent_market_data
+  )
+  result = await request(
     payload={"operation": "bars"},
     idempotency_scope="fixture-no-retry",
-    retry_failed_requests=False,
   )
-  assert result["status"] == "failed"
+  assert result["status"] == status.lower()
+  assert result["request_id"] == "request-1"
   store.create_market_data_request.assert_awaited_once()
   store.market_data_request.assert_awaited_once()
-  recover.assert_not_awaited()
+  store.reopen_failed_market_data_request.assert_not_awaited()
   store.close.assert_awaited_once()

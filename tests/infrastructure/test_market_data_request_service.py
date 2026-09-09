@@ -184,7 +184,9 @@ async def test_cancelled_replay_waiter_rejoins_equivalent_nonterminal_request(
     "request_id": "shared-request",
     "records_saved": 1,
   }
-  assert [call.kwargs["idempotency_scope"] for call in store.create.await_args_list] == [
+  assert [
+    call.kwargs["idempotency_scope"] for call in store.create.await_args_list
+  ] == [
     "t-trade-replay-supplement-v2",
     "t-trade-replay-supplement-v2",
   ]
@@ -323,7 +325,9 @@ async def test_same_optional_gap_is_reused_and_ingested_on_next_replay(
   assert first["status"] == "queued"
   assert second["status"] == "success"
   assert second["records_saved"] == 10
-  assert [call.kwargs["idempotency_scope"] for call in store.create.await_args_list] == [
+  assert [
+    call.kwargs["idempotency_scope"] for call in store.create.await_args_list
+  ] == [
     "t-trade-replay-supplement-v2",
     "t-trade-replay-supplement-v2",
   ]
@@ -331,167 +335,6 @@ async def test_same_optional_gap_is_reused_and_ingested_on_next_replay(
     "600887.SH"
   }
   ingestion.assert_awaited_once_with(store, "request-1")
-
-
-@pytest.mark.asyncio
-async def test_optional_queue_reopens_failed_complete_transfer_and_succeeds(
-  monkeypatch,
-) -> None:
-  class FakeStore:
-    def __init__(self) -> None:
-      self.status = "FAILED"
-      self.create = AsyncMock(return_value="request-1")
-      self.reopen = AsyncMock(side_effect=self._reopen)
-      self.close = AsyncMock()
-
-    async def available_market_data_device(self):
-      return "device-1"
-
-    async def create_market_data_request(self, payload, **kwargs):
-      return await self.create(payload, **kwargs)
-
-    async def market_data_request(self, request_id):
-      assert request_id == "request-1"
-      return {"status": self.status, "processing_error": "transient write error"}
-
-    async def _reopen(self, request_id):
-      assert request_id == "request-1"
-      self.status = "UPLOADED"
-
-    async def reopen_failed_market_data_request(self, request_id):
-      return await self.reopen(request_id)
-
-  store = FakeStore()
-  ingestion = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-1",
-      "records_received": 2,
-      "records_saved": 2,
-    }
-  )
-  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(
-    market_data_request_service,
-    "claim_ingest_and_finish_market_data_request",
-    ingestion,
-  )
-
-  result = await market_data_request_service.queue_agent_market_data(
-    payload={"operation": "bars"},
-    idempotency_scope="stable-replay-scope",
-  )
-
-  store.reopen.assert_awaited_once_with("request-1")
-  ingestion.assert_awaited_once_with(store, "request-1")
-  assert result["status"] == "success"
-  assert result["request_id"] == "request-1"
-
-
-@pytest.mark.asyncio
-async def test_optional_queue_replaces_failed_incomplete_generation_and_succeeds(
-  monkeypatch,
-) -> None:
-  class FakeStore:
-    def __init__(self) -> None:
-      self.create = AsyncMock(side_effect=["request-1", "request-2"])
-      self.reopen = AsyncMock(
-        side_effect=RuntimeError("market-data request is not safely reopenable")
-      )
-      self.close = AsyncMock()
-
-    async def available_market_data_device(self):
-      return "device-1"
-
-    async def create_market_data_request(self, payload, **kwargs):
-      return await self.create(payload, **kwargs)
-
-    async def market_data_request(self, request_id):
-      if request_id == "request-1":
-        return {"status": "FAILED", "processing_error": "incomplete upload"}
-      assert request_id == "request-2"
-      return {"status": "UPLOADED"}
-
-    async def reopen_failed_market_data_request(self, request_id):
-      return await self.reopen(request_id)
-
-  store = FakeStore()
-  ingestion = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-2",
-      "records_received": 2,
-      "records_saved": 2,
-    }
-  )
-  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(
-    market_data_request_service,
-    "claim_ingest_and_finish_market_data_request",
-    ingestion,
-  )
-
-  result = await market_data_request_service.queue_agent_market_data(
-    payload={"operation": "bars"},
-    idempotency_scope="stable-replay-scope",
-  )
-
-  assert store.create.await_args_list[0].kwargs == {
-    "device_id": "device-1",
-    "idempotency_scope": "stable-replay-scope",
-  }
-  assert store.create.await_args_list[1].kwargs == {
-    "device_id": "device-1",
-    "idempotency_scope": "market-data-failed-retry:request-1",
-  }
-  store.reopen.assert_awaited_once_with("request-1")
-  ingestion.assert_awaited_once_with(store, "request-2")
-  assert result["status"] == "success"
-  assert result["request_id"] == "request-2"
-
-
-@pytest.mark.asyncio
-async def test_optional_queue_failed_generation_chain_is_bounded(monkeypatch) -> None:
-  class FakeStore:
-    def __init__(self) -> None:
-      self.create = AsyncMock(
-        side_effect=["request-1", "request-2", "request-3"]
-      )
-      self.reopen = AsyncMock(
-        side_effect=RuntimeError("market-data request is not safely reopenable")
-      )
-      self.close = AsyncMock()
-
-    async def available_market_data_device(self):
-      return "device-1"
-
-    async def create_market_data_request(self, payload, **kwargs):
-      return await self.create(payload, **kwargs)
-
-    async def market_data_request(self, request_id):
-      return {"status": "FAILED", "processing_error": f"poisoned {request_id}"}
-
-    async def reopen_failed_market_data_request(self, request_id):
-      return await self.reopen(request_id)
-
-  store = FakeStore()
-  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(market_data_request_service, "_MAX_FAILED_REQUEST_RETRY_HOPS", 2)
-
-  result = await market_data_request_service.queue_agent_market_data(
-    payload={"operation": "bars"},
-    idempotency_scope="stable-replay-scope",
-  )
-
-  assert result == {
-    "status": "failed",
-    "request_id": "request-3",
-    "device_id": "device-1",
-    "reason": "market-data failed-request retry chain exceeded safe limit",
-  }
-  assert store.create.await_count == 3
-  assert store.reopen.await_count == 3
-  store.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -544,117 +387,3 @@ async def test_agent_request_ingests_uploaded_transfer_before_returning(
     "records_received": 2,
     "records_saved": 2,
   }
-
-
-@pytest.mark.asyncio
-async def test_agent_request_reopens_complete_failed_transfer_before_retrying_agent(
-  monkeypatch,
-) -> None:
-  class FakeStore:
-    def __init__(self) -> None:
-      self.status = "FAILED"
-      self.create = AsyncMock(return_value="request-1")
-      self.reopen = AsyncMock(side_effect=self._reopen)
-
-    async def create_market_data_request(self, payload, **kwargs):
-      return await self.create(payload, **kwargs)
-
-    async def market_data_request(self, request_id):
-      assert request_id == "request-1"
-      return {"status": self.status, "processing_error": "transient write error"}
-
-    async def _reopen(self, request_id):
-      assert request_id == "request-1"
-      self.status = "UPLOADED"
-      return {"request_id": request_id, "status": "UPLOADED"}
-
-    async def reopen_failed_market_data_request(self, request_id):
-      return await self.reopen(request_id)
-
-    async def close(self):
-      return None
-
-  store = FakeStore()
-  converge = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-1",
-      "operation": "bars",
-      "records_received": 2,
-      "records_saved": 2,
-    }
-  )
-  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(
-    market_data_request_service,
-    "claim_ingest_and_finish_market_data_request",
-    converge,
-  )
-
-  result = await market_data_request_service.request_agent_market_data(
-    payload={"operation": "bars"},
-    timeout_seconds=1,
-  )
-
-  store.create.assert_awaited_once_with({"operation": "bars"})
-  store.reopen.assert_awaited_once_with("request-1")
-  converge.assert_awaited_once_with(store, "request-1")
-  assert result["status"] == "success"
-
-
-@pytest.mark.asyncio
-async def test_agent_request_replaces_incomplete_failed_transfer_generation(
-  monkeypatch,
-) -> None:
-  class FakeStore:
-    def __init__(self) -> None:
-      self.create = AsyncMock(side_effect=["request-1", "request-2"])
-      self.reopen = AsyncMock(
-        side_effect=RuntimeError("market-data request is not safely reopenable")
-      )
-
-    async def create_market_data_request(self, payload, **kwargs):
-      return await self.create(payload, **kwargs)
-
-    async def market_data_request(self, request_id):
-      if request_id == "request-1":
-        return {"status": "FAILED", "processing_error": "incomplete upload"}
-      assert request_id == "request-2"
-      return {"status": "UPLOADED"}
-
-    async def reopen_failed_market_data_request(self, request_id):
-      return await self.reopen(request_id)
-
-    async def close(self):
-      return None
-
-  store = FakeStore()
-  converge = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-2",
-      "operation": "bars",
-      "records_received": 2,
-      "records_saved": 2,
-    }
-  )
-  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(
-    market_data_request_service,
-    "claim_ingest_and_finish_market_data_request",
-    converge,
-  )
-
-  result = await market_data_request_service.request_agent_market_data(
-    payload={"operation": "bars"},
-    timeout_seconds=1,
-  )
-
-  assert store.create.await_args_list[0].args == ({"operation": "bars"},)
-  assert store.create.await_args_list[1].kwargs == {
-    "idempotency_scope": "market-data-failed-retry:request-1"
-  }
-  store.reopen.assert_awaited_once_with("request-1")
-  converge.assert_awaited_once_with(store, "request-2")
-  assert result["status"] == "success"
-  assert result["request_id"] == "request-2"

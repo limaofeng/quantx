@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from pydantic import ValidationError
+from quantx_application.market_data.ingestion import IngestionEvidenceConflict
 from quantx_contracts import (
   HISTORICAL_BAR_SUMMARY_RECORD_TYPE,
   HISTORICAL_KLINE_TRANSFER_REQUIRED_FIELDS,
@@ -33,11 +34,20 @@ from quantx_contracts import (
 )
 
 from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.database.timeseries_connection import NonRetryableWriteError
+from quantx_infrastructure.database.timeseries_operations import single_write_attempt
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
+from quantx_infrastructure.services.market_data_ingestion_progress import (
+  IngestionProgress,
+  ProgressStore,
+  evidence_hash,
+)
 from quantx_infrastructure.services.market_data_persistence_verification import (
   ExpectedBarKeyBatch,
+  MarketDataPersistenceBlockedError,
+  MarketDataPersistenceMismatchError,
   MarketDataPersistenceVerificationError,
   verify_persisted_bar_summaries,
 )
@@ -88,7 +98,7 @@ class MarketDataValidationError(RuntimeError):
   """The immutable request or transfer cannot ever pass validation."""
 
 
-class MarketDataTransferStore(Protocol):
+class MarketDataTransferStore(ProgressStore, Protocol):
   async def market_data_request(self, request_id: str) -> dict[str, Any] | None: ...
 
   async def market_data_transfers(
@@ -126,10 +136,7 @@ class MarketDataTransferStore(Protocol):
 
 SaveMarketData = Callable[..., Awaitable[dict[str, Any]]]
 VerifyPersistence = Callable[..., Awaitable[dict[str, Any]]]
-IngestRequest = Callable[
-  [MarketDataTransferStore, str],
-  Awaitable[dict[str, Any]],
-]
+IngestRequest = Callable[..., Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -1000,7 +1007,10 @@ def _save_market_data_period_sync(
     normalized = preprocess_market_data(period, market_data)
   service = HistoricalMarketDataService()
   # Includes the SDK serialization and synchronous database confirmation.
-  with market_data_stage("batch_write_call", period=period, records=len(normalized)):
+  with (
+    single_write_attempt(),
+    market_data_stage("batch_write_call", period=period, records=len(normalized)),
+  ):
     accepted = (
       service.bulk_save_ticks(normalized)
       if period == "tick"
@@ -1109,6 +1119,7 @@ async def _persist_validated_records(
   payload: dict[str, Any],
   expected_audit: dict[str, Any],
   save_period: SaveMarketData,
+  progress: IngestionProgress | None = None,
 ) -> dict[str, Any]:
   scope = _parse_bars_request(payload)
   validator = _BarTransferValidator(scope)
@@ -1122,9 +1133,10 @@ async def _persist_validated_records(
   batch_bytes = 0
   batch_period: str | None = None
   accepted = 0
+  block_index = 0
 
   async def flush() -> None:
-    nonlocal batch, batch_bytes, batch_period, accepted
+    nonlocal batch, batch_bytes, batch_period, accepted, block_index
     if not batch or batch_period is None:
       return
     rows_by_code: dict[str, list[dict[str, Any]]] = {}
@@ -1134,14 +1146,24 @@ async def _persist_validated_records(
         {key: value for key, value in record.items() if key not in {"code", "period"}}
       )
     market_data = {code: pd.DataFrame(rows) for code, rows in rows_by_code.items()}
-    result = await save_period(period=batch_period, market_data=market_data)
-    saved_count = int(result.get("saved_count", 0))
-    if result.get("status") != "success" or saved_count != len(batch):
-      raise RuntimeError(
-        f"{batch_period} market-data write was not fully accepted: "
-        f"expected={len(batch)} accepted={saved_count}"
-      )
+    digest = evidence_hash(batch)
+    already_written = progress is not None and await progress.confirmed(
+      block_index, digest, len(batch)
+    )
+    if already_written:
+      saved_count = len(batch)
+    else:
+      result = await save_period(period=batch_period, market_data=market_data)
+      saved_count = int(result.get("saved_count", 0))
+      if result.get("status") != "success" or saved_count != len(batch):
+        raise RuntimeError(
+          f"{batch_period} market-data write was not fully accepted: "
+          f"expected={len(batch)} accepted={saved_count}"
+        )
+      if progress is not None:
+        await progress.confirm(block_index, digest, saved_count)
     accepted += saved_count
+    block_index += 1
     batch = []
     batch_bytes = 0
     batch_period = None
@@ -1229,12 +1251,28 @@ async def ingest_uploaded_bar_request(
   *,
   save_period: SaveMarketData = save_market_data_period,
   verify_persistence: VerifyPersistence | None = None,
+  progress: IngestionProgress | None = None,
 ) -> dict[str, Any]:
   token = market_data_request_id.set(request_id)
   try:
     _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
     with market_data_stage("manifest_validation"):
       audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
+    if progress is not None:
+      await progress.apply(
+        "manifest",
+        sha256=evidence_hash(
+          {
+            "payload": payload,
+            "chunks": [
+              {k: v for k, v in item.items() if k != "storage_reference"}
+              for item in manifest
+            ],
+          }
+        ),
+      )
+      if progress.state["phase"] == "VALIDATE":
+        await progress.apply("advance", phase="WRITE")
 
     async def read_chunks() -> AsyncIterable[list[dict[str, Any]]]:
       budget = _TransferBudget()
@@ -1242,12 +1280,18 @@ async def ingest_uploaded_bar_request(
         yield await asyncio.to_thread(_read_transfer_chunk, item, budget)
 
     with market_data_stage("persist"):
-      persisted = await _persist_validated_records(
-        read_chunks(),
-        payload=payload,
-        expected_audit=audit,
-        save_period=save_period,
-      )
+      if progress is not None and progress.state["phase"] == "READBACK":
+        persisted = progress.state["write_result"]
+      else:
+        persisted = await _persist_validated_records(
+          read_chunks(),
+          payload=payload,
+          expected_audit=audit,
+          save_period=save_period,
+          progress=progress,
+        )
+        if progress is not None:
+          await progress.apply("advance", phase="READBACK", write_result=persisted)
     scope = _parse_bars_request(payload)
     verifier = verify_persistence or verify_persisted_bar_summaries
     with market_data_stage("readback"):
@@ -1256,6 +1300,7 @@ async def ingest_uploaded_bar_request(
         expected_key_batches=_uploaded_key_batches(manifest),
         start_ms=scope.start_ms,
         end_exclusive_ms=scope.end_exclusive_ms,
+        **({"max_attempts": 1, "retry_delays": ()} if progress is not None else {}),
       )
     records_verified = int(verification.get("records_verified", -1))
     summary_fields = (
@@ -1292,6 +1337,8 @@ async def ingest_uploaded_bar_request(
 async def ingest_uploaded_market_data_request(
   store: MarketDataTransferStore,
   request_id: str,
+  *,
+  progress: IngestionProgress | None = None,
 ) -> dict[str, Any]:
   """Route a validated upload to its single declared persistence destination."""
 
@@ -1315,7 +1362,7 @@ async def ingest_uploaded_market_data_request(
       )
     return await ingest_uploaded_sector_membership_request(store, request_id)
   if destination == "influxdb":
-    return await ingest_uploaded_bar_request(store, request_id)
+    return await ingest_uploaded_bar_request(store, request_id, progress=progress)
   raise _validation_error("market-data request destination is unsupported")
 
 
@@ -1381,14 +1428,22 @@ async def claim_ingest_and_finish_market_data_request(
   claim_token = await store.claim_market_data_request(request_id)
   if claim_token is None:
     return None
+  progress = IngestionProgress(store, request_id, claim_token)
   lease_task = asyncio.create_task(
     _renew_claim(store, request_id, claim_token),
     name=f"market-data-ingestion-lease:{request_id}",
   )
   ingestion_task: asyncio.Task[dict[str, Any]] | None = None
   try:
+    await progress.apply("begin")
+    if progress.state["blocked"]:
+      return {
+        "status": "blocked",
+        "request_id": request_id,
+        "reason": progress.state["reason_code"],
+      }
     ingestion_task = asyncio.create_task(
-      ingest_request(store, request_id),
+      ingest_request(store, request_id, progress=progress),
       name=f"market-data-ingestion:{request_id}",
     )
     done, _ = await asyncio.wait(
@@ -1438,7 +1493,7 @@ async def claim_ingest_and_finish_market_data_request(
         request_id,
       )
     raise
-  except MarketDataValidationError as exc:
+  except (MarketDataValidationError, IngestionEvidenceConflict) as exc:
     reason = f"{exc.__class__.__name__}: {exc}"
     try:
       await store.finish_market_data_request(
@@ -1467,18 +1522,45 @@ async def claim_ingest_and_finish_market_data_request(
     )
     return {"status": "failed", "request_id": request_id, "reason": reason}
   except Exception as exc:
-    reason = f"{exc.__class__.__name__}: {exc}"
-    await store.release_market_data_request_claim(
-      request_id,
-      claim_token=claim_token,
-      error=reason,
+    permanent = isinstance(
+      exc, (MarketDataPersistenceBlockedError, NonRetryableWriteError)
     )
-    logger.exception(
-      "Deferred retryable market-data ingestion request_id=%s reason=%s",
-      request_id,
-      reason,
+    reason = (
+      exc.reason_code
+      if isinstance(exc, MarketDataPersistenceBlockedError)
+      else "DEPENDENCY_WRITE_CAPACITY_BLOCKED"
+      if isinstance(exc, NonRetryableWriteError)
+      else "PERSISTED_DATA_NOT_VISIBLE"
+      if isinstance(exc, MarketDataPersistenceMismatchError)
+      else "DEPENDENCY_READBACK_UNAVAILABLE"
+      if progress.state.get("phase") == "READBACK"
+      else "DEPENDENCY_WRITE_UNAVAILABLE"
+      if progress.state.get("phase") == "WRITE"
+      else "DEPENDENCY_OPERATION_FAILED"
     )
-    return {"status": "retryable", "request_id": request_id, "reason": reason}
+    try:
+      state = await progress.apply(
+        "defer",
+        reason_code=reason,
+        blocked=permanent,
+        diagnostic=exc.diagnostic
+        if isinstance(exc, MarketDataPersistenceBlockedError)
+        else {},
+      )
+    except RuntimeError:
+      return {
+        "status": "unclaimed",
+        "request_id": request_id,
+        "reason": "INGESTION_CLAIM_LOST",
+      }
+    logger.warning(
+      "Market-data ingestion deferred request_id=%s reason=%s", request_id, reason
+    )
+    return {
+      "status": "blocked" if state["blocked"] else "retryable",
+      "request_id": request_id,
+      "reason": reason,
+    }
   finally:
     if ingestion_task is not None and not ingestion_task.done():
       ingestion_task.cancel()

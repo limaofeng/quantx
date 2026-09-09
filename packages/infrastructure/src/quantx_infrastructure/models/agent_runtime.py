@@ -19,6 +19,7 @@ from sqlalchemy import (
   literal,
   text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
 from quantx_infrastructure.models.execution_owner import (
@@ -674,6 +675,7 @@ class MarketDataRequest(Base, TimestampMixin):
   processing_error = Column(Text, nullable=True)
   processing_claim_token = Column(String(36), nullable=True)
   ingestion_result = Column(JSON, nullable=True)
+  ingestion_progress = Column(JSONB, nullable=True)
 
 
 class DevelopmentDataExport(Base):

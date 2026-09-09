@@ -147,8 +147,6 @@ async def _request_market_data_batch(
   request_kwargs: dict[str, Any] = {
     "idempotency_scope": (f"{idempotency_scope}:batch:{batch_index:04d}")
   }
-  if "tick" in periods:
-    request_kwargs["retry_failed_requests"] = False
   if agent_device_id:
     request_kwargs["agent_device_id"] = agent_device_id
   observer = observation.get()

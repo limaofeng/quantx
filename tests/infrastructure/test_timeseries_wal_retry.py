@@ -6,7 +6,28 @@ from quantx_infrastructure.database.timeseries_connection import (
   NonRetryableWriteError,
   is_fatal_wal_error,
 )
-from quantx_infrastructure.database.timeseries_operations import TimeSeriesOperations
+from quantx_infrastructure.database.timeseries_operations import (
+  TimeSeriesOperations,
+  single_write_attempt,
+)
+
+
+def test_durable_writer_owns_retry_budget_without_changing_other_callers(monkeypatch):
+  connection = SimpleNamespace(max_retries=3, retry_delay=1, _stats={"errors": 0})
+  operations = TimeSeriesOperations(connection)
+  calls, delays = [], []
+
+  def fail():
+    calls.append(1)
+    raise ConnectionError("temporary failure")
+
+  monkeypatch.setattr(timeseries_operations.time, "sleep", delays.append)
+  with single_write_attempt(), pytest.raises(ConnectionError):
+    operations._execute_with_retry(fail)
+  assert len(calls) == 1 and delays == []
+  with pytest.raises(ConnectionError):
+    operations._execute_with_retry(fail)
+  assert len(calls) == 5 and len(delays) == 3
 
 
 @pytest.mark.parametrize(
