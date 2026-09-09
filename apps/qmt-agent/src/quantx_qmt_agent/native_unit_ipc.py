@@ -20,6 +20,7 @@ from quantx_contracts.collection_permit import (
 )
 
 from .broker import MAX_MARKET_DATA_RECORDS, validate_market_data_request
+from .market_data_errors import XTDataUnavailableError
 
 MAX_UNIT_BATCH_BYTES = 1024 * 1024
 MAX_UNIT_BATCH_RECORDS = 128
@@ -27,6 +28,18 @@ MAX_UNIT_BATCH_RECORDS = 128
 
 class NativeUnitIPCStuck(RuntimeError):
   """The native transport cannot be proved stopped; do not restart a child."""
+
+
+class NativeUnitFailure(RuntimeError):
+  def __init__(self, reason_code):
+    if not isinstance(reason_code, str) or reason_code not in {
+      "XTDATA_UNAVAILABLE",
+      "COLLECTION_RESULT_INVALID",
+      "COLLECTION_NATIVE_FAILED",
+    }:
+      raise ValueError("unknown native unit failure reason")
+    self.reason_code = reason_code
+    super().__init__(reason_code)
 
 
 def _call_before_deadline(function, deadline, abort):
@@ -94,30 +107,43 @@ def serve_native_unit(connection, broker, message) -> None:
 
   if not permit.issued_at <= datetime.now(timezone.utc) < permit.expires_at:
     raise ValueError("native unit authorization expired before child entry")
-  records = iter(broker.iter_market_data(units[index]))
   try:
-    for record in records:
-      raw = _encoded(record)
-      if len(raw) > MAX_UNIT_BATCH_BYTES:
-        raise ValueError("native unit record exceeds IPC byte limit")
-      if batch and (
-        size + len(raw) > MAX_UNIT_BATCH_BYTES or len(batch) >= MAX_UNIT_BATCH_RECORDS
-      ):
+    records = iter(broker.iter_market_data(units[index]))
+    try:
+      for record in records:
+        raw = _encoded(record)
+        if len(raw) > MAX_UNIT_BATCH_BYTES:
+          raise ValueError("native unit record exceeds IPC byte limit")
+        if batch and (
+          size + len(raw) > MAX_UNIT_BATCH_BYTES or len(batch) >= MAX_UNIT_BATCH_RECORDS
+        ):
+          flush()
+        count += 1
+        if count > MAX_MARKET_DATA_RECORDS:
+          raise ValueError("native unit exceeds record limit")
+        batch.append(json.loads(raw))
+        size += len(raw)
+      if batch:
         flush()
-      count += 1
-      if count > MAX_MARKET_DATA_RECORDS:
-        raise ValueError("native unit exceeds record limit")
-      batch.append(json.loads(raw))
-      size += len(raw)
-    if batch:
-      flush()
-    connection.send(
-      {"type": "unit_complete", **identity, "sequence": sequence, "record_count": count}
+    finally:
+      close = getattr(records, "close", None)
+      if callable(close):
+        close()
+  except Exception as exc:
+    reason = (
+      "XTDATA_UNAVAILABLE"
+      if isinstance(exc, XTDataUnavailableError)
+      else "COLLECTION_RESULT_INVALID"
+      if isinstance(exc, (ValueError, TypeError, OverflowError))
+      else "COLLECTION_NATIVE_FAILED"
     )
-  finally:
-    close = getattr(records, "close", None)
-    if callable(close):
-      close()
+    connection.send(
+      {"type": "unit_error", **identity, "sequence": sequence, "reason_code": reason}
+    )
+    return
+  connection.send(
+    {"type": "unit_complete", **identity, "sequence": sequence, "record_count": count}
+  )
 
 
 def iter_native_unit(
@@ -160,8 +186,12 @@ def iter_native_unit(
       message.get(key) != value for key, value in identity.items()
     ):
       raise ValueError("native unit IPC response identity mismatch")
-    if message.get("sequence") != sequence:
+    if type(message.get("sequence")) is not int or message["sequence"] != sequence:
       raise ValueError("native unit IPC sequence mismatch")
+    if message.get("type") == "unit_error":
+      if set(message) != {"type", "request_id", "permit_id", "sequence", "reason_code"}:
+        raise ValueError("invalid native unit failure frame")
+      raise NativeUnitFailure(message["reason_code"])
     if message.get("type") == "unit_complete":
       if (
         type(message.get("record_count")) is not int or message["record_count"] != count

@@ -2259,7 +2259,7 @@ def _ensure_market_data_manager_connected(manager: Any) -> bool:
       return True
   elif bool(getattr(manager, "is_connected", True)):
     return True
-  from .miniqmt.data.data_manager import XTDataUnavailableError
+  from .market_data_errors import XTDataUnavailableError
 
   detail = str(getattr(manager, "last_connection_error", "") or "")
   suffix = f": {detail}" if detail else ""

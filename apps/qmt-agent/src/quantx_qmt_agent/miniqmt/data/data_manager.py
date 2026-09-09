@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable
 import pandas as pd
 from xtquant import xtdata
 
+from quantx_qmt_agent.market_data_errors import XTDataUnavailableError
 from quantx_qmt_agent.xtdata_history_download import (
   HistoryDownloadError,
   download_history,
@@ -19,10 +20,6 @@ from .connection_discovery import XTDataEndpoint, discover_xtdata_endpoint
 
 logger = logging.getLogger(__name__)
 XTDATA_RECONNECT_INTERVAL_SECONDS = 5.0
-
-
-class XTDataUnavailableError(RuntimeError):
-  """The local XTData service is not ready for a data operation."""
 
 
 def _codes(value: str | Iterable[str] | None) -> list[str]:

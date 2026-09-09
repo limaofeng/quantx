@@ -211,3 +211,119 @@ async def test_uncertain_child_startup_cannot_become_abort():
     with pytest.raises(module._FatalMarketDataPreparationError):
       pipeline._stop_failed_native(caught.value)
   runtime._shutdown_historical_worker_sync.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["dependency", "invalid", "native"])
+@pytest.mark.parametrize("after", [0, 150])
+def test_unit_error_keeps_identity_and_classification_without_provider_text(
+  monkeypatch, kind, after
+):
+  from quantx_qmt_agent.market_data_errors import XTDataUnavailableError
+  from quantx_qmt_agent.native_unit_ipc import NativeUnitFailure
+
+  parent, child = multiprocessing.Pipe()
+  error_type, reason = {
+    "dependency": (XTDataUnavailableError, "XTDATA_UNAVAILABLE"),
+    "invalid": (ValueError, "COLLECTION_RESULT_INVALID"),
+    "native": (RuntimeError, "COLLECTION_NATIVE_FAILED"),
+  }[kind]
+  closed, calls = [], []
+
+  class Broker:
+    data_manager = SimpleNamespace(close_connection=lambda: None)
+
+    def iter_market_data(self, payload):
+      calls.append(payload)
+      try:
+        if len(calls) > 1:
+          yield {"value": 7}
+          return
+        for index in range(after):
+          yield {"value": index}
+        raise error_type("private provider endpoint and credentials")
+      finally:
+        closed.append(True)
+
+  monkeypatch.setattr(historical_worker, "_create_historical_broker", Broker)
+  thread = threading.Thread(
+    target=run_historical_market_data_worker, args=(child, "xtdata")
+  )
+  thread.start()
+  values = []
+  try:
+    with pytest.raises(NativeUnitFailure) as caught:
+      values.extend(
+        iter_native_unit(parent, permit(), PAYLOAD, timeout=3, abort=parent.close)
+      )
+    assert caught.value.reason_code == reason and str(caught.value) == reason
+    assert len(values) == (128 if after else 0)
+    assert closed == [True]
+    assert list(
+      iter_native_unit(parent, permit(), PAYLOAD, timeout=3, abort=parent.close)
+    ) == [{"value": 7}]
+  finally:
+    parent.send({"type": "shutdown"})
+    thread.join(3)
+    parent.close()
+  assert not thread.is_alive()
+
+
+def test_iterator_close_error_cannot_publish_unit_complete(monkeypatch):
+  from quantx_qmt_agent.native_unit_ipc import NativeUnitFailure
+
+  parent, child = multiprocessing.Pipe()
+
+  class Records:
+    def __iter__(self):
+      return self
+
+    def __next__(self):
+      raise StopIteration
+
+    def close(self):
+      raise RuntimeError("close failed")
+
+  broker = SimpleNamespace(
+    iter_market_data=lambda _: Records(),
+    data_manager=SimpleNamespace(close_connection=lambda: None),
+  )
+  monkeypatch.setattr(historical_worker, "_create_historical_broker", lambda: broker)
+  thread = threading.Thread(
+    target=run_historical_market_data_worker, args=(child, "xtdata")
+  )
+  thread.start()
+  try:
+    with pytest.raises(NativeUnitFailure, match="COLLECTION_NATIVE_FAILED"):
+      list(iter_native_unit(parent, permit(), PAYLOAD, timeout=3, abort=parent.close))
+  finally:
+    parent.send({"type": "shutdown"})
+    thread.join(3)
+    parent.close()
+  assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+  "bad", ["extra", "sequence", "permit", "unknown-reason", "nested-reason"]
+)
+def test_invalid_failure_frame_cannot_become_a_native_fact(bad):
+  grant = permit()
+  frame = {
+    "type": "unit_error",
+    "request_id": str(grant.unit.request_id),
+    "permit_id": str(grant.permit_id),
+    "sequence": 0,
+    "reason_code": "XTDATA_UNAVAILABLE",
+  }
+  if bad == "extra":
+    frame["message"] = "unexpected provider text"
+  elif bad == "sequence":
+    frame["sequence"] = False
+  elif bad == "permit":
+    frame["permit_id"] = str(uuid4())
+  else:
+    frame["reason_code"] = "UNKNOWN" if bad == "unknown-reason" else {}
+  connection = SimpleNamespace(
+    send=lambda _: None, poll=lambda _: True, recv=lambda: frame
+  )
+  with pytest.raises(ValueError):
+    list(iter_native_unit(connection, grant, PAYLOAD, timeout=1, abort=lambda: None))
