@@ -1017,10 +1017,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   锁定清除令牌，迟到响应不恢复旧状态；只在审计内容匹配后显示排空完成。未消费复核可
   主动重新准备，不明确的确认禁止丢弃后另起请求。**22 项 Store 模拟器测试通过**，证据
   `.codex_screenshots/p6-legacy-native-store-final.log`；尚未接入可操作界面。
-  恢复接线发现两项剩余：锁定后须按 challenge ID 找回原命令的只读入口；Engine 当前
-  dispatch 异常会被 consumer 直接置 FAILED，提交后内存失效异常尚需自动重投。此前重试
-  证据是直接再次 dispatch，不能替代真实 consumer 恢复验收；客户端保持未知阻断。
-  下一步补恢复入口/消费者重投，再完成原生界面和排空后终结/解除旧绑定整链；不开放新源准入。
+  已修复 consumer 将提交后内存失效异常直接置 FAILED 的接线缺口：仅该阶段使用专用
+  可恢复异常，将原命令置 PENDING，按 1/2/4…30 秒上限退避；首次凭据、清单、窗口拒绝
+  不重投。状态写入仍使用数据库池争用重试，退出时保留 PROCESSING 可由新 consumer
+  恢复。**29 项调度/数据库争用回归通过**，含真实 consumer→claim→dispatch→重投→完成，
+  以及提交后争用退出→启动恢复的隔离测试；窗口结束后仍收敛，head 只推进一次。
+  证据 `.codex_screenshots/p6-legacy-consumer-recovery.log`；这是实际消费者代码配 SQLite、
+  合成时钟和内存端点的验证，不是完整 Engine 进程或生产并发验收。
+  同时 API 清单准备→确认→排空回归 **4 项通过**，证据 `p6-legacy-consumer-api-regression.log`。
+  下一步补锁定后按 challenge ID 找回原命令的只读入口，再完成原生界面和排空后终结/
+  解除旧绑定整链；客户端仍保持未知阻断，不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

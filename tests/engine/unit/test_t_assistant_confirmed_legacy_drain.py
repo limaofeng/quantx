@@ -21,13 +21,7 @@ from tests.infrastructure.test_t_entry_confirmation import signing_key as _signi
 signing_key = _signing_key
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-  "damage", [None, "unconsumed", "tampered", "command", "window", "runtime"]
-)
-async def test_confirmation_command_drains_and_recovers_after_commit(
-  monkeypatch, damage
-):
+async def seed_confirmed_legacy_drain(monkeypatch, damage=None):
   engine, sessions, now, digest = await seed_legacy_drain(monkeypatch)
   async with engine.begin() as connection:
     await connection.run_sync(lambda sync: EngineCommandOutbox.__table__.create(sync))
@@ -79,6 +73,17 @@ async def test_confirmation_command_drains_and_recovers_after_commit(
         processing_status="PENDING",
       )
     )
+  return engine, sessions, now
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "damage", [None, "unconsumed", "tampered", "command", "window", "runtime"]
+)
+async def test_confirmation_command_drains_and_recovers_after_commit(
+  monkeypatch, damage
+):
+  engine, sessions, now = await seed_confirmed_legacy_drain(monkeypatch, damage)
   clock = now + timedelta(minutes=2) if damage == "window" else now
   monkeypatch.setattr(command_processor, "AsyncSessionLocal", sessions)
   monkeypatch.setattr(command_processor, "utcnow", lambda: clock.replace(tzinfo=None))
@@ -110,7 +115,7 @@ async def test_confirmation_command_drains_and_recovers_after_commit(
         assert (await db.get(TTradeGlobalConfig, "head")).state_version == 1
     else:
       if damage == "runtime":
-        with pytest.raises(RuntimeError, match="synthetic runtime fault"):
+        with pytest.raises(command_processor.LegacyDrainRuntimeInvalidationPending):
           await dispatch()
       else:
         result = await dispatch()
@@ -128,4 +133,97 @@ async def test_confirmation_command_drains_and_recovers_after_commit(
       assert await command_processor._claim_next() is None
       assert invalidate.await_count == 2
   finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["recover", "invalid", "restart"])
+async def test_real_consumer_retries_only_committed_runtime_convergence(
+  monkeypatch, mode
+):
+  import asyncio
+
+  from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
+
+  engine, sessions, now = await seed_confirmed_legacy_drain(
+    monkeypatch, "tampered" if mode == "invalid" else None
+  )
+  stopped = asyncio.Event()
+  clock = now
+  monkeypatch.setattr(command_processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(command_processor, "utcnow", lambda: clock.replace(tzinfo=None))
+  invalidate = AsyncMock(
+    side_effect=[RuntimeError("synthetic runtime fault"), False, True]
+    if mode == "recover"
+    else [False, True]
+  )
+  monkeypatch.setattr(
+    command_processor,
+    "strategy_manager",
+    SimpleNamespace(
+      get_run=lambda _: object(),
+      executor=SimpleNamespace(invalidate_t_trade_entry_authority=invalidate),
+    ),
+  )
+  original_complete = command_processor._complete
+  original_reschedule = command_processor._reschedule_legacy_drain
+  delays = []
+
+  async def complete(*args, **kwargs):
+    await original_complete(*args, **kwargs)
+    stopped.set()
+
+  async def reschedule(identity):
+    nonlocal clock
+    if mode == "restart":
+      stopped.set()
+      raise SQLAlchemyTimeoutError("synthetic pool exhaustion")
+    await original_reschedule(identity)
+    async with sessions() as db:
+      row = await db.get(EngineCommandOutbox, identity)
+      assert (
+        row.processing_status == "PENDING"
+        and row.processed_at is None
+        and row.result is None
+      )
+      assert row.processing_error == "LEGACY_T_DRAIN_RUNTIME_INVALIDATION_PENDING"
+      delays.append((row.available_at - clock.replace(tzinfo=None)).total_seconds())
+      assert (await db.get(TTradeGlobalConfig, "head")).state_version == 2
+    assert await command_processor._claim_next() is None
+    clock += timedelta(minutes=2)
+
+  monkeypatch.setattr(command_processor, "_complete", complete)
+  monkeypatch.setattr(command_processor, "_reschedule_legacy_drain", reschedule)
+  try:
+    await asyncio.wait_for(command_processor.run_command_consumer(stopped), timeout=5)
+    if mode == "restart":
+      async with sessions() as db:
+        assert (
+          await db.get(EngineCommandOutbox, "command")
+        ).processing_status == "PROCESSING"
+        assert (await db.get(TTradeGlobalConfig, "head")).state_version == 2
+      # New consumer performs its real startup recovery; the original command
+      # and signed confirmation are reused after the maintenance window closed.
+      clock += timedelta(minutes=2)
+      stopped = asyncio.Event()
+      monkeypatch.setattr(
+        command_processor, "_reschedule_legacy_drain", original_reschedule
+      )
+      await asyncio.wait_for(command_processor.run_command_consumer(stopped), timeout=5)
+    async with sessions() as db:
+      row = await db.get(EngineCommandOutbox, "command")
+      head = await db.get(TTradeGlobalConfig, "head")
+      assert head.strategy_run_id == "plan-1"
+      if mode == "invalid":
+        assert row.processing_status == "FAILED" and row.processing_attempts == 1
+        assert head.state_version == 1
+        invalidate.assert_not_awaited()
+      else:
+        assert row.processing_status == "SUCCEEDED"
+        assert row.processing_attempts == (3 if mode == "recover" else 2)
+        assert head.state_version == 2
+        assert row.result["cancelled_intent_ids"] == ["unsubmitted"]
+    assert delays == ([1, 2] if mode == "recover" else [])
+  finally:
+    stopped.set()
     await engine.dispose()

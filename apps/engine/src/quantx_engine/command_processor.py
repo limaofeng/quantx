@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
 
@@ -60,6 +60,13 @@ _DATABASE_CONTENTION_RETRY_SECONDS = 0.25
 _DATABASE_CONTENTION_MAX_RETRY_SECONDS = 2.0
 
 
+class LegacyDrainRuntimeInvalidationPending(RuntimeError):
+  """The durable entry fence committed; only local runtime convergence remains."""
+
+  def __init__(self):
+    super().__init__("LEGACY_T_DRAIN_RUNTIME_INVALIDATION_PENDING")
+
+
 async def _wait_for_database_retry(
   stopped: asyncio.Event,
   *,
@@ -80,13 +87,17 @@ async def _complete_with_database_retry(
   *,
   result: Optional[dict[str, Any]] = None,
   error: Optional[str] = None,
+  retry_legacy_drain: bool = False,
 ) -> bool:
-  """Persist one terminal command result without crashing on pool contention."""
+  """Persist terminal/deferred command state despite database pool contention."""
 
   delay = _DATABASE_CONTENTION_RETRY_SECONDS
   while not stopped.is_set():
     try:
-      await _complete(message_id, result=result, error=error)
+      if retry_legacy_drain:
+        await _reschedule_legacy_drain(message_id)
+      else:
+        await _complete(message_id, result=result, error=error)
       return True
     except SQLAlchemyTimeoutError as exc:
       logger.warning(
@@ -270,13 +281,18 @@ async def _dispatch(
           account_id=account_id,
           now=utcnow().replace(tzinfo=UTC),
         )
-      if strategy_manager.get_run(result["run_id"]) is not None:
-        if not await strategy_manager.executor.invalidate_t_trade_entry_authority(
-          result["run_id"],
-          account_id=account_id,
-          reason="LEGACY_T_ENTRY_DRAINING",
-        ):
-          raise ValueError("LEGACY_T_DRAIN_RUNTIME_INVALIDATION_REQUIRED")
+      try:
+        if strategy_manager.get_run(result["run_id"]) is not None:
+          if not await strategy_manager.executor.invalidate_t_trade_entry_authority(
+            result["run_id"],
+            account_id=account_id,
+            reason="LEGACY_T_ENTRY_DRAINING",
+          ):
+            raise LegacyDrainRuntimeInvalidationPending()
+      except Exception as exc:
+        # Only this post-commit phase is retryable. Invalid credentials, changed
+        # obligations or expired first-use windows remain terminal failures.
+        raise LegacyDrainRuntimeInvalidationPending() from exc
     return result
   if command_type == "T_ASSISTANT_PREPARE_LIVE_AUTO_SUCCESSOR":
     from .t_assistant_live_successor import dispatch_live_auto_successor
@@ -702,6 +718,24 @@ async def _claim_next() -> Optional[tuple[str, str, dict[str, Any]]]:
     return command.message_id, command.command_type, dict(command.payload or {})
 
 
+async def _reschedule_legacy_drain(message_id: str) -> None:
+  async with AsyncSessionLocal() as db, db.begin():
+    command = await db.get(EngineCommandOutbox, message_id, with_for_update=True)
+    if (
+      command is None
+      or command.command_type != "T_ASSISTANT_CONFIRM_LEGACY_DRAIN"
+      or command.processing_status != "PROCESSING"
+    ):
+      raise ValueError("LEGACY_T_DRAIN_RETRY_COMMAND_CONFLICT")
+    attempts = max(1, int(command.processing_attempts or 0))
+    delay = min(30, 2 ** min(attempts - 1, 5))
+    command.processing_status = "PENDING"
+    command.processing_error = "LEGACY_T_DRAIN_RUNTIME_INVALIDATION_PENDING"
+    command.available_at = utcnow() + timedelta(seconds=delay)
+    command.processed_at = None
+    command.result = None
+
+
 async def _complete(
   message_id: str,
   *,
@@ -767,6 +801,8 @@ async def run_command_consumer(stopped: asyncio.Event) -> None:
     message_id, command_type, payload = claimed
     try:
       result = await _dispatch(command_type, payload, command_id=message_id)
+    except LegacyDrainRuntimeInvalidationPending:
+      await _complete_with_database_retry(stopped, message_id, retry_legacy_drain=True)
     except Exception as exc:
       await _complete_with_database_retry(stopped, message_id, error=str(exc))
     else:
