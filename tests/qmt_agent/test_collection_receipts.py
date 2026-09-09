@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -7,6 +8,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from quantx_contracts.collection_permit import CollectionPermit, CollectionUnit
+from quantx_contracts.collection_receipt import CollectionAbort
 from quantx_qmt_agent.collection_receipts import (
   CollectionReceiptRejected,
   HistoryReceiptClient,
@@ -120,6 +122,44 @@ async def test_token_refresh_is_inside_start_deadline():
     with pytest.raises(TimeoutError):
       await receipts.start(permit)
   assert sent == []
+
+
+async def test_abort_replays_expired_permit_and_waits_for_worker():
+  permit, sent = grant(), []
+  permit = permit.model_copy(
+    update={
+      "issued_at": permit.issued_at - timedelta(minutes=1),
+      "expires_at": permit.expires_at - timedelta(minutes=1),
+    }
+  )
+  failure = CollectionAbort(
+    unit=permit.unit,
+    native_exit="CONFIRMED_STOPPED",
+    reason_code="COLLECTION_NATIVE_FAILED",
+  )
+
+  def handler(request):
+    sent.append(request)
+    if request.method == "POST":
+      assert json.loads(request.content)["abort"] == failure.model_dump(mode="json")
+    return httpx.Response(
+      202 if request.method == "POST" else 200,
+      json=response(
+        permit,
+        event="ABORT",
+        status="PENDING" if request.method == "POST" else "ACCEPTED",
+      ),
+    )
+
+  async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    receipts = HistoryReceiptClient(
+      client, api_url="http://test", history_token=AsyncMock(return_value="token")
+    )
+    await receipts.abort(permit, failure)
+    with pytest.raises(ValueError, match="does not match"):
+      await receipts.abort(permit, failure.model_copy(update={"unit": grant().unit}))
+  assert [request.method for request in sent] == ["POST", "GET"]
+  assert sent[1].url.path.endswith("/receipts/ABORT")
 
 
 async def test_transport_failure_does_not_retry_or_replace_permit():

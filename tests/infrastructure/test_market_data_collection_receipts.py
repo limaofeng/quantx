@@ -9,11 +9,16 @@ from uuid import uuid4
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from quantx_contracts.collection_receipt import CollectionCompletion, CollectionReceipt
+from quantx_contracts.collection_receipt import (
+  CollectionAbort,
+  CollectionCompletion,
+  CollectionReceipt,
+)
 from quantx_infrastructure.services.market_data_collection_receipt_store import (
   CollectionReceiptConflict,
   CollectionReceiptStore,
 )
+from sqlalchemy import text
 
 from tests.infrastructure.test_market_data_collection_permits import (  # noqa: F401
   durable_store,
@@ -22,6 +27,18 @@ from tests.infrastructure.test_market_data_collection_permits import (  # noqa: 
   workers,
 )
 from tests.infrastructure.test_market_gateway_auth import gateway_auth  # noqa: F401
+
+
+def abort_migration(sync):
+  path = (
+    Path(__file__).resolve().parents[2]
+    / "packages/infrastructure/alembic/versions/20260910_0075_market_data_collection_abort.py"
+  )
+  spec = importlib.util.spec_from_file_location("abort_migration", path)
+  migration = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(migration)
+  migration.op = Operations(MigrationContext.configure(sync))
+  return migration
 
 
 @pytest.fixture
@@ -44,6 +61,7 @@ async def receipts(permits):  # noqa: F811
       create_index=operations.create_index,
     )
     migration.upgrade()
+    abort_migration(sync).upgrade()
 
   async with first.engine.begin() as connection:
     await connection.run_sync(upgrade)
@@ -61,6 +79,13 @@ def receipt(grant, event):
       if event == "FINISH"
       else None
     ),
+    abort=CollectionAbort(
+      unit=grant.unit,
+      native_exit="CONFIRMED_STOPPED",
+      reason_code="COLLECTION_NATIVE_FAILED",
+    )
+    if event == "ABORT"
+    else None,
   )
 
 
@@ -95,6 +120,160 @@ async def test_received_start_is_pending_until_worker_commits(receipts):
   assert await state(first, grant) == "STARTED"
   assert (await accept(store, grant, "START")).status == "ACCEPTED"
   assert await first.consume_collection_receipts() == 0
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_abort_releases_slot_without_counting_completion(receipts, started):
+  import json
+
+  from quantx_infrastructure.services.market_data_collection_permit_store import (
+    CollectionPermitStore,
+  )
+
+  first, _, store, grant = receipts
+  if started:
+    await accept(store, grant, "START")
+    await store.consume(first)
+  assert (await accept(store, grant, "ABORT")).status == "PENDING"
+  assert await state(first, grant) == ("STARTED" if started else "ISSUED")
+  assert await store.consume(first) == 1
+  assert await state(first, grant) == "ABORTED"
+  row = (
+    await execute(
+      first,
+      "SELECT status,processing_error FROM market_data_request WHERE request_id=:id",
+      {"id": str(grant.unit.request_id)},
+    )
+  ).one()
+  assert row.status == "FAILED"
+  assert json.loads(row.processing_error) == {
+    "reason_code": "COLLECTION_NATIVE_FAILED",
+    "collection_permit_id": str(grant.permit_id),
+  }
+  assert (
+    await execute(first, "SELECT next_unit_index FROM market_data_collection_plan")
+  ).scalar_one() == 0
+  assert (
+    await execute(
+      first, "SELECT production_streak FROM market_data_collection_schedule"
+    )
+  ).scalar_one() == 0
+  assert (await accept(store, grant, "ABORT")).status == "ACCEPTED"
+  assert await store.consume(first) == 0
+  # An unrelated queued source can now use the sole native slot.
+  new_id = str(uuid4())
+  await execute(
+    first,
+    """INSERT INTO market_data_request(request_id,device_id,request_payload,status)
+    SELECT :id,device_id,request_payload,'QUEUED' FROM market_data_request WHERE request_id=:old""",
+    {"id": new_id, "old": str(grant.unit.request_id)},
+  )
+  permit_store = CollectionPermitStore(first)
+  await permit_store.register(new_id)
+  successor = await permit_store.issue_next(
+    device_id=str(grant.device_id), collection_allowed=True, development_allowed=True
+  )
+  assert str(successor.unit.request_id) == new_id
+
+
+async def test_conflicting_abort_is_rejected(receipts):
+  _, _, store, grant = receipts
+  await accept(store, grant, "ABORT")
+  changed = receipt(grant, "ABORT").model_dump(mode="json")
+  changed["abort"]["reason_code"] = "COLLECTION_RESULT_INVALID"
+  with pytest.raises(CollectionReceiptConflict):
+    await store.accept(
+      permit_id=str(grant.permit_id),
+      device_id=str(grant.device_id),
+      receipt=CollectionReceipt.model_validate(changed),
+    )
+
+
+async def test_migration_preserves_existing_receipt_idempotency(receipts):
+  first, _, store, grant = receipts
+  await accept(store, grant, "START")
+  async with first.engine.begin() as connection:
+    await connection.run_sync(lambda sync: abort_migration(sync).downgrade())
+  old = (
+    await execute(first, "SELECT payload FROM market_data_collection_receipt")
+  ).scalar_one()
+  assert "abort" not in old
+  async with first.engine.begin() as connection:
+    await connection.run_sync(lambda sync: abort_migration(sync).upgrade())
+  assert (await accept(store, grant, "START")).status == "PENDING"
+  assert await store.consume(first) == 1
+  assert await state(first, grant) == "STARTED"
+
+
+async def test_migration_refuses_to_discard_abort_evidence(receipts):
+  first, _, store, grant = receipts
+  await accept(store, grant, "ABORT")
+  await store.consume(first)
+  with pytest.raises(RuntimeError, match="persisted collection abort"):
+    async with first.engine.begin() as connection:
+      await connection.run_sync(lambda sync: abort_migration(sync).downgrade())
+  assert await state(first, grant) == "ABORTED"
+  assert (await accept(store, grant, "ABORT")).status == "ACCEPTED"
+
+
+@pytest.mark.parametrize("status", ["UPLOADED", "PROCESSING", "COMPLETED"])
+async def test_abort_cannot_overwrite_uploaded_request(receipts, status):
+  first, _, store, grant = receipts
+  await accept(store, grant, "START")
+  await store.consume(first)
+  await accept(store, grant, "ABORT")
+  await execute(
+    first,
+    "UPDATE market_data_request SET status=:status WHERE request_id=:id",
+    {"status": status, "id": str(grant.unit.request_id)},
+  )
+  assert await store.consume(first) == 1
+  assert (await accept(store, grant, "ABORT")).status == "REJECTED"
+  assert await state(first, grant) == "STARTED"
+  assert (
+    await execute(
+      first,
+      "SELECT status FROM market_data_request WHERE request_id=:id",
+      {"id": str(grant.unit.request_id)},
+    )
+  ).scalar_one() == status
+
+
+async def test_finished_permit_rejects_abort(receipts):
+  first, _, store, grant = receipts
+  for event in ["START", "FINISH"]:
+    await accept(store, grant, event)
+    await store.consume(first)
+  with pytest.raises(CollectionReceiptConflict):
+    await accept(store, grant, "ABORT")
+  assert await state(first, grant) == "FINISHED"
+
+
+async def test_abort_fence_failure_rolls_back_request_and_permit(receipts, monkeypatch):
+  first, _, store, grant = receipts
+  await accept(store, grant, "ABORT")
+  original = first._guard_ingestion_owner
+
+  async def guard(connection):
+    await original(connection)
+    value = await connection.scalar(
+      text("SELECT state FROM market_data_collection_permit")
+    )
+    if value == "ABORTED":
+      raise RuntimeError("lost lease after abort")
+
+  monkeypatch.setattr(first, "_guard_ingestion_owner", guard)
+  with pytest.raises(RuntimeError, match="lost lease"):
+    await store.consume(first)
+  assert await state(first, grant) == "ISSUED"
+  assert (
+    await execute(
+      first,
+      "SELECT status FROM market_data_request WHERE request_id=:id",
+      {"id": str(grant.unit.request_id)},
+    )
+  ).scalar_one() == "DELIVERED"
+  assert (await accept(store, grant, "ABORT")).status == "PENDING"
 
 
 async def test_finish_updates_cursor_counter_and_receipt_atomically(receipts):

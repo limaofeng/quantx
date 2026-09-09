@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import httpx
 from quantx_contracts.collection_permit import CollectionPermit
 from quantx_contracts.collection_receipt import (
+  CollectionAbort,
   CollectionCompletion,
   CollectionReceipt,
   CollectionReceiptStatus,
@@ -56,6 +57,14 @@ class HistoryReceiptClient:
         ),
       ),
       timeout=30,
+    )
+
+  async def abort(self, permit: CollectionPermit, failure: CollectionAbort) -> None:
+    failure = CollectionAbort.model_validate(failure.model_dump(mode="json"))
+    if failure.unit != permit.unit:
+      raise ValueError("collection failure does not match permit")
+    await self._confirm(
+      permit, CollectionReceipt(event="ABORT", abort=failure), timeout=30
     )
 
   async def _confirm(self, permit, receipt, *, timeout):

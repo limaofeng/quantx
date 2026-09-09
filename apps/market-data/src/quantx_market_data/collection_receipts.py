@@ -58,7 +58,9 @@ async def receive(permit_id: UUID, request: Request):
 
 
 @router.get("/{permit_id}/receipts/{event}", response_model=CollectionReceiptStatus)
-async def status(permit_id: UUID, event: Literal["START", "FINISH"], request: Request):
+async def status(
+  permit_id: UUID, event: Literal["START", "FINISH", "ABORT"], request: Request
+):
   try:
     device_id = await _identity(request)
     return await CollectionReceiptStore(request.app.state.store.engine).status(

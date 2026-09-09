@@ -7,6 +7,7 @@ is supplied by the history transport. The store does not infer those facts.
 """
 
 import asyncio
+import json
 from uuid import UUID, uuid4
 
 from quantx_contracts.collection_permit import (
@@ -16,6 +17,7 @@ from quantx_contracts.collection_permit import (
   native_payload_sha256,
   plan_historical_work_units,
 )
+from quantx_contracts.collection_receipt import CollectionAbort
 from sqlalchemy import text
 
 from quantx_infrastructure.services.market_data_capacity import (
@@ -388,14 +390,14 @@ class CollectionPermitStore:
       )
 
   async def acknowledge(
-    self, *, permit_id: str, device_id: str, event: str, completion=None
+    self, *, permit_id: str, device_id: str, event: str, completion=None, abort=None
   ) -> bool:
     """Apply an authenticated native start/completion fact under the live owner.
 
     Duplicate facts are harmless. FINISH may refer to a previous owner's STARTED
     grant; takeover alone cannot prove that its native call has stopped.
     """
-    if event not in {"START", "FINISH"}:
+    if event not in {"START", "FINISH", "ABORT"}:
       raise ValueError("unknown collection event")
     async with self.worker.engine.begin() as connection:
       await self._lock(connection)
@@ -405,13 +407,21 @@ class CollectionPermitStore:
         device_id=device_id,
         event=event,
         completion=completion,
+        abort=abort,
       )
 
   async def apply_receipt(
-    self, connection, *, permit_id: str, device_id: str, event: str, completion=None
+    self,
+    connection,
+    *,
+    permit_id: str,
+    device_id: str,
+    event: str,
+    completion=None,
+    abort=None,
   ) -> bool:
     """Apply a fact inside the caller's fenced receipt transaction."""
-    if event not in {"START", "FINISH"}:
+    if event not in {"START", "FINISH", "ABORT"}:
       raise ValueError("unknown collection event")
     row = (
       (
@@ -430,6 +440,53 @@ class CollectionPermitStore:
     grant = CollectionPermit.model_validate(row["permit_payload"])
     if grant.device_id != UUID(device_id):
       raise ValueError("collection device mismatch")
+    if event == "ABORT":
+      if abort is not None:
+        abort = CollectionAbort.model_validate(abort.model_dump(mode="json"))
+      if abort is None or abort.unit != grant.unit or completion is not None:
+        raise ValueError("collection abort evidence does not match the permit")
+      if row["state"] == "ABORTED":
+        await self.worker._guard_ingestion_owner(connection)
+        return False
+      if row["state"] not in {"ISSUED", "STARTED"}:
+        raise ValueError("collection permit cannot be aborted")
+      request_status = (
+        await connection.execute(
+          text(
+            "SELECT status FROM market_data_request WHERE request_id=:id FOR UPDATE"
+          ),
+          {"id": str(grant.unit.request_id)},
+        )
+      ).scalar_one()
+      if request_status not in {"QUEUED", "DELIVERED", "RECEIVING", "FAILED"}:
+        raise ValueError("collection abort cannot replace an uploaded result")
+      await connection.execute(
+        text("""
+        UPDATE market_data_request SET status='FAILED', processing_error=:reason,
+          completed_at=timezone('UTC',clock_timestamp()), updated_at=timezone('UTC',clock_timestamp())
+        WHERE request_id=:request AND status <> 'FAILED'
+      """),
+        {
+          "request": str(grant.unit.request_id),
+          "reason": json.dumps(
+            {
+              "reason_code": abort.reason_code,
+              "collection_permit_id": str(grant.permit_id),
+            }
+          ),
+        },
+      )
+      await connection.execute(
+        text("""
+        UPDATE market_data_collection_permit SET state='ABORTED',finished_at=clock_timestamp()
+        WHERE permit_id=:id
+      """),
+        {"id": str(grant.permit_id)},
+      )
+      await self.worker._guard_ingestion_owner(connection)
+      return True
+    if abort is not None:
+      raise ValueError("only ABORT can carry exit evidence")
     if event == "FINISH" and (completion is None or completion.unit != grant.unit):
       raise ValueError("collection completion evidence does not match the permit")
     if event == "START" and completion is not None:

@@ -61,6 +61,11 @@ class CollectionReceiptStore:
         or row["state"] not in {"STARTED", "FINISHED"}
       ):
         raise CollectionReceiptConflict("completion does not match a started permit")
+      if receipt.abort is not None and (
+        receipt.abort.unit != permit.unit
+        or row["state"] not in {"ISSUED", "STARTED", "ABORTED"}
+      ):
+        raise CollectionReceiptConflict("abort does not match an unfinished permit")
       payload = receipt.model_dump(mode="json")
       await connection.execute(
         text("""
@@ -150,6 +155,7 @@ class CollectionReceiptStore:
               device_id=row["device_id"],
               event=receipt.event,
               completion=receipt.completion,
+              abort=receipt.abort,
             )
         except ValueError:
           reason = "COLLECTION_RECEIPT_REJECTED"
