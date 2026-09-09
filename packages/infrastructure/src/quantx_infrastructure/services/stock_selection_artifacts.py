@@ -430,6 +430,14 @@ def sanitize_selection_metrics(
   spec_hash = _hash_field(value.get("spec_hash"), "metrics.spec_hash")
   coordinate_hash = _hash_field(value.get("coordinate_hash"), "metrics.coordinate_hash")
   config_hash = _hash_field(value.get("config_hash"), "metrics.config_hash")
+  parent = value.get("parent_development")
+  if not isinstance(parent, dict) or not isinstance(parent.get("run_id"), str) or not _RUN_ID.fullmatch(parent["run_id"]):
+    raise SelectionArtifactError("模型评估缺少有效 DEVELOPMENT 父运行")
+  parent_projection = {
+    "run_id": parent["run_id"],
+    "metrics_sha256": _hash_field(parent.get("metrics_sha256"), "parent_development.metrics_sha256"),
+    "lock_sha256": _hash_field(parent.get("lock_sha256"), "parent_development.lock_sha256"),
+  }
   if value.get("calibrator_version") != CALIBRATOR_VERSION:
     raise SelectionArtifactError("模型评估校准器版本不一致")
   validation = value.get("validation")
@@ -563,6 +571,7 @@ def sanitize_selection_metrics(
     "validation": validation_projection,
     "frozen_test": frozen_projection,
     "probability_disagreement": disagreement_projection,
+    "parent_development": parent_projection,
     "gates": {name: gates[name] for name in gate_names} | {"conclusion": normalized_conclusion, "registerable": registerable},
     "conclusion": normalized_conclusion,
     "registerable": registerable,

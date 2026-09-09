@@ -39,6 +39,8 @@ capability，再通过 `previewStockSelectionTraining(input)` 固化一次预检
 登记真源；运行目录必须是 `.runtime/research-runs/<run_id>` 的安全子目录。
 登记还要求 DEVELOPMENT 父运行已成功，manifest 的 `parent_run_id` 与 metrics 的
 `parent_development.run_id` 均匹配数据库关联；父运行失败、未结束或关联不一致时拒绝登记。
+制品加载器校验并保留 `parent_development` 的运行标识、`metrics_sha256` 和
+`lock_sha256`，不丢弃登记所需的父级证据；缺失或格式无效时拒绝加载。
 
 最终评估详情分开展示 probability、ranking、data、stability、disagreement 和
 gates 证据。缺失证据表示“不可用”，不能转换成零或通过门禁。公共 GraphQL 投影

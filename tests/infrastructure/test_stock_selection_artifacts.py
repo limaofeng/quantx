@@ -89,6 +89,7 @@ def _valid_artifact(directory: Path) -> Path:
   model_version = "next-day-up-v1-0123456789abcdef"
   metrics = {
     "schema_version": 2,
+    "parent_development": {"run_id": "development-run", "metrics_sha256": "1" * 64, "lock_sha256": "2" * 64},
     "model_version": model_version,
     "selected_family": "LOGISTIC",
     "spec_hash": "a" * 64,
@@ -329,6 +330,87 @@ def _refresh_manifest_hash(directory: Path, relative: str) -> None:
       item["sha256"] = file_sha256(path)
       break
   _write_json(manifest_path, manifest)
+
+
+@pytest.mark.asyncio
+async def test_validated_final_artifact_registration_requires_explicit_promotion(tmp_path):
+  from datetime import datetime, timezone
+  from types import SimpleNamespace
+  from unittest.mock import AsyncMock
+
+  from quantx_api.stock_selection_model_service import (
+    StockSelectionModelService,
+    _stable_run_key,
+  )
+  from quantx_infrastructure.database.relational_base import Base
+  from quantx_infrastructure.models.stock_selection import StockSelectionModelVersion
+  from quantx_infrastructure.repositories.stock_selection_repository import (
+    StockSelectionRepository,
+  )
+  from sqlalchemy import func, select
+  from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+  directory = _valid_artifact(tmp_path / "final-run")
+  manifest_path = directory / "manifest.json"
+  manifest = json.loads(manifest_path.read_text())
+  manifest["parent_run_id"] = "development-run"
+  _write_json(manifest_path, manifest)
+  metrics = json.loads((directory / "metrics.json").read_text())
+  metrics["parent_development"]["run_id"] = "development-run"
+  _write_json(directory / "metrics.json", metrics)
+  _refresh_manifest_hash(directory, "metrics.json")
+  run_key = _stable_run_key(study_id="next-day-selection", version="v1", run_id=directory.name)
+  row = SimpleNamespace(
+    run_id=directory.name, run_key=run_key, run_kind="FINAL_EVALUATION",
+    status="SUCCEEDED", spec_id="final-spec", parent_run_id="development-run",
+    artifact_manifest_sha256=file_sha256(manifest_path),
+  )
+  final_spec = SimpleNamespace(run_kind="FINAL_EVALUATION", spec_hash="a" * 64,
+                               coordinate_hash="b" * 64, requested_backend="CPU", resolved_backend="CPU")
+  parent_spec = SimpleNamespace(run_kind="DEVELOPMENT", coordinate_hash="b" * 64)
+  training = SimpleNamespace(
+    get_run_by_run_key=AsyncMock(return_value=row),
+    get_run=AsyncMock(return_value=SimpleNamespace(run_kind="DEVELOPMENT", status="SUCCEEDED", spec_id="parent-spec")),
+    get_spec=AsyncMock(side_effect=lambda key: final_spec if key == "final-spec" else parent_spec),
+  )
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  try:
+    async with engine.begin() as connection:
+      await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[StockSelectionModelVersion.__table__]))
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as db:
+      repository = StockSelectionRepository(db)
+      service = StockSelectionModelService(repository, training, runs_root=tmp_path)
+      # Actual strict artifact loader and actual database writes; no model activation.
+      model = await service.register(run_key)
+      assert model.stage == "CANDIDATE"
+      assert await repository.runtime_models() == []
+      repeated = await service.register(run_key)
+      assert repeated.model_version == model.model_version
+      assert await db.scalar(select(func.count()).select_from(StockSelectionModelVersion)) == 1
+      now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+      model = await repository.set_model_stage(model.model_version, "SHADOW", expected_version=model.state_version, approved_by="isolated-test", approved_at=now)
+      model = await repository.set_model_stage(model.model_version, "ACTIVE", expected_version=model.state_version, approved_by="isolated-test", approved_at=now)
+      assert [(value.model_version, value.stage) for value in await repository.runtime_models()] == [(model.model_version, "ACTIVE")]
+      assert model.approved_by == "isolated-test"
+      # A changed artifact cannot update the registry or undo the explicit approval.
+      (directory / "logistic.json").write_text("{}")
+      with pytest.raises(ValueError, match="安全校验"):
+        await service.register(run_key)
+      assert model.stage == "ACTIVE"
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("field,invalid", [("run_id", "../other"), ("metrics_sha256", None), ("lock_sha256", "invalid")])
+def test_selection_artifact_rejects_invalid_parent_evidence(tmp_path, field, invalid):
+  directory = _valid_artifact(tmp_path / "final")
+  metrics = json.loads((directory / "metrics.json").read_text())
+  metrics["parent_development"][field] = invalid
+  _write_json(directory / "metrics.json", metrics)
+  _refresh_manifest_hash(directory, "metrics.json")
+  with pytest.raises(SelectionArtifactError):
+    load_selection_artifact(directory)
 
 
 def test_selection_artifact_loader_projects_only_safe_evidence(tmp_path: Path) -> None:
