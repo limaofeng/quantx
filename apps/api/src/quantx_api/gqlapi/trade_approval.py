@@ -21,6 +21,8 @@ from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade_confirmation_challenge import (
   TradeConfirmationChallenge,
 )
@@ -32,6 +34,9 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY,
   authorization_expiry_for_challenge,
   bind_t_trade_exit_authorization_to_challenge_payload,
+)
+from quantx_infrastructure.services.trade_confirmation_material import (
+  intent_fingerprint as _intent_fingerprint,
 )
 from sqlalchemy import select
 
@@ -138,45 +143,6 @@ def _intent_expiry(record: TradeIntentRecord) -> Optional[datetime]:
   if created_at is None or ttl_ms <= 0:
     return None
   return created_at + timedelta(milliseconds=ttl_ms)
-
-
-def _intent_subject_payload(record: TradeIntentRecord) -> dict[str, Any]:
-  metadata = dict(record.intent_metadata or {})
-  # The strategy-backed approval path still uses this slot because the Engine
-  # validates the consumed challenge audit from the intent snapshot.  Owner
-  # identity is always taken from durable columns and supplied explicitly by
-  # the caller; metadata is excluded from owner resolution.
-  metadata.pop(_CHALLENGE_METADATA_KEY, None)
-  return {
-    "id": record.id,
-    "run_id": record.strategy_run_id,
-    "owner_type": record.owner_type,
-    "owner_id": record.owner_id,
-    "environment": record.environment,
-    "account_id": record.account_id,
-    "instrument_code": record.instrument_code,
-    "direction": record.direction,
-    "bucket": record.bucket,
-    "reason": record.reason,
-    "status": record.status,
-    "confidence": record.confidence,
-    "target_amount": record.target_amount,
-    "target_position_pct": record.target_position_pct,
-    "target_volume": record.target_volume,
-    "limit_price_hint": record.limit_price_hint,
-    "metadata": metadata,
-  }
-
-
-def _intent_fingerprint(record: TradeIntentRecord) -> str:
-  encoded = json.dumps(
-    _intent_subject_payload(record),
-    ensure_ascii=True,
-    separators=(",", ":"),
-    sort_keys=True,
-    default=str,
-  ).encode("utf-8")
-  return hashlib.sha256(encoded).hexdigest()
 
 
 def _command_payload_fingerprint(payload: Any) -> str:
@@ -325,7 +291,9 @@ def _validate_pending_intent(
   intent_id: str,
 ) -> TradeIntentRecord:
   allowed_owner_types = {
-    T_TRADE_ENTRY_APPROVAL: frozenset({ExecutionOwnerType.STRATEGY_RUN}),
+    T_TRADE_ENTRY_APPROVAL: frozenset({
+      ExecutionOwnerType.STRATEGY_RUN, ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    }),
     STRATEGY_TRADE_INTENT_APPROVAL: frozenset({ExecutionOwnerType.STRATEGY_RUN}),
     EXIT_PLAN_SELL_APPROVAL: frozenset({ExecutionOwnerType.EXIT_PLAN}),
   }
@@ -346,11 +314,6 @@ def _validate_pending_intent(
       "INTENT_NOT_FOUND",
       "交易信号不存在或不属于当前业务对象",
     )
-  if str(record.status or "").upper() != "AWAITING_APPROVAL":
-    raise TradeApprovalChallengeError(
-      "INTENT_NOT_AWAITING_APPROVAL",
-      "交易信号已处理、已过期或不再等待确认",
-    )
   expected_direction = (
     "SELL" if action == EXIT_PLAN_SELL_APPROVAL else "BUY"
   )
@@ -359,7 +322,54 @@ def _validate_pending_intent(
       "UNSUPPORTED_APPROVAL_ACTION",
       f"当前确认动作只支持 {expected_direction} 意图",
     )
+  if str(record.status or "").upper() != "AWAITING_APPROVAL":
+    raise TradeApprovalChallengeError(
+      "INTENT_NOT_AWAITING_APPROVAL",
+      "交易信号已处理、已过期或不再等待确认",
+    )
   return record
+
+
+async def _lock_t_entry_source(db, *, execution_ref, environment, account_id):
+  """Fence previews/consumption against drain using head -> execution -> intent.
+
+  Identity is checked even on consumed retries. Readiness is checked separately
+  for new operations so a drained source can still return its durable result.
+  """
+  if execution_ref.owner_type is not ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+    return None
+  probe = await db.get(TAssistantExecutionRecord, execution_ref.owner_id)
+  if probe is None or environment is not ExecutionEnvironment.LIVE:
+    raise TradeApprovalChallengeError("T_ENTRY_SOURCE_INVALID", "做 T 执行来源无效")
+  head = await db.get(
+    TTradeGlobalConfig, probe.config_id, with_for_update=True, populate_existing=True,
+  )
+  source = await db.get(
+    TAssistantExecutionRecord, execution_ref.owner_id,
+    with_for_update=True, populate_existing=True,
+  )
+  if (
+    head is None or source is None
+    or source.account_id != account_id or head.account_id != account_id
+    or source.environment != "LIVE"
+    or source.entry_authorization != "MANUAL_CONFIRM"
+  ):
+    raise TradeApprovalChallengeError("T_ENTRY_SOURCE_INVALID", "做 T 执行来源无效")
+  return head, source
+
+
+def _require_t_entry_source_ready(context):
+  if context is None:
+    return
+  head, source = context
+  if (
+    source.status != "RUNNING" or source.entry_readiness != "READY"
+    or not head.enabled or head.desired_environment != "LIVE"
+    or head.active_config_version_id != source.config_version_id
+  ):
+    raise TradeApprovalChallengeError(
+      "T_ENTRY_SOURCE_NOT_READY", "做 T 执行已阻断新入场，请等待新的可确认信号",
+    )
 
 
 class TradeApprovalChallengeService:
@@ -848,6 +858,10 @@ class TradeApprovalChallengeService:
     now = time_utils.now()
 
     async for db in get_async_db():
+      source = await _lock_t_entry_source(
+        db, execution_ref=execution_ref, environment=environment,
+        account_id=normalized_account_id,
+      )
       result = await db.execute(
         select(TradeIntentRecord)
         .where(TradeIntentRecord.id == intent_id)
@@ -937,6 +951,7 @@ class TradeApprovalChallengeService:
             "operation_status": "REPLACED",
           }
 
+      _require_t_entry_source_ready(source)
       record = _validate_pending_intent(
         raw_record,
         action=action,
@@ -1056,7 +1071,35 @@ class TradeApprovalChallengeService:
         "确认命令绑定信息不完整",
       )
 
+    if execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+      expected_command = {
+        "execution_id": execution_ref.owner_id,
+        "intent_id": intent_id,
+        "account_id": normalized_account_id,
+      }
+      if (
+        action != T_TRADE_ENTRY_APPROVAL
+        or command_type != "T_ASSISTANT_APPROVE_ENTRY"
+        or command_aggregate_id != execution_ref.owner_id
+        or not isinstance(command_payload, dict)
+        or any(command_payload.get(key) != value for key, value in expected_command.items())
+        or command_payload.get("run_id")
+      ):
+        raise TradeApprovalChallengeError(
+          "INVALID_APPROVAL_COMMAND_BINDING", "确认命令与做 T 执行身份不匹配",
+        )
+      command_payload = dict(command_payload)
+      command_payload["approval_audit"] = {
+        "actor_id": principal.user_id,
+        "device_session_id": principal.device_session_id,
+        "channel": "T_ASSISTANT_DEVICE_CHALLENGE",
+      }
+
     async for db in get_async_db():
+      source = await _lock_t_entry_source(
+        db, execution_ref=execution_ref, environment=environment,
+        account_id=normalized_account_id,
+      )
       result = await db.execute(
         select(TradeIntentRecord)
         .where(TradeIntentRecord.id == intent_id)
@@ -1224,6 +1267,7 @@ class TradeApprovalChallengeService:
             idempotency_key=str(resolved_command_idempotency_key),
           )
         return str(challenge.id)
+      _require_t_entry_source_ready(source)
       record = _validate_pending_intent(
         record,
         action=action,

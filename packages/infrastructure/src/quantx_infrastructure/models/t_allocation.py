@@ -29,7 +29,7 @@ class TAllocationBatchRecord(Base):
     CheckConstraint(
       "allocation_attempt >= 1 AND intent_count >= 1", name="ck_t_allocation_counts"
     ),
-    CheckConstraint("environment = 'PAPER'", name="ck_t_allocation_paper"),
+    CheckConstraint("environment IN ('PAPER','LIVE')", name="ck_t_allocation_environment"),
     CheckConstraint(
       "status IN ('PREPARED','COMMITTED','SUPERSEDED','EXPIRED','FAILED')",
       name="ck_t_allocation_status",

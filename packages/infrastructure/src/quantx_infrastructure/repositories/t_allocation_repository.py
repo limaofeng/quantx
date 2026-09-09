@@ -26,6 +26,7 @@ from quantx_domain.trading.t_assistant_execution import (
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from quantx_infrastructure.models.paper_execution import PaperExecutionOrderRecord
 from quantx_infrastructure.models.t_allocation import (
@@ -36,6 +37,7 @@ from quantx_infrastructure.models.t_assistant_execution import (
   TAssistantDecisionCycleRecord,
   TAssistantExecutionRecord,
 )
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   TTradeOpportunityEvaluation,
 )
@@ -50,6 +52,7 @@ from quantx_infrastructure.services.t_allocation_serialization import (
   allocation_evidence,
   allocation_time,
 )
+from quantx_infrastructure.services.t_entry_confirmation import confirmed_for_allocation
 from quantx_infrastructure.services.trade_intent_intake import (
   trade_intent_initial_material,
 )
@@ -303,7 +306,7 @@ class TAllocationRepository:
       allocation_batch_id=str(uuid.uuid4()),
       execution_id=execution.execution_id,
       cycle_id=cycle.cycle_id,
-      environment="PAPER",
+      environment=snapshot.environment.value,
       allocation_attempt=previous.allocation_attempt + 1 if previous is not None else 1,
       portfolio_input_fingerprint=snapshot.portfolio_input_fingerprint,
       portfolio_snapshot=allocation_evidence(snapshot),
@@ -448,9 +451,16 @@ class TAllocationRepository:
         ):
           raise TAllocationConflict("T_ALLOCATION_INTENT_VERSION_CONFLICT")
         if decision.action in {TAllocationAction.ALLOW, TAllocationAction.CAP}:
+          confirmed = (
+            execution.environment == "LIVE"
+            and execution.entry_authorization == "MANUAL_CONFIRM"
+            and await confirmed_for_allocation(
+              self.db, intent=row, snapshot=snapshot, now=now,
+            )
+          )
           row.status = (
             "AWAITING_APPROVAL"
-            if execution.entry_authorization == "MANUAL_CONFIRM"
+            if execution.entry_authorization == "MANUAL_CONFIRM" and not confirmed
             else "EXECUTION_READY"
           )
         elif decision.action == TAllocationAction.DELAY:
@@ -462,6 +472,8 @@ class TAllocationRepository:
         row.allocation_version = decision.intent_version + 1
         row.allocation_decision_id = decision.decision_id
         row.allocation_next_eligible_at = decision.next_eligible_at
+        row.updated_at = now.replace(tzinfo=None)
+        flag_modified(row, "updated_at")
       batch.status = "COMMITTED"
       batch.committed_at = now
       batch.decision_manifest_hash = stable_manifest_hash({"decisions": evidence})
@@ -493,6 +505,7 @@ class TAllocationRepository:
     probe = await self.get(batch_id)
     if probe is None:
       raise TAllocationConflict("T_ALLOCATION_NOT_FOUND")
+    await self._lock_live_head(probe.cycle_id)
     cycle = await TAssistantDecisionCycleRepository(self.db).get(
       probe.cycle_id,
       for_update=True,
@@ -508,14 +521,31 @@ class TAllocationRepository:
       .execution_options(populate_existing=True)
     )
 
+  async def _lock_live_head(self, cycle_id):
+    # Immutable probes establish the shared head -> execution -> cycle prefix.
+    source = await self.db.scalar(
+      select(TAssistantExecutionRecord)
+      .join(TAssistantDecisionCycleRecord,
+            TAssistantDecisionCycleRecord.execution_id == TAssistantExecutionRecord.execution_id)
+      .where(TAssistantDecisionCycleRecord.cycle_id == cycle_id)
+    )
+    if source is None or source.environment != "LIVE":
+      return None
+    head = await self.db.get(TTradeGlobalConfig, source.config_id,
+      with_for_update=True, populate_existing=True)
+    if head is None:
+      raise TAllocationConflict("T_ALLOCATION_CONFIG_HEAD_INVALID")
+    return head
+
   async def _context(self, snapshot, candidates, now):
     if not isinstance(snapshot, PortfolioTDecisionSnapshot) or now < snapshot.cut.as_of:
       raise TAllocationConflict("T_ALLOCATION_SNAPSHOT_INVALID")
     if (
-      snapshot.environment != ExecutionEnvironment.PAPER
+      snapshot.environment not in {ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE}
       or snapshot.scorer_binding != "RULE_ONLY"
     ):
       raise TAllocationConflict("T_ALLOCATION_SCOPE_INVALID")
+    head = await self._lock_live_head(snapshot.cycle_id)
     # Share P3's authoritative execution -> cycle order before batch/intent locks.
     cycle = await TAssistantDecisionCycleRepository(self.db).get(
       snapshot.cycle_id,
@@ -533,7 +563,7 @@ class TAllocationRepository:
     if (
       execution is None
       or cycle.execution_id != snapshot.cut.execution_ref.owner_id
-      or execution.environment != "PAPER"
+      or execution.environment != snapshot.environment.value
       or execution.scorer_mode != "RULE_ONLY"
       or snapshot.config_version != execution.config_version_id
       or snapshot.strategy_binding != execution.policy_version
@@ -541,6 +571,12 @@ class TAllocationRepository:
       raise TAllocationConflict("T_ALLOCATION_EXECUTION_BINDING_CONFLICT")
     if execution.status != "RUNNING" or execution.entry_readiness != "READY":
       raise TAllocationConflict("T_ALLOCATION_EXECUTION_NOT_ENTRY_READY")
+    if execution.environment == "LIVE" and (
+      head is None or head.account_id != execution.account_id or not head.enabled
+      or head.desired_environment != "LIVE"
+      or head.active_config_version_id != execution.config_version_id
+    ):
+      raise TAllocationConflict("T_ALLOCATION_CONFIG_HEAD_INVALID")
     if (
       not isinstance(cycle.output_manifest, dict)
       or stable_manifest_hash(cycle.output_manifest) != cycle.output_manifest_hash
@@ -571,12 +607,14 @@ class TAllocationRepository:
       if (
         row.owner_type != "T_ASSISTANT_EXECUTION"
         or row.owner_id != execution.execution_id
-        or row.environment != "PAPER"
+        or row.environment != execution.environment
         or row.direction != "BUY"
         or row.account_id != execution.account_id
         or stable_manifest_hash(trade_intent_initial_material(row)) != accepted[row.id]
       ):
         raise TAllocationConflict("T_ALLOCATION_INTENT_MATERIAL_CONFLICT")
+      if execution.environment == "LIVE" and row.status == "ALLOCATION_PENDING":
+        await confirmed_for_allocation(self.db, intent=row, snapshot=snapshot, now=now)
     eligible = {
       row.id: row
       for row in rows

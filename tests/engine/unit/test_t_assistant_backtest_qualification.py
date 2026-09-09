@@ -50,6 +50,21 @@ async def test_all_symbols_must_meet_daily_coverage():
   assert missing["coverage"] == 0
 
 
+async def test_acquisition_coverage_matches_formal_qualification(tmp_path):
+  from tests.engine.unit.test_t_assistant_backtest_evaluation import History, acquire
+
+  dataset = await acquire(tmp_path, History())
+  report = await evaluation.qualify_backtest_data(runtime(request_only=True), dataset, policy())
+  material = dataset.manifest["material"]
+  assert material["coverage_metric"] == report["version"]
+  for part, qualified in zip(material["parts"], report["partitions"], strict=True):
+    assert part["code"] == qualified["code"]
+    observed = part["continuous_minute_coverage"]
+    assert observed["observed_minutes"] == qualified["observed_minutes"] == 1
+    assert observed["expected_minutes"] == report["expected_minutes_per_day"]
+    assert observed["ratio"] == qualified["coverage"]
+
+
 async def test_sparse_day_saves_blocker_without_running_scenarios(
   tmp_path, monkeypatch
 ):

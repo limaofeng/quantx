@@ -29,6 +29,25 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
 from sqlalchemy import text
 
 
+def export_failure_reason(error: Exception) -> str:
+  """Expose only known diagnostic codes, never raw paths or credentials."""
+  reason = str(error)
+  if reason in {
+    "SOURCE_COVERAGE_MISSING",
+    "EXPORT_TRANSFER_BUDGET_EXCEEDED",
+    "EXPORT_DISK_BUDGET_EXCEEDED",
+    "EXPORT_CHECKSUM_MISMATCH",
+    "EXPORT_RECORD_BUDGET_EXCEEDED",
+    "PERSISTED_COVERAGE_UNPROVEN",
+    "PERSISTED_COVERAGE_CHANGED",
+    "HISTORICAL_SOURCE_IDENTITY_MISSING",
+    "REFERENCE_DATA_MISSING",
+    "REFERENCE_DATA_BUDGET_EXCEEDED",
+  }:
+    return reason
+  return type(error).__name__
+
+
 def partition_records(chunks, request: HistoryPartitionRequest) -> list[dict]:
   start = datetime.combine(
     request.trading_date, datetime.min.time(), ZoneInfo("Asia/Shanghai")
@@ -396,8 +415,15 @@ def safe_export_error(exc: Exception) -> str:
     "EXPORT_DISK_BUDGET_EXCEEDED",
     "EXPORT_CHECKSUM_MISMATCH",
     "EXPORT_RECORD_BUDGET_EXCEEDED",
+    "REFERENCE_DATA_MISSING",
+    "REFERENCE_DATA_BUDGET_EXCEEDED",
   }
   return str(exc) if str(exc) in known else type(exc).__name__
+
+
+def export_failure_reason(error: Exception) -> str:
+  """Backward-compatible name for the safe export error sanitizer."""
+  return safe_export_error(error)
 
 
 async def set_failed(store, identity: str, reason: str) -> None:

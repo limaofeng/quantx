@@ -1197,6 +1197,12 @@ Coordinator 选中的候选进入 `AWAITING_APPROVAL`，但不提前占用真实
 
 确认不是成交承诺。确认后仍可能被 `CAP/REJECT/RECONCILE_REQUIRED`。
 
+独立 T 的设备确认同时携带 schema 2 退出保护信封：source execution ref、LIVE environment、
+candidate id/fingerprint、policy/feature schema、退出模板与保护量共同参与签名。不可变
+execution id 关联冻结配置；信封不伪造 StrategyRun。legacy 源的原 schema 1 确认保留到
+其义务收敛，不允许新源用旧格式验证。实际成交后派生授权仍校验原信封与真实累计成交，
+source execution 终态不阻断已存在的合法退出保护。
+
 ### 10.2 LIVE/AUTO
 
 `environment=LIVE + entry_authorization=AUTO` 只跳过人工点击，不跳过任何候选、组合、风控、

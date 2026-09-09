@@ -24,6 +24,28 @@ class HistoricalCache(History):
       yield page
 
 
+@pytest.mark.parametrize("status,trading,suspended", [(3, False, False), (13, True, False), (17, False, True)])
+async def test_raw_tick_status_is_archived_without_assuming_it_is_daily_suspend_flag(
+  tmp_path, status, trading, suspended
+):
+  class RawStatusHistory(History):
+    async def iter_tick_pages(self, **kwargs):
+      async for page in super().iter_tick_pages(**kwargs):
+        for tick in page:
+          tick.stock_status = status
+        yield page
+
+  dataset = await acquire_backtest_dataset(
+    history=RawStatusHistory(), calendar=Calendar(), source_version="raw-status",
+    instruments=CODES, start=date(2026, 9, 3), end=date(2026, 9, 3), root=tmp_path,
+    latency_ms=0, preserve_raw=True,
+  )
+  assert dataset.manifest["material"]["status"] == "FROZEN"
+  assert all(p["stock_status_counts"] == {str(status): 12} for p in dataset.manifest["material"]["parts"])
+  events = [event async for event in dataset.events()]
+  assert events and all(e.market.is_trading is trading and e.market.suspended is suspended for e in events)
+
+
 async def test_raw_cache_is_preserved_without_fabricating_limit_prices(tmp_path):
   history = HistoricalCache()
   dataset = await acquire_backtest_dataset(
@@ -80,10 +102,23 @@ async def test_source_error_stops_without_querying_other_symbols(tmp_path):
   assert dataset.manifest["material"]["unattempted_partitions"] == 1
 
 
-async def test_backtest_requires_daily_limits_even_when_tick_has_them(tmp_path):
+@pytest.mark.parametrize("preserve_raw", [True, False])
+@pytest.mark.parametrize("daily_present", [True, False])
+async def test_backtest_replays_without_daily_limits_and_never_uses_tick_limits(
+  tmp_path, preserve_raw, daily_present
+):
+  from quantx_engine.t_assistant_backtest_run import execute_backtest
+
+  from tests.engine.unit.test_t_assistant_backtest_runtime import runtime
+
   class NoDailyReference(History):
     async def get_kline_data(self, **kwargs):
-      return []
+      if not daily_present:
+        return []
+      bars = await super().get_kline_data(**kwargs)
+      for bar in bars:
+        bar.up_stop_price = bar.down_stop_price = None
+      return bars
 
   dataset = await acquire_backtest_dataset(
     history=NoDailyReference(),
@@ -94,9 +129,31 @@ async def test_backtest_requires_daily_limits_even_when_tick_has_them(tmp_path):
     end=date(2026, 9, 3),
     root=tmp_path,
     latency_ms=0,
-    preserve_raw=True,
+    preserve_raw=preserve_raw,
   )
-  assert dataset.manifest["material"]["status"] == "REFERENCE_REQUIRED"
+  assert dataset.manifest["material"]["status"] == "FROZEN"
+  assert dataset.manifest["material"]["price_limit_source"] == "DAILY_KLINE"
+  assert not dataset.manifest["material"]["reference_requirements"]
+  for part in dataset.manifest["material"]["parts"]:
+    assert not part["missing_reference_fields"]
+    assert part["daily_price_limits"] == {
+      "up_stop_price": None, "down_stop_price": None,
+    }
+  events = [event async for event in dataset.events()]
+  assert events and all(
+    event.market.limit_up is None and event.market.limit_down is None
+    for event in events
+  )
+  _, run, result = await execute_backtest(
+    request=runtime(request_only=True), events=dataset,
+    code_manifest={"fixture": "missing-daily-limits-v1"}, root=tmp_path / "runs",
+  )
+  assert len(run.broker.orders) == 4
+  _, _, replay = await execute_backtest(
+    request=runtime(request_only=True), events=dataset,
+    code_manifest={"fixture": "missing-daily-limits-v1"}, root=tmp_path / "runs",
+  )
+  assert result["material"]["result"]["economic_hash"] == replay["material"]["result"]["economic_hash"]
 
 
 async def test_reference_replay_joins_daily_limits_and_detects_changes(tmp_path):

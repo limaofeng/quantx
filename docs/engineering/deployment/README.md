@@ -67,6 +67,13 @@ Windows 使用同一依赖清单，并将 `--python` 指向 Conda 环境中的 `
 `npm install`。开发数据服务使用独立容器与持久卷，配置位于
 `ops/config/compose.development.yaml`，仅绑定本机端口；应用启动器不启停这些服务。
 
+macOS 的 LightGBM 需要 OpenMP 运行库；使用 Homebrew 安装 `caddy libomp`。
+使用 nvm 时先在根目录执行 `nvm use`，采用 `.nvmrc` 指定的 Node 版本。
+首次启动本机 API/Caddy 后，执行
+`CODEGEN_GRAPHQL_ENDPOINT=http://127.0.0.1:8080/graphql npm run codegen`，
+生成当前源码对应的 Web 契约；本地 Web 的 `VITE_DEFAULT_ACCOUNT_ID` 应与
+开发配置中的模拟账户一致（样例为 `paper-local`）。
+
 ```bash
 # 先在终端设置 QUANTX_DEV_POSTGRES_PASSWORD，再独立启动开发数据服务。
 docker compose -f ops/config/compose.development.yaml up -d
@@ -79,7 +86,7 @@ cp ops/config/development.env.example apps/api/.env.development
 开发 InfluxDB Core 查询按短时间窗口分批，避免其约 72 小时的单次查询范围限制。
 
 ```bash
-ENV=development conda run -n quantx python -m alembic -c packages/infrastructure/alembic.ini upgrade head
+ENV=development conda run -n quantx python -m alembic -c alembic.ini upgrade head
 PREFECT_API_URL=http://127.0.0.1:4200/api conda run -n quantx python -m prefect work-pool create quantx-dev-pool --type process
 ./ops/quantx.sh doctor --environment dev
 ./ops/quantx.sh up --environment dev --profile full --mode paper
@@ -117,6 +124,27 @@ macOS 配置 `QUANTX_MARKET_DATA_URL=http://192.168.5.6:8080` 和
 ```bash
 ./ops/quantx.sh history --instruments 600000.SH --period 1m --start 2026-09-01 --end 2026-09-07
 ```
+
+该标准入口也供开发回测补数使用。结果包含 `expected_partitions`、
+`verified_partitions` 及逐分区状态、任务 ID、原因。单个 `INCOMPLETE` 不会阻止
+其余分区提交；存在失败时退出码为 2。异步等待结果不表示数据已完整，
+`LOCAL_VERIFIED` 才表示该分区已导入并回读校验。失败源不会自动重试。
+
+Tick 补数后，用标准回测数据准备入口检查本机持久化结果：
+
+```bash
+conda run --no-capture-output -n quantx python ops/t-assistant-backtest-data.py \
+  --environment development --instruments 600000.SH \
+  --start 2026-09-01 --end 2026-09-07 --output .runtime/backtests/data-check
+```
+
+检查包含分页耗尽、源身份、时间顺序、盘口字段和逐分区缺口；生成的 manifest
+还记录 `continuous-minute-coverage.v1` 连续竞价分钟覆盖及原始 `stock_status_counts`。
+分钟覆盖沿用回测准入的交易时段定义（当前每日 237 分钟），同分钟多条 Tick
+只计一次；100% 分钟覆盖不等于证明交易所每条 Tick 都已取得。
+空分区没有可靠无数据证明时仍为 `INCOMPLETE`。历史日 K 涨跌停价允许为空，
+不计为 Tick 数据缺失。未知整数证券状态保留在数据中，回测不得据此授权交易；
+数据归档成功与策略准入通过是两个独立结论。
 
 已有且通过持久化校验的历史数据随时导出。系统设置 → 行情数据
 （`/settings/market-data`）控制开发端触发的历史补采，默认全天允许，包含盘中。

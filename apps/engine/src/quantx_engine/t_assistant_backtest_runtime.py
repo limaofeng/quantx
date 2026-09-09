@@ -276,7 +276,7 @@ class TAssistantBacktestRuntime:
     }
     self.risk = TradingRiskChecker(
       strict_market_data=True,
-      strict_limit_data=True,
+      strict_limit_data=False,
       commission_rate=self.costs.commission_rate,
       min_commission=self.costs.minimum_commission,
     )

@@ -1065,7 +1065,7 @@ class StrategyManager:
       try:
         await self._ensure_backtest_data_available(runtime)
         await self._finalize_t_trade_replay_initial_portfolio(runtime)
-      except RuntimeError as e:
+      except Exception as e:
         runtime.status = ExecutionStatus.ERROR
         runtime.error_message = str(e)
         self.logger.error(f"回测数据准备失败: {e}")

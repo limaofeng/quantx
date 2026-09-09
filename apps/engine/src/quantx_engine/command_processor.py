@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any, Optional
 
@@ -236,6 +236,34 @@ async def _dispatch(
   command_id: Optional[str] = None,
 ) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
+  if command_type == "T_ASSISTANT_APPROVE_ENTRY":
+    from quantx_infrastructure.services.t_entry_confirmation import confirm_live_entry
+
+    async with AsyncSessionLocal() as db, db.begin():
+      result = await confirm_live_entry(
+        db, execution_id=str(payload.get("execution_id") or ""),
+        intent_id=str(payload.get("intent_id") or ""),
+        account_id=str(payload.get("account_id") or ""),
+        approval_audit=dict(payload.get("approval_audit") or {}),
+        now=utcnow().replace(tzinfo=UTC),
+      )
+    return {"success": True, **result}
+  if command_type == "T_ASSISTANT_DRAIN_ENTRY":
+    from .t_assistant_live_drain import drain_live_entry_work
+
+    async with AsyncSessionLocal() as db, db.begin():
+      result = await drain_live_entry_work(
+        db,
+        execution_id=str(payload.get("execution_id") or ""),
+        now=utcnow().replace(tzinfo=UTC),
+        reason=payload.get("reason"),
+      )
+    return {
+      "success": True,
+      "cancelled_intent_ids": list(result.cancelled_intent_ids),
+      "retained_intent_ids": list(result.retained_intent_ids),
+      "retained_client_order_ids": list(result.retained_client_order_ids),
+    }
   if command_type == "STRATEGY_CREATE":
     return await _strategy_create(payload)
   if command_type == "STRATEGY_START":

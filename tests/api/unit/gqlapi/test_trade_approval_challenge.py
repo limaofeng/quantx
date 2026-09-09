@@ -1040,3 +1040,166 @@ async def test_challenge_fails_closed_when_exit_template_is_invalid(
 
   assert database.challenges == []
   assert database.commits == 0
+
+
+@pytest.fixture
+def independent_t_challenge(configured_challenge_service):
+  from quantx_infrastructure.models.t_assistant_execution import (
+    TAssistantExecutionRecord,
+  )
+  from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
+
+  record, database = configured_challenge_service
+  source_ref = {"owner_type": "T_ASSISTANT_EXECUTION", "owner_id": "execution-1"}
+  record.strategy_run_id = None
+  record.owner_type = source_ref["owner_type"]
+  record.owner_id = source_ref["owner_id"]
+  record.environment = "LIVE"
+  metadata = dict(record.intent_metadata)
+  metadata.pop("strategy_run_id")
+  metadata.update(source_execution_ref=source_ref, feature_schema_version=1)
+  template = metadata["exit_plan_template"]
+  template["run_id"] = ""
+  template["metadata"].pop("strategy_run_id")
+  for key in ("source_execution_ref", "candidate_id", "candidate_fingerprint", "policy_version", "feature_schema_version"):
+    template["metadata"][key] = metadata[key]
+  record.intent_metadata = metadata
+  source = SimpleNamespace(
+    execution_id="execution-1", config_id="config-1", account_id=ACCOUNT_ID,
+    config_version_id="version-1",
+    environment="LIVE", entry_authorization="MANUAL_CONFIRM",
+    status="RUNNING", entry_readiness="READY",
+  )
+  database.lock_order = []
+  database.head = SimpleNamespace(account_id=ACCOUNT_ID, enabled=True,
+    desired_environment="LIVE", active_config_version_id="version-1")
+
+  async def get(model, key, **kwargs):
+    if kwargs.get("with_for_update"):
+      database.lock_order.append(model.__name__)
+    if model is TAssistantExecutionRecord:
+      return source if key == source.execution_id else None
+    if model is TTradeGlobalConfig:
+      return database.head
+    raise AssertionError(model)
+
+  database.get = get
+  binding = {
+    "execution_ref": ExecutionOwnerRef(ExecutionOwnerType.T_ASSISTANT_EXECUTION, "execution-1"),
+    "environment": ExecutionEnvironment.LIVE,
+  }
+  return record, database, source, binding
+
+
+async def test_independent_t_schema2_challenge_and_drained_replay(independent_t_challenge):
+  record, database, source, binding = independent_t_challenge
+  args = dict(principal=_principal(), action=T_TRADE_ENTRY_APPROVAL,
+              account_id=ACCOUNT_ID, intent_id=INTENT_ID, **binding)
+  preview = await TradeApprovalChallengeService.issue(**args)
+  subject = database.challenges[0].payload[T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY]["subject"]
+  assert subject["schema_version"] == 2
+  assert subject["source_execution_ref"] == binding["execution_ref"].to_dict()
+  assert "strategy_run_id" not in subject
+  assert database.lock_order == ["TTradeGlobalConfig", "TAssistantExecutionRecord"]
+  command = _approval_command_kwargs()
+  command.update(command_type="T_ASSISTANT_APPROVE_ENTRY", command_aggregate_id="execution-1")
+  command["command_payload"] = {"execution_id": "execution-1", "intent_id": INTENT_ID, "account_id": ACCOUNT_ID}
+  first = await TradeApprovalChallengeService.consume(
+    **args, confirmation_token=preview.confirmation_token, **command,
+  )
+  source.status = "DRAINING"
+  source.entry_readiness = "BLOCKED"
+  record.status = "CANCELLED"
+  replay = await TradeApprovalChallengeService.consume(
+    **args, confirmation_token=preview.confirmation_token, **command,
+  )
+  assert first == replay == preview.challenge_id
+  assert len(database.commands) == 1
+
+
+@pytest.mark.parametrize("phase", ["preview", "consume"])
+async def test_independent_t_drain_blocks_new_confirmation(independent_t_challenge, phase):
+  _, database, source, binding = independent_t_challenge
+  args = dict(principal=_principal(), action=T_TRADE_ENTRY_APPROVAL,
+              account_id=ACCOUNT_ID, intent_id=INTENT_ID, **binding)
+  if phase == "consume":
+    preview = await TradeApprovalChallengeService.issue(**args)
+  source.status = "DRAINING"
+  with pytest.raises(TradeApprovalChallengeError) as caught:
+    if phase == "preview":
+      await TradeApprovalChallengeService.issue(**args)
+    else:
+      await TradeApprovalChallengeService.consume(
+        **args, confirmation_token=preview.confirmation_token, **_independent_command(),
+      )
+  assert caught.value.code == "T_ENTRY_SOURCE_NOT_READY"
+  assert not database.commands
+  assert all(row.consumed_at is None for row in database.challenges)
+
+
+@pytest.mark.parametrize("field,value", [
+  ("account_id", "another-account"), ("environment", "PAPER"),
+  ("entry_authorization", "AUTO"),
+])
+async def test_independent_t_challenge_requires_exact_source(independent_t_challenge, field, value):
+  _, database, source, binding = independent_t_challenge
+  setattr(source, field, value)
+  with pytest.raises(TradeApprovalChallengeError) as caught:
+    await TradeApprovalChallengeService.issue(
+      principal=_principal(), action=T_TRADE_ENTRY_APPROVAL, account_id=ACCOUNT_ID,
+      intent_id=INTENT_ID, **binding,
+    )
+  assert caught.value.code == "T_ENTRY_SOURCE_INVALID"
+  assert not database.challenges
+
+
+@pytest.mark.parametrize("field,value", [
+  ("enabled", False), ("desired_environment", "PAPER"),
+  ("active_config_version_id", "successor-version"),
+])
+async def test_independent_t_preview_rechecks_config_head(independent_t_challenge, field, value):
+  _, database, _, binding = independent_t_challenge
+  setattr(database.head, field, value)
+  with pytest.raises(TradeApprovalChallengeError) as caught:
+    await TradeApprovalChallengeService.issue(
+      principal=_principal(), action=T_TRADE_ENTRY_APPROVAL, account_id=ACCOUNT_ID,
+      intent_id=INTENT_ID, **binding,
+    )
+  assert caught.value.code == "T_ENTRY_SOURCE_NOT_READY"
+  assert not database.challenges
+
+
+async def test_consumed_challenge_cannot_skip_direction_check(configured_challenge_service):
+  record, _ = configured_challenge_service
+  args = dict(principal=_principal(), action=T_TRADE_ENTRY_APPROVAL,
+    account_id=ACCOUNT_ID, intent_id=INTENT_ID, **_strategy_execution_binding())
+  preview = await TradeApprovalChallengeService.issue(**args)
+  await TradeApprovalChallengeService.consume(
+    **args, confirmation_token=preview.confirmation_token, **_approval_command_kwargs(),
+  )
+  record.status = "CANCELLED"
+  record.direction = "SELL"
+  with pytest.raises(TradeApprovalChallengeError) as caught:
+    await TradeApprovalChallengeService.consume(
+      **args, confirmation_token=preview.confirmation_token, **_approval_command_kwargs(),
+    )
+  assert caught.value.code == "UNSUPPORTED_APPROVAL_ACTION"
+
+
+def _independent_command():
+  return dict(command_type="T_ASSISTANT_APPROVE_ENTRY", command_aggregate_id="execution-1",
+    command_idempotency_key="independent-approval", command_payload={
+      "execution_id": "execution-1", "intent_id": INTENT_ID, "account_id": ACCOUNT_ID,
+    })
+
+
+async def test_independent_t_cannot_dispatch_legacy_command(independent_t_challenge):
+  _, database, _, binding = independent_t_challenge
+  args = dict(principal=_principal(), action=T_TRADE_ENTRY_APPROVAL,
+    account_id=ACCOUNT_ID, intent_id=INTENT_ID, **binding)
+  preview = await TradeApprovalChallengeService.issue(**args)
+  with pytest.raises(TradeApprovalChallengeError) as caught:
+    await TradeApprovalChallengeService.consume(**args,
+      confirmation_token=preview.confirmation_token, **_approval_command_kwargs())
+  assert caught.value.code == "INVALID_APPROVAL_COMMAND_BINDING"
+  assert not database.commands and database.challenges[0].consumed_at is None

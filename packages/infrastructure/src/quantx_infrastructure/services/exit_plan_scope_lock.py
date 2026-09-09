@@ -157,6 +157,17 @@ async def lock_exit_plan_scope(
   if (
     execution_ref is not None
     and execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+    and mode == "live"
+  ):
+    # Source identity is immutable. Existing protection survives a drained or
+    # terminal source; LIVE inventory still uses the shared account lock below.
+    source = await db.get(TAssistantExecutionRecord, execution_ref.owner_id)
+    if run_id or source is None or source.environment != "LIVE" or source.account_id != account_id:
+      raise ValueError("LIVE exit source/account scope conflict")
+  if (
+    execution_ref is not None
+    and execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+    and mode != "live"
   ):
     if mode != "paper" or run_id:
       raise ValueError("T exit persistence requires isolated PAPER scope")

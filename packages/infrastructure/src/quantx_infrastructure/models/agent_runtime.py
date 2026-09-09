@@ -198,6 +198,8 @@ class PendingTradeOrder(Base, TimestampMixin):
     CheckConstraint(
       "(owner_type = 'STRATEGY_RUN' AND intent_id IS NOT NULL "
       "AND strategy_order_id IS NOT NULL) OR "
+      "(owner_type = 'T_ASSISTANT_EXECUTION' AND intent_id IS NOT NULL "
+      "AND strategy_run_id IS NULL AND strategy_order_id IS NULL) OR "
       "(owner_type = 'EXIT_PLAN' AND intent_id IS NOT NULL "
       "AND strategy_order_id IS NULL) OR "
       "(owner_type = 'MANUAL_COMMAND' AND intent_id IS NULL "
@@ -283,6 +285,8 @@ class OrderCorrelation(Base, TimestampMixin):
     CheckConstraint(
       "(owner_type = 'STRATEGY_RUN' AND intent_id IS NOT NULL "
       "AND strategy_order_id IS NOT NULL) OR "
+      "(owner_type = 'T_ASSISTANT_EXECUTION' AND intent_id IS NOT NULL "
+      "AND strategy_run_id IS NULL AND strategy_order_id IS NULL) OR "
       "(owner_type = 'EXIT_PLAN' AND intent_id IS NOT NULL "
       "AND strategy_order_id IS NULL) OR "
       "(owner_type = 'MANUAL_COMMAND' AND intent_id IS NULL "

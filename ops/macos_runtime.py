@@ -226,6 +226,7 @@ def main() -> None:
   ports = (18083,) if args.component else (18081, 18082, 5250, 5251, 8080)
   for port in ports:
     with socket.socket() as probe:
+      probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
       probe.bind(("127.0.0.1", port))
   entries = []
   try:

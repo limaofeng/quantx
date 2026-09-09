@@ -6,8 +6,9 @@ from quantx_infrastructure.services import exit_plan_scope_lock as scope_module
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_type", ["STRATEGY_RUN", "T_ASSISTANT_EXECUTION"])
 async def test_concurrent_plan_writers_share_account_first_lock_order(
-  monkeypatch,
+  monkeypatch, owner_type,
 ):
   records = {
     "plan-a": SimpleNamespace(
@@ -31,6 +32,10 @@ async def test_concurrent_plan_writers_share_account_first_lock_order(
       source_execution_environment="LIVE",
     ),
   }
+  if owner_type == "T_ASSISTANT_EXECUTION":
+    for record in records.values():
+      record.source_execution_owner_type = owner_type
+      record.strategy_run_id = None
   position = SimpleNamespace(
     account_id="account-a",
     stock_code="600000.SH",
@@ -44,7 +49,10 @@ async def test_concurrent_plan_writers_share_account_first_lock_order(
       self.acquired = []
       self.trace = []
 
-    async def get(self, model, key, *, with_for_update):
+    async def get(self, model, key, *, with_for_update=False):
+      if model is scope_module.TAssistantExecutionRecord:
+        assert not with_for_update
+        return SimpleNamespace(account_id="account-a", environment="LIVE", status="STOPPED")
       assert model is scope_module.AccountExecutionControl
       assert key == "account-a"
       assert with_for_update

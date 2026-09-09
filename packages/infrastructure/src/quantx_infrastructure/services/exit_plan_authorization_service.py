@@ -61,6 +61,7 @@ T_TRADE_ENTRY_APPROVAL_ACTION = "T_TRADE_ENTRY_APPROVAL"
 EXIT_PLAN_SELL_APPROVAL_ACTION = "EXIT_PLAN_SELL_APPROVAL"
 T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY = "t_trade_exit_authorization_v1"
 _T_TRADE_EXIT_AUTHORIZATION_SCHEMA_VERSION = 1
+_T_ASSISTANT_EXIT_AUTHORIZATION_SCHEMA_VERSION = 2
 _DEFAULT_AUTH_SECRET = "change-this-secret-key"
 
 
@@ -329,6 +330,7 @@ def _normalized_t_trade_exit_template(
   batch_id = str(metadata.get("t_batch_id") or "").strip()
   plan_id = str(metadata.get("exit_plan_id") or "").strip()
   template_metadata = dict(template.get("metadata") or {})
+  independent = str(record.owner_type or "") == "T_ASSISTANT_EXECUTION"
   expected = {
     "plan_id": (template.get("plan_id"), plan_id),
     "source_type": (template.get("source_type"), "T_TRADE_BATCH"),
@@ -339,13 +341,8 @@ def _normalized_t_trade_exit_template(
       instrument_code,
     ),
     "bucket": (template.get("bucket"), record.bucket),
-    "run_id": (template.get("run_id"), run_id),
+    "run_id": (template.get("run_id"), "" if independent else run_id),
     "metadata.t_batch_id": (template_metadata.get("t_batch_id"), batch_id),
-    "metadata.strategy_run_id": (
-      template_metadata.get("strategy_run_id"),
-      run_id,
-    ),
-    "metadata.account_id": (template_metadata.get("account_id"), account_id),
     "metadata.instrument_code": (
       str(template_metadata.get("instrument_code") or "").upper(),
       instrument_code,
@@ -355,8 +352,30 @@ def _normalized_t_trade_exit_template(
       "exit",
     ),
   }
+  if independent:
+    source_ref = {"owner_type": "T_ASSISTANT_EXECUTION", "owner_id": run_id}
+    if (
+      record.environment != "LIVE"
+      or record.strategy_run_id
+      or metadata.get("strategy_run_id")
+      or template_metadata.get("strategy_run_id")
+      or metadata.get("source_execution_ref") != source_ref
+      or template_metadata.get("source_execution_ref") != source_ref
+      or template_metadata.get("account_id", account_id) != account_id
+    ):
+      raise ValueError("T_TRADE_EXIT_AUTHORIZATION_IDENTITY_MISMATCH")
+    for key in ("candidate_id", "candidate_fingerprint", "policy_version"):
+      if not isinstance(metadata.get(key), str) or not metadata[key].strip():
+        raise ValueError("T_TRADE_ENTRY_CANDIDATE_BINDING_REQUIRED")
+      expected[f"metadata.{key}"] = (template_metadata.get(key), metadata[key])
+    schema = metadata.get("feature_schema_version")
+    if type(schema) is not int or schema <= 0 or type(template_metadata.get("feature_schema_version")) is not int or template_metadata.get("feature_schema_version") != schema:
+      raise ValueError("T_TRADE_ENTRY_CANDIDATE_BINDING_REQUIRED")
+  else:
+    expected["metadata.strategy_run_id"] = (template_metadata.get("strategy_run_id"), run_id)
+    expected["metadata.account_id"] = (template_metadata.get("account_id"), account_id)
   if (
-    str(record.owner_type or "").upper() != ExecutionOwnerType.STRATEGY_RUN.value
+    str(record.owner_type or "").upper() not in {"STRATEGY_RUN", "T_ASSISTANT_EXECUTION"}
     or not account_id
     or not run_id
     or not instrument_code
@@ -409,7 +428,7 @@ def build_t_trade_entry_exit_authorization_envelope(
     or str(metadata.get("t_trade_role") or "").lower() != "entry"
   ):
     raise ValueError("T_TRADE_ENTRY_INTENT_REQUIRED")
-  if str(record.owner_type or "").upper() != "STRATEGY_RUN":
+  if str(record.owner_type or "").upper() not in {"STRATEGY_RUN", "T_ASSISTANT_EXECUTION"}:
     raise ValueError("T_TRADE_ENTRY_OWNER_INVALID")
   template = _normalized_t_trade_exit_template(record)
   computed_ceiling = _t_trade_entry_volume_ceiling(record)
@@ -445,6 +464,17 @@ def build_t_trade_entry_exit_authorization_envelope(
     ),
     "exit_plan_template": template,
   }
+  if record.owner_type == "T_ASSISTANT_EXECUTION":
+    subject.pop("strategy_run_id")
+    subject.update(
+      schema_version=_T_ASSISTANT_EXIT_AUTHORIZATION_SCHEMA_VERSION,
+      source_execution_ref={"owner_type": record.owner_type, "owner_id": run_id},
+      environment=str(record.environment),
+      candidate_id=metadata["candidate_id"],
+      candidate_fingerprint=metadata["candidate_fingerprint"],
+      policy_version=metadata["policy_version"],
+      feature_schema_version=metadata["feature_schema_version"],
+    )
   return TTradeEntryExitAuthorizationEnvelope(
     subject=subject,
     fingerprint=_sha256_fingerprint(subject),
@@ -467,8 +497,8 @@ def bind_t_trade_exit_authorization_to_challenge_payload(
   expected_payload = {
     "action": T_TRADE_ENTRY_APPROVAL_ACTION,
     "account_id": envelope.subject["account_id"],
-    "owner_type": ExecutionOwnerType.STRATEGY_RUN.value,
-    "owner_id": envelope.subject["strategy_run_id"],
+    "owner_type": str(record.owner_type),
+    "owner_id": str(record.owner_id),
     "environment": str(record.environment or "").upper(),
     "intent_id": envelope.subject["entry_intent_id"],
   }
@@ -488,7 +518,7 @@ def _template_binding(record: AutoExitPlanRecord) -> dict[str, Any]:
   state = dict(record.plan_state or {})
   template = dict(state.get("template") or {})
   template.pop("auto_exit_authorized", None)
-  return {
+  binding = {
     "plan_id": str(record.plan_id),
     "account_id": str(record.account_id),
     "instrument_code": str(record.instrument_code),
@@ -505,6 +535,13 @@ def _template_binding(record: AutoExitPlanRecord) -> dict[str, Any]:
     "remaining_volume": max(0, int(record.remaining_volume or 0)),
     "template": template,
   }
+  if record.source_execution_owner_type == "T_ASSISTANT_EXECUTION":
+    binding["source_execution_ref"] = {
+      "owner_type": record.source_execution_owner_type,
+      "owner_id": record.source_execution_owner_id,
+    }
+    binding["source_execution_environment"] = record.source_execution_environment
+  return binding
 
 
 def require_authorizable_live_plan(
@@ -928,7 +965,9 @@ async def derive_exact_auto_exit_authorization_from_t_trade_entry(
   if (
     not isinstance(subject, Mapping)
     or int(dict(subject).get("schema_version") or 0)
-    != _T_TRADE_EXIT_AUTHORIZATION_SCHEMA_VERSION
+    != (_T_ASSISTANT_EXIT_AUTHORIZATION_SCHEMA_VERSION
+        if intent.owner_type == "T_ASSISTANT_EXECUTION"
+        else _T_TRADE_EXIT_AUTHORIZATION_SCHEMA_VERSION)
     or len(envelope_fingerprint) != 64
     or not hmac.compare_digest(
       envelope_fingerprint,
@@ -976,6 +1015,9 @@ async def derive_exact_auto_exit_authorization_from_t_trade_entry(
     "config_version": int(bound_subject.get("exit_config_version") or 0),
     "template": dict(bound_subject.get("exit_plan_template") or {}),
   }
+  if intent.owner_type == "T_ASSISTANT_EXECUTION":
+    expected_plan_binding["source_execution_ref"] = bound_subject["source_execution_ref"]
+    expected_plan_binding["source_execution_environment"] = bound_subject["environment"]
   if any(
     plan_binding.get(key) != value
     for key, value in expected_plan_binding.items()

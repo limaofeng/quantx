@@ -1,8 +1,8 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程已验证、策略准入待确认；P6—P8 尚未开始）<br>
-> 版本：2.4<br>
-> 日期：2026-09-07<br>
+> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程已验证、策略准入待确认；P6 隔离开发进行中；P7/P8 隔离开发进行中）<br>
+> 版本：2.5<br>
+> 日期：2026-09-09<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
 > 开发实施进度：5 / 9 个阶段门完成（55.6%）
@@ -55,13 +55,15 @@ development_progress = DONE_phase_count / 9
 
 ### 1.3 后续执行批次与成本边界
 
-本方案为 P0–P8 共九阶段，没有 P9。P5–P8 默认单代理、一次一个可验收批次；
-完成该批实现、定向验证、必要文档和提交后结束任务，不自动进入下一批。
-这不是缩减阶段退出门；批次完成与阶段 DONE 分别记录。
+本方案为 P0–P8 共九阶段，没有 P9。2026-09-09 用户授权 P6–P8 连续开发：默认单代理，
+按依赖顺序完成实现、定向验证、必要文档和提交，不在开发批次边界自动结束任务。
+各组件先通过最小整链及必要边界测试，稳定后统一工程集成、回归和审核，复用有效证据。
+开发完成与阶段 DONE 分别记录；P5/P6/P7 的前置门约束实际运行准入，不阻止后续隔离开发。
+P5 本身的正式评估与准入要求不变。
 
 每批启动前固定：输入提交/接口、写入范围、退出条件、必要验证、外部环境依赖和不包含项。
-若发现范围外的必需依赖，记录缺口及建议后续批次，不自行吸收新工程；保留已完成证据。
-交接仅保留提交、接口、验证及剩余项，新批次使用新任务，避免反复加载全部实施历史。
+若发现连续开发范围内的必需接线缺口，在当前检查点补入并完成；范围外新工程记录缺口，
+不自行扩大目标。交接仅保留提交、接口、验证及剩余项，不要求每批另开任务。
 同一检查点更新当前结论，历史细节引用已有提交/日志，不持续追加重复过程报告。
 
 实现、固定数据评估、维护窗口和交易观察分开授权。等待行情、训练或交易日不要求模型
@@ -177,9 +179,18 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
 | P4 | 分配、PAPER 与跨域准入 | `DONE` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 六项实现、隔离 PG 闭环/故障门及实际 Caddy/Web 契约检查完成，业务库 0056；证据见 §10 |
 | P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A/B 通过；P5-C 工程准备通过，正式样本与准入门待确认 |
-| P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
-| P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
-| P8 | 模型 SHADOW/ACTIVE | `NOT_STARTED` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
+| P6 | LIVE 人工确认灰度 | `IN_PROGRESS` | LIVE 运行依赖 P5；隔离开发已授权 | 唯一 producer、规定闭环、无安全违规 | 源执行排空与订单身份约束基础；见 §10 连续开发检查点 |
+| P7 | AUTO 与稳定性 | `IN_PROGRESS` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
+| P8 | 模型 SHADOW/ACTIVE | `IN_PROGRESS` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
+
+### 4.1 P6–P8 连续开发顺序
+
+| 顺序 | 开发范围 | 工程退出条件 | 上线保留项 |
+|---|---|---|---|
+| 1 | P6 源执行排空、订单 owner 约束、LIVE 确认与公共分配/准入/命令链 | 隔离最小买卖闭环；确认过期/重复、额度变化、排空恢复与原 owner 保留 | P5 准入、维护窗口、CANARY 与交易观察 |
+| 2 | P7 故障恢复、并发/性能、AUTO successor 与阻断 | 复用 P6 证据，补足新故障矩阵及 successor 原子失败测试 | AUTO 观察门、legacy 义务归零后清理 |
+| 3 | P8 数据/标签/切分、制品、CPU 加载、SHADOW/ACTIVE 门 | 无未来数据、安全制品和故障行为；工程夹具与正式研究结果区分 | 冻结模型指标/预算、正式 OOS 评估、人工发布 |
+| 4 | 统一工程验收 | 按最终受影响范围集成、回归、审核；有效证据不重复运行 | 阶段 DONE 仍逐门判定 |
 
 ## 5. 分阶段任务清单
 
@@ -310,6 +321,17 @@ execution 改名为 BACKTEST、放宽环境隔离检查或复制一套协调/风
 | P5-B | 部分成交、T+1 substitution、cutoff、overnight、同刻排序及未来数据负测 | 调整策略以提高收益 |
 | P5-C | 冻结数据/费用/滑点和分组后运行评估，保存版本、hash、旧单票对照及准入结论 | 无限调参或因失败更换评估样本 |
 
+P5 行情数据验收口径（2026-09-09 用户确认，覆盖下方历史检查点中的旧字段前置）：
+
+- 历史 Tick 不提供、不要求涨跌停字段，不能据此判缺数据、补采失败或回测不合格。
+- 涨跌停价的唯一来源为对应标的、对应交易日的日 K；历史日 K 两字段为空是正常数据状态，
+  不要求补造，不要求为了这些字段改换样本日期。后续只在日 K 上采集这些字段。
+- BACKTEST 使用 CHECK_WHEN_AVAILABLE.v1：日 K 有可用值时检查，没有时跳过缺失值检查；
+  不回退到旧 Tick 字段或当前合约详情。最小价位、Tick 覆盖、身份、时序和其他交易规则照常验收。
+- 分区单独记录 daily_price_limits（允许 null）；missing_reference_fields 只记录必需资料缺失。
+  历史 null 不降低数据完整性判定，但该回测不能声称验证了对应日期的涨跌停边界。
+- 以上仅适用于 P5 历史回测；实时行情和实时风控仍使用现有当日数据与检查规则。
+
 退出门分为两部分，均通过才可标 P5 DONE 并解除 P6 前置：
 
 - 工程门：组合结果可审计、守恒、环境隔离、无未来数据且可重放。
@@ -321,6 +343,7 @@ execution 改名为 BACKTEST、放宽环境隔离检查或复制一套协调/风
 ### P6：LIVE / CANARY / MANUAL_CONFIRM
 
 前置：P5 `DONE`；实盘能力门、唯一 QMT Agent、protocol 1.2 和完整账户快照均 READY。
+以上为实际 LIVE 运行前置；P6-A 隔离开发与验证可在 P5 准入等待期间推进。
 
 - [ ] `TTA-P6-01` 在维护窗口停止旧做 T 新 ENTRY，将 legacy owner 置 DRAINING 并冻结义务清单。
 - [ ] `TTA-P6-02` 结果未知旧命令仍由原 owner reconcile；旧 ExitPlan 保持 plan owner/source ref。
@@ -345,6 +368,7 @@ P7 对已有且仍有效的证据直接引用，仅增加其新故障、并发�
 ### P7：故障注入、稳定性与 LIVE/AUTO
 
 前置：P6 `DONE`。
+此门约束 AUTO 实际运行；P7-A/B 的隔离开发、故障与性能测试可提前完成。
 
 - [ ] `TTA-P7-01` 故障注入 Engine/API/QMT 断连、进程重启、lease 过期、DB 冲突、Redis 丢唤醒、
   delta gap、乱序/迟到回报和 successor 失败。
@@ -371,6 +395,7 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
 ### P8：模型 SHADOW 与 ACTIVE
 
 前置：SHADOW 依赖 P5 和稳定 PAPER 数据；ACTIVE 依赖 P7。
+数据/标签、制品、加载和模式控制的隔离开发可提前；不以夹具结果替代模型研究准入。
 
 - [ ] `TTA-P8-01` 冻结完整 1 分钟 Feature Bar、capability manifest、三分类 first-touch label、
   observation anchors、purged walk-forward 和 worst-group 指标。
@@ -518,6 +543,75 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
 仍按审计要求保留。当前基线以本行 closeout 证据及下文“当前状态与下一动作”为准。
 
 ## 10. 当前状态与下一动作
+
+### P6–P8 连续开发检查点（2026-09-09）
+
+- 授权：单代理连续开发，统一工程验收；实际 LIVE/AUTO/ACTIVE 门保持顺序。P8 候选沿用
+  RULE_ONLY、Logistic、LightGBM，用户同意先整理指标/预算建议，后续确认。
+  已整理[模型评估冻结草案](多标的做T助手P8模型评估冻结草案.md)：数据与切分、6 组参数、
+  最多 19 次基础拟合/校准、一次 FINAL、组合增量/校准/OOD/性能建议均为待确认，尚未运行。
+- 已完成基础：Engine `T_ASSISTANT_DRAIN_ENTRY` 通过同一事务阻断新 T LIVE 源、终结没有
+  订单事实的意图；pending/correlation/outbox、成交投影及原 owner 保留，ExitPlan 不改动。
+  故障回滚、重启重试、scope/时间异常与 RECONCILE_REQUIRED 保持阻断已覆盖。
+- 0060 补齐 pending/correlation 的 T owner 身份形状：必须有 intent，不能伪造 StrategyRun
+  或 strategy order。保留旧 owner 约束，无数据重写。业务库尚未应用此迁移。
+- 新 T schema 2 确认信封已绑定原 execution、候选/policy/schema 和退出模板/保护量；
+  已消费确认→累计真实成交见证→精确退出授权的隔离链通过。来源已 STOPPED 仍可保护退出；
+  source/schema/candidate 漂移拒绝。legacy 原 schema 1 信封维持其原义务，不对新 owner 回退。
+- 退出授权派生、账户锁顺序、PAPER receipt、API 授权四文件 **73 项通过**；API SQLite/假设备
+  fixture 显式模拟 Windows 平台判据，解决原用例在 macOS 先被平台门阻断的问题，生产
+  平台门及真实交易开关未修改。此范围没有进行真实交易或完整 LIVE 入场整链验证。
+- 验证：Conda `quantx` 下 live-drain、exit/entry command dispatch、execution owner persistence
+  四文件 **72 项通过**，JUnit `.codex_screenshots/p6-live-drain-unit.xml`；
+  `QUANTX_RUN_MIGRATION_GATE=true` 下 `test_t_assistant_order_identity_migration.py`
+  **1 项通过**，真实 PostgreSQL 随机 schema、旧约束→0060、合法/非法 owner 形状、事务
+  回滚及 schema 删除确认。此证据不替代完整迁移链、生产并发或实盘验收。
+- LIVE 决策周期、候选证据、意图 intake 与分配仓储已按 execution 环境精确绑定；0061
+  扩展 LIVE 分配约束，保留不可变材料、版本/租约保护，并要求排空先撤销 source、再取消
+  无订单意图且同事务写审计。59 项相关单测、4 项完整迁移链 PostgreSQL 测试通过，
+  包括 PAPER 回归、LIVE 分配后排空、缺失审计整事务回滚与直接 SQL 绕过拒绝。
+  PostgreSQL 仅使用专用测试库随机 schema，结束确认删除；业务库未应用 0060/0061。
+- API 确认服务已支持独立 T LIVE schema 2 预览/消费，按 head→execution→intent 加锁，
+  新操作复核启用状态、当前 config、MANUAL_CONFIRM 与 READY；排空后仅允许已消费操作
+  返回原结果。来源漂移、配置停用/切换、排空和终态重试方向检查等 **80 项相关 API 测试通过**。
+  尚未新增 GraphQL 入口；Engine 确认与重新分配进展如下。
+- `T_ASSISTANT_APPROVE_ENTRY` 已消费同一账户/执行/意图的 schema 2 凭据并写不可变审计，
+  将原意图送回 ALLOCATION_PENDING；版本和原始金额不改动。新 attempt 使用确认后的
+  account/obligation/envelope cut，重新算出的 CAP 可以降低额度；配置停用/切换继续阻断。
+  API 只允许绑定该专用命令，并从 Principal 填写 actor/device，不能路由旧 run 命令。
+- 0062 要求确认审计与重入分配同事务，禁止直接进入 EXECUTION_READY；数据库延迟约束
+  复核确认后的快照。相同业务时刻连续写入也显式保留业务时间，避免 ORM onupdate 漂移。
+  **104 项相关测试通过**（JUnit `.codex_screenshots/p6-confirmation-unit.xml`），包含
+  API 预览→消费→真实消息箱→Engine→重新分配的 SQLite 集成、终态重试、审计失败回滚。
+  **4 项 PostgreSQL 完整迁移链测试通过**：重新分配/SQL 绕过拒绝、旧 cut 回滚、并发重复
+  确认、确认与排空竞争；仅专用测试库随机 schema，业务库未应用 0062。
+- P8 隔离基础已实现 COMPLETE 分钟特征、逐路径含成本三分类标签、purged walk-forward
+  与完整主 horizon 的 embargo；安全 JSON CPU 制品、Logistic/数值 LightGBM 导出与原库
+  概率一致性、路径/哈希/大小/树拓扑检查；完整 TModelScore 与批量原子缓存。
+  RULE_ONLY 无模型调用，SHADOW 保持规则顺序，ACTIVE 缺失/过期/OOD/超时/异常阻断 ENTRY。
+  微型合成拟合仅为数值一致性单测，不是冻结草案中的正式实验；尚无研究结果或发布资格。
+- P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
+  与同事务审计；重试及末尾异常整体回滚已有隔离验证。旧 pending/outbox 不迁移 owner。
+  服务未注册公开命令；审批事件使用合成夹具，真实 P6 准入审计及人工发布入口仍待接入。
+- P7/P8 基础与 LIVE 排空联合 **69 项通过**，Conda `quantx`、聚焦 Ruff 通过；
+  JUnit `.codex_screenshots/p7-p8-foundation.xml`。测试全部为隔离工程证据，无 QMT 实盘，
+  不代表 P6/P7/P8 阶段退出门通过。P8 基础提交 `8eece5a6`。
+- 当前合并含两个同名 `20260909_0060` 迁移（历史下载配置、做 T 身份）；已询问业务库
+  应用情况，待确认后修复编号链。此前 PostgreSQL 证据对应合并前迁移图，不能替代当前图验收。
+- LIVE 公共容量服务现在复核显式 snapshot id/hash，并在刷新 ORM 对象前保存原水位，
+  修复同一 identity-map 对象自比漏过快照变更的问题。容量 LIVE/PAPER **39 项通过**；
+  确认、跨域准入与 runtime 相关 **48 项通过**（PAPER 夹具切换当前撮合协议 v2 后，
+  其文件 20 项重跑通过）。未修改生产门禁或撮合约束。
+- LIVE 完整组合读取仍缺少持久化三桶归因与日内做 T 估值证据适配；当前容量 API 的
+  `bucket_inventory` 来自调用方，不能凭券商总持仓自行构造 locked_core/core/swing，
+  也不能将缺失日内盈亏置零后放行。此缺口须补齐事实生产与一致性验证后接线。
+- 剩余开发顺序：LIVE 组合事实读取、确认界面/GraphQL 入口、
+  分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
+- 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
+  本检查点的当前结论，不重复追加整轮报告。没有业务库切换、服务启停、E2E 或真实订单。
+  排空基础提交 `6ec95815`；模型草案 `9062cd8f`；退出授权基础与
+  `feat(trading): bind T execution confirmations to exit protection` 同提交。
 
 交接基线（P3 收尾时）：**P0—P3 已完成；P2/P3 代码、隔离迁移、实际业务库 0050 和清空功能数据后的 Windows 运行验收已完成。当批止于 P3。当前 P4 进展见本节末检查点。** P1 原子切换后，Agent 控制协议为 `1.2`；
 `ExecutionOwnerRef` 已贯穿 intent、pending、correlation、outbox、runtime event 和 ExitPlan
@@ -1092,6 +1186,87 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   策略准入阈值仍未确认，P6继续阻断，不把本次工程改造算作策略验收通过。
 
 ## 11. 变更记录
+
+### P5 开发环境验收预检（2026-09-09）
+
+- 当前仍为 P5 `IN_PROGRESS`：P0–P4 已完成；工程证据不替代正式样本及策略准入门。
+- 修复取数 CLI 强制 `ENV=testing` 的环境隔离缺口：默认显式加载 development 配置，
+  macOS 仅允许 development，复用运行入口的本地端点与 `_dev` 数据库校验；导入客户端前
+  完成校验并关闭全部实盘开关和账户白名单。Windows 如需测试数据须显式指定
+  `--environment testing`，不提供 production 入口。
+- 在本机独立开发数据服务只读盘点既定 2026-08-01～2026-08-31 的 11 标的：
+  21 交易日、231 分区全部 `EMPTY_SOURCE`，Tick 总数 0，未盘点分区 0。
+  本机结果与此前 Windows 缓存证据分别记录，不据此覆盖历史 722131 条盘点结果。
+- 引用清单：`.runtime/backtests/p5-202608-dev/25742e71e82fdca7411683faad8cc9cbdd691341e6fd88ff4db993d0bbb5e1b9/`；
+  hash 为目录名，状态 `INCOMPLETE`；日志 `.codex_screenshots/p5-dev-data-preflight.log`，
+  CLI exit=2 为数据不完整退出。没有访问生产数据服务、补采、启动服务或执行正式回测。
+- 环境隔离、缓存获取、引用读取与数据资格预检 16 项通过，Ruff 通过；日志
+  `.codex_screenshots/p5-dev-environment-tests.log`。既有公共回测工程证据继续有效。
+- 阻碍已立即告知用户：开发库缺少正式样本；模拟初始账户、费用/滑点、指标及分组阈值、
+  样本和覆盖率要求仍待明确。待开发数据就绪并确认口径后冻结版本、运行评估与旧单票对照；
+  不勾选 TTA-P5-04，不开放 P6。
+
+### P5 开发端通过生产行情接口取数（2026-09-09）
+
+- 用户授权测试跨环境行情链路。两个单日分区（皖能电力 8 月 3 日、平安银行 8 月 31 日）
+  已由生产导出为 READY 并在开发端 LOCAL_VERIFIED，合计 9468 条 Tick；此前本地全部为空
+  的状态已改变，尚未重新盘点全部 231 分区。平安银行旧源请求现已有验证结果。
+- 生产原始分片仍缺有效历史涨跌停价，P5 回读保持 REFERENCE_REQUIRED；没有发现接口或
+  Agent 报错，全新 QMT 补采分支未验证。详见[开发行情链路验收](多标的做T助手P5开发行情链路验收.md)。
+- 未修改生产服务、访问生产数据库或绕过补采时段；P5 正式数据门及策略准入仍未通过。
+
+### P5 日 K 涨跌停口径切换验收（2026-09-09）
+
+- 已授权合并远程 `efecd8903`（合并提交 `e9500d9f`），历史 Tick 不再承载涨跌停字段，
+  P5 只关联对应交易日日 K；历史未采集保留为空，不要求生产补造或修补历史 Tick。
+- 合并后 224 项相关测试及定向 Ruff 通过；新版本生产导出到开发 LOCAL_VERIFIED 实测通过：
+  皖能电力 8 月 3 日，1 条日 K、4597 条 Tick，Tick 原始分片无涨跌停字段。
+- 旧日 K 参考值为空，P5 仍 REFERENCE_REQUIRED；正式评估需有参考值的样本及确认口径。
+  招商银行旧补采探针 09:47 仍 WAITING_SOURCE、无报错，未绕过 16:00 派发门。
+  详情与证据见[开发行情链路验收](多标的做T助手P5开发行情链路验收.md)末节，P5 不标 DONE。
+
+### P5 正式样本区间调整与可用日期盘点（2026-09-09）
+
+- 用户明确同意：正式评估改为开始采集日 K 涨跌停价后、参考资料齐全的交易日，仍为原
+  11 标的。原 2026 年 8 月区间只保留工程取数证据，不再作为待补齐的正式准入样本。
+  尚未冻结具体日期、最小样本量、模拟账户、费用/滑点及准入阈值，不据此开放 P6。
+- 本地只读盘点 2026-08-01～2026-09-09：仅皖能电力有 1 条日 K，两个参考值均为空，
+  其他 10 标的没有日 K；11 标的共同具备两个有效参考值的日期数为 0。
+  此结论限于本地开发库，不能当作生产数据库的全量盘点。证据
+  `.codex_screenshots/p5-daily-reference-inventory.log`。
+- 新方案于 9 月 9 日接入；当天尚未收盘，最早候选日期为 9 月 9 日，但必须待实际收盘
+  采集并导入后验证，不能预先宣称该日已可用。需要每个标的同日日 K 两参考值及 Tick 覆盖
+  同时合格；仅有合约详情、日 K 或 Tick 任一种均不足以冻结正式样本。
+- 原 8 月缓存重新盘点：231 分区全部尝试，3 分区有数据、228 分区为空，共 14650 条 Tick，
+  manifest hash `4857db4fd2e1eaedf7564860fd29c4d931cc075048ffdb1e79c1fd125ba9ea2a`，
+  INCOMPLETE；不继续为已放弃的正式区间批量补采。日志
+  `.codex_screenshots/p5-current-data-inventory.log`。
+- 复用合并后 224 项有效证据，补验共享账户与边界 15 项全部通过（0.99s），日志
+  `.codex_screenshots/p5-merged-runtime-boundaries.log`。未重复全量测试、改策略或改准入门。
+- 招商银行旧 WAITING_SOURCE 问题已解除：10:40:14 原/新版均 READY，新版开发端
+  LOCAL_VERIFIED、5182 条回读 verified，源请求 `7c3d8f68-a041-4b18-b174-9c77cadecd08`。
+  这证明该请求取数闭环，不单凭分片状态推断新 QMT 原生补采过程；详细日志
+  `.codex_screenshots/p5-gap-readonly-recheck.log`。旧本地 QUEUED 不作为新版未入库的证据。
+- 当前 P5 阻碍：正式可用日期尚无已验证样本，准入数值仍未确认。保留 IN_PROGRESS。
+
+### P5 取消缺失涨跌停价前置条件（2026-09-09，用户明确授权）
+
+- 用户要求“去掉这个涨跌条件，继续验收”，覆盖此前因日 K 涨跌停资料缺失而等待新日期的
+  前置要求。BACKTEST 采用 `CHECK_WHEN_AVAILABLE.v1`：日 K 有值仍检查，缺值允许回测，
+  不回退历史 Tick、不推算价格。仅取消缺失即阻断，不删除公共涨跌停规则或修改实时风控。
+- 数据准备仍要求有效最小价位、来源身份、时序、盘口等；日 K 缺值继续记录在分区
+  missing_reference_fields，但不再触发 REFERENCE_REQUIRED。最小价位缺失仍阻断。
+  数据清单与结果明确记录该检查策略，不能把缺值样本解释为已验证涨跌停边界。
+- 40 项定向测试通过，含无日 K 涨跌停价的真实公共买卖闭环及两次 economic_hash 一致，
+  覆盖原始引用与严格输入两种数据准备方式；定向 Ruff 通过。
+- 实际皖能电力 2026-08-03 的 4597 条 Tick 数据准备通过，status=FROZEN，
+  4503 条连续时段缺涨跌停价仍如实记录。manifest hash
+  `d0a75451e845ea16b7088655a41a1d14ba274945d3a6c44c633785fa51278c7d`。
+- 证据：`.codex_screenshots/p5-optional-limits-tests.log`、
+  `p5-optional-limits-real-data.log`。本次不是正式历史样本策略准入评估。
+- 不再要求为涨跌停字段等待新采集日期；正式样本具体区间仍须冻结。原 11 标的全样本数据
+  覆盖尚不足（上一盘点 231 分区只有 3 个非空），模拟账户、费用/滑点、样本与收益/回撤
+  阈值尚未确认。P5 保留 IN_PROGRESS，不将字段条件取消等同阶段通过。
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，
 覆盖 delta/恢复快照校验期间的新订阅；删除直接写入原始 Tick 的旧 helper。

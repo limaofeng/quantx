@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import timedelta
 
 import pytest
@@ -30,10 +31,18 @@ from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanRecord,
 )
 from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.models.t_assistant_execution import (
+  TAssistantConfigVersionRecord,
+  TAssistantExecutionRecord,
+)
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade_confirmation_challenge import (
   TradeConfirmationChallenge,
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.repositories.t_assistant_config_repository import (
+  TAssistantConfigRepository,
+)
 from quantx_infrastructure.services import (
   auto_exit_plan_service as auto_exit_module,
 )
@@ -53,6 +62,8 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
 )
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from tests.infrastructure.test_t_assistant_runtime_repository import _version
 
 ACCOUNT_ID = "ACCOUNT-1"
 RUN_ID = "11111111-1111-1111-1111-111111111111"
@@ -180,7 +191,7 @@ def _exit_plan_record(*, protected_volume: int = 100) -> AutoExitPlanRecord:
 
 
 @pytest.fixture
-async def authorization_database(monkeypatch: pytest.MonkeyPatch):
+async def authorization_database(monkeypatch: pytest.MonkeyPatch, request):
   monkeypatch.setattr(
     authorization_module.settings,
     "secret_key",
@@ -204,6 +215,9 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
           PendingTradeOrder.__table__,
           TradeIntentRecord.__table__,
           TTradeBatch.__table__,
+          TAssistantExecutionRecord.__table__,
+          TAssistantConfigVersionRecord.__table__,
+          TTradeGlobalConfig.__table__,
         ],
       )
     )
@@ -211,6 +225,28 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
   monkeypatch.setattr(auto_exit_module, "AsyncSessionLocal", factory)
   now = time_utils.now()
   intent = _entry_intent()
+  plan = _exit_plan_record()
+  owner_type = getattr(request, "param", "STRATEGY_RUN")
+  if owner_type == "T_ASSISTANT_EXECUTION":
+    intent.owner_type = owner_type
+    intent.strategy_run_id = None
+    metadata = dict(intent.intent_metadata)
+    metadata.pop("strategy_run_id")
+    binding = {
+      "source_execution_ref": {"owner_type": owner_type, "owner_id": RUN_ID},
+      "candidate_id": "candidate-1", "candidate_fingerprint": "a" * 64,
+      "policy_version": "t-trade-v3", "feature_schema_version": 1,
+    }
+    metadata.update(binding)
+    template = metadata["exit_plan_template"]
+    template["run_id"] = ""
+    template["metadata"].pop("strategy_run_id")
+    template["metadata"].pop("account_id")
+    template["metadata"].update(binding)
+    intent.intent_metadata = metadata
+    plan.strategy_run_id = None
+    plan.source_execution_owner_type = owner_type
+    plan.plan_state = {**plan.plan_state, "template": template}
   challenge_payload = bind_t_trade_exit_authorization_to_challenge_payload(
     {
       "action": T_TRADE_ENTRY_APPROVAL_ACTION,
@@ -218,7 +254,7 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
       "device_session_id": "session-1",
       "account_id": ACCOUNT_ID,
       "business_owner_id": RUN_ID,
-      "owner_type": "STRATEGY_RUN",
+      "owner_type": owner_type,
       "owner_id": RUN_ID,
       "environment": "LIVE",
       "intent_id": INTENT_ID,
@@ -227,6 +263,19 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
     intent,
   )
   async with factory() as db:
+    if owner_type == "T_ASSISTANT_EXECUTION":
+      db.add(TTradeGlobalConfig(id="config-1", account_id=ACCOUNT_ID, mode="live"))
+      version = _version("config-1")
+      await TAssistantConfigRepository(db).append_version(version)
+      db.add(TAssistantExecutionRecord(
+        execution_id=RUN_ID, config_id="config-1", config_version_id=version.config_version_id,
+        config_snapshot_hash=version.config_snapshot_hash, frozen_config_version=version.version,
+        account_id=ACCOUNT_ID, environment="LIVE", entry_authorization="MANUAL_CONFIRM",
+        rollout_stage="CANARY", status="STOPPED", completed_at=now,
+        entry_readiness="BLOCKED", entry_readiness_reasons=["SOURCE_STOPPED"],
+        entry_readiness_as_of=now, policy_version=version.policy_version,
+        feature_schema_version=version.feature_schema_version, scorer_mode="RULE_ONLY",
+      ))
     db.add_all(
       [
         AccountExecutionControl(account_id=ACCOUNT_ID),
@@ -269,18 +318,18 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
           updated_at=now,
         ),
         intent,
-        _exit_plan_record(),
+        plan,
         TTradeBatch(
           batch_id=BATCH_ID,
           account_id=ACCOUNT_ID,
           instrument_code=INSTRUMENT,
-          strategy_run_id=RUN_ID,
+          strategy_run_id=RUN_ID if owner_type == "STRATEGY_RUN" else None,
           status="HOLDING",
           entry_intent_id=INTENT_ID,
           target_volume=100,
           entry_filled_volume=100,
           entry_avg_price=9.99,
-          source_execution_owner_type="STRATEGY_RUN",
+          source_execution_owner_type=owner_type,
           source_execution_owner_id=RUN_ID,
           source_execution_environment="LIVE",
           environment="LIVE",
@@ -292,7 +341,7 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
           user_id="user-1",
           device_session_id="session-1",
           account_id=ACCOUNT_ID,
-          owner_type="STRATEGY_RUN",
+          owner_type=owner_type,
           owner_id=RUN_ID,
           environment="LIVE",
           idempotency_key="t-entry-confirmation",
@@ -390,11 +439,18 @@ async def test_live_authorization_snapshot_excludes_paper_protections_and_sells(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authorization_database", ["STRATEGY_RUN", "T_ASSISTANT_EXECUTION"], indirect=True)
 async def test_t_entry_confirmation_derives_exact_exit_authorization(
   authorization_database,
 ) -> None:
   async with authorization_database() as db:
     plan = await db.get(AutoExitPlanRecord, PLAN_ID)
+    if plan.source_execution_owner_type == "T_ASSISTANT_EXECUTION":
+      challenge = await db.get(TradeConfirmationChallenge, CHALLENGE_ID)
+      subject = challenge.payload[T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY]["subject"]
+      assert subject["schema_version"] == 2
+      assert subject["source_execution_ref"] == {"owner_type": "T_ASSISTANT_EXECUTION", "owner_id": RUN_ID}
+      assert "strategy_run_id" not in subject
     result = await derive_exact_auto_exit_authorization_from_t_trade_entry(
       db,
       plan,
@@ -717,3 +773,33 @@ async def test_tampered_challenge_rederivation_is_permanently_rejected(
     )
     assert event is not None
     assert event.payload["retryable"] is False
+
+
+@pytest.mark.parametrize("authorization_database", ["T_ASSISTANT_EXECUTION"], indirect=True)
+@pytest.mark.parametrize("drift", ["candidate", "source", "schema"])
+async def test_independent_t_confirmation_rejects_bound_material_drift(authorization_database, drift):
+  async with authorization_database() as db:
+    intent = await db.get(TradeIntentRecord, INTENT_ID)
+    challenge = await db.get(TradeConfirmationChallenge, CHALLENGE_ID)
+    plan = await db.get(AutoExitPlanRecord, PLAN_ID)
+    if drift == "candidate":
+      metadata = deepcopy(intent.intent_metadata)
+      metadata["candidate_fingerprint"] = "b" * 64
+      intent.intent_metadata = metadata
+    else:
+      payload = deepcopy(challenge.payload)
+      envelope = payload[T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY]
+      if drift == "source":
+        envelope["subject"]["source_execution_ref"]["owner_id"] = "another-execution"
+      else:
+        envelope["subject"]["schema_version"] = 1
+      envelope["fingerprint"] = authorization_module._sha256_fingerprint(envelope["subject"])
+      challenge.payload = payload
+      challenge.payload_fingerprint = trade_confirmation_payload_fingerprint(payload)
+    result = await derive_exact_auto_exit_authorization_from_t_trade_entry(
+      db, plan, entry_intent_id=INTENT_ID, challenge_id=CHALLENGE_ID,
+      cumulative_filled_volume=100,
+    )
+    assert not result.valid
+    assert not plan.auto_exit_authorized
+    assert result.code in {"T_TRADE_ENTRY_INTENT_SCOPE_CHANGED", "T_TRADE_EXIT_AUTHORIZATION_BINDING_INVALID"}
