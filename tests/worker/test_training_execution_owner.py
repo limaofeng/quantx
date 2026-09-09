@@ -12,6 +12,22 @@ def training_configuration(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason,status", [
+  ("PUBLICATION_CANCEL_REQUESTED", "CANCELLED"),
+  ("PUBLICATION_OWNERSHIP_LOST", "OWNERSHIP_LOST"),
+])
+async def test_input_transfer_cancellation_never_starts_compute(monkeypatch, tmp_path, reason, status):
+  repository = SimpleNamespace(mark_cancelled=AsyncMock(), fail_run=AsyncMock())
+  monkeypatch.setattr(flow, "_control_directory", lambda run_id: tmp_path)
+  monkeypatch.setattr(flow, "load_dataset", AsyncMock(side_effect=flow.PublicationError(reason)))
+  monkeypatch.setattr(flow, "_spawn_process", lambda *args: pytest.fail("input unavailable"))
+  result = await flow._run_claimed_job(repository, SimpleNamespace(run_id="run", prefect_flow_run_id="owner"), object(), object())
+  assert result["status"] == status
+  repository.fail_run.assert_not_called()
+  assert repository.mark_cancelled.await_count == int(status == "CANCELLED")
+
+
+@pytest.mark.asyncio
 async def test_lost_owner_stops_child_without_converging_someone_elses_run(
   monkeypatch, tmp_path
 ):
@@ -41,7 +57,7 @@ async def test_lost_owner_stops_child_without_converging_someone_elses_run(
     mark_cancelled=AsyncMock(),
   )
   monkeypatch.setattr(flow, "_control_directory", lambda run_id: tmp_path.resolve())
-  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset, **kwargs: {})
+  monkeypatch.setattr(flow, "load_dataset", AsyncMock(return_value={}))
   monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
   monkeypatch.setattr(flow, "_spawn_process", lambda *args: process)
   monkeypatch.setattr(flow, "record_spawn", lambda *args, **kwargs: None)
@@ -115,7 +131,7 @@ async def test_silent_research_gets_bounded_heartbeats_and_stops_on_disconnect(
   ticks = iter([0, 0, 9, 10, 10])
   monkeypatch.setattr(flow, "monotonic", lambda: next(ticks))
   monkeypatch.setattr(flow, "_control_directory", lambda run_id: tmp_path.resolve())
-  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset, **kwargs: {})
+  monkeypatch.setattr(flow, "load_dataset", AsyncMock(return_value={}))
   monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
   monkeypatch.setattr(flow, "_spawn_process", lambda *args: process)
   monkeypatch.setattr(flow, "record_spawn", lambda *args, **kwargs: None)

@@ -3,7 +3,7 @@
 独立开发训练服务正在实施，完整范围见
 [实施方案](../../docs/plans/独立训练服务架构与实施方案.md)。
 
-训练调度、能力心跳及正常/恢复制品回传已迁入本包。运行端启停、数据集自动拉取、准备任务交接和 Windows/GPU 验收仍未完成，不能将预检或本地测试通过视为服务 ready。
+训练调度、能力心跳及正常/恢复制品回传已迁入本包。运行端启停、准备任务交接和 Windows/GPU 验收仍未完成，不能将预检或本地测试通过视为服务 ready。
 
 数据认证已拆分为 Research 生成不可变文件、监督端核验并登记两步。公共目录校验与认证字段投影位于 `quantx_infrastructure.training_dataset_store`；当前准备任务仍由 Worker 监督，后续 Trainer 复用同一验证边界。数据库登记失败保留生成文件，文件校验失败则拒绝登记。
 
@@ -59,7 +59,7 @@ conda run -n quantx-train quantx-trainer preflight --config D:\QuantXTraining\tr
 
 | public 表 | 权限 |
 | --- | --- |
-| stock_selection_dataset_versions | SELECT, INSERT |
+| stock_selection_dataset_versions | SELECT, INSERT, UPDATE |
 | stock_selection_training_specs | SELECT |
 | stock_selection_training_runs | SELECT, UPDATE |
 | research_preparation_jobs | SELECT, UPDATE |
@@ -164,3 +164,15 @@ Trainer 调度器使用同一约束：每次独立调用使用独立标识，发
 每次 flow 进入 `training_session` 时验证实际 Conda 前缀、代码目录与控制面权限；数据库引擎只使用该配置中的开发 URL。运行配置保存在任务上下文中，不改写父进程环境。计算子进程通过 `research_environment` 取得文件根目录与最小系统环境，移除数据库、Prefect 和 ambient SSH 凭据；管理进程的 `child_environment` 则保留显式开发控制面目标。
 
 训练数据位于 `state/datasets`，控制证据位于 `state/control`，结果位于 `state/runs`。主机资源保护由独立机器策略控制，与开发 ENV 或旧 Worker 的 full/live 标记无关。准备任务暂时保留其原有 Worker 时间窗口检查，尚待职责交接。
+
+### 冻结数据集发布与下载
+
+在已认证目录位于本机 Trainer `state_root/datasets/<dataset_version>` 时执行：
+
+```powershell
+conda run -n quantx-train python -m quantx_trainer.main publish-dataset --config C:\Users\limao\QuantXTraining\state\trainer.toml --dataset-version <dataset_version>
+```
+
+命令重新核验认证证据，发布并读回 bundle 后，才登记不可替换的 `source_bundle`。迁移 `20260910_0074` 与开发角色的数据集 UPDATE 权限必须先由运维应用；本地尚未部署。旧数据集缺失传输清单时不可训练，需要先完成发布。准备流程自动发布与持久化交接仍待接入。
+
+调度领取后按清单从受限 SFTP 拉取至 `state_root/dataset-cache/<bundle_id>`，逐文件校验后原子完成，再核对认证清单与数据库投影，成功后才启动 Research。磁盘保留空间来自主机策略；下载和核验共享运行归属/取消/心跳监督，部分文件可供后续重试复用。输入准备阶段进程突然退出后的自动恢复、父训练制品下载与跨机器验收尚未完成。

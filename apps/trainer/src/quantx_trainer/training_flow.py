@@ -46,6 +46,7 @@ from quantx_infrastructure.training_result import (
   safe_public_details as _safe_public_details,
 )
 
+from quantx_trainer.dataset_transfer import load_dataset
 from quantx_trainer.publication import (
   PublicationError,
   publish_generated_result,
@@ -736,7 +737,17 @@ async def _run_claimed_job(
   child_started = False
   try:
     control_directory = _control_directory(run_id)
-    files = resolve_dataset_directory(dataset, root=research_datasets_root())
+    try:
+      files = await load_dataset(
+        current_config(), repository, dataset, run_id=run_id, owner=execution_owner,
+      )
+    except PublicationError as exc:
+      if str(exc) == "PUBLICATION_OWNERSHIP_LOST":
+        return {"run_id": run_id, "status": "OWNERSHIP_LOST"}
+      if str(exc) == "PUBLICATION_CANCEL_REQUESTED":
+        await repository.mark_cancelled(run_id, expected_flow_run_id=execution_owner)
+        return {"run_id": run_id, "status": "CANCELLED"}
+      raise
     run_kind = str(_value(run, "run_kind", "")).upper()
     if run_kind not in {"DEVELOPMENT", "FINAL_EVALUATION"}:
       raise ValueError("training run_kind is invalid")

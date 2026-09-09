@@ -21,7 +21,7 @@ class TrainerPreflightError(RuntimeError):
 # Execution roles do not create specs/runs, cancel user requests, delete history
 # or publish models. Dataset insertion is for completed certification only.
 REQUIRED_TABLE_GRANTS = {
-  "stock_selection_dataset_versions": frozenset({"SELECT", "INSERT"}),
+  "stock_selection_dataset_versions": frozenset({"SELECT", "INSERT", "UPDATE"}),
   "stock_selection_training_specs": frozenset({"SELECT"}),
   "stock_selection_training_runs": frozenset({"SELECT", "UPDATE"}),
   "research_preparation_jobs": frozenset({"SELECT", "UPDATE"}),

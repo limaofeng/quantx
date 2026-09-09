@@ -82,6 +82,71 @@ class TradingDates:
     return target.weekday() < 5
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "corrupt", "wrong_version", "registration"])
+async def test_certified_dataset_publication_and_automatic_local_cache(tmp_path, monkeypatch, fault):
+  import shutil
+  from contextlib import contextmanager
+  from unittest.mock import AsyncMock
+
+  from quantx_infrastructure.training_bundle_store import (
+    DirectoryBundleReader,
+    materialize_bundle,
+  )
+  from quantx_trainer import dataset_transfer as transfer
+
+  origin = tmp_path / "origin"
+  (origin / "datasets").mkdir(parents=True)
+  dataset, _ = _dataset(origin / "datasets")
+  remote = tmp_path / "remote"
+  remote.mkdir()
+  destination = tmp_path / "destination"
+  destination.mkdir()
+  def config(root):
+    return SimpleNamespace(state_root=root, transfer_config=root / "transfer.toml")
+  row = SimpleNamespace(status="RUNNING", prefect_flow_run_id="owner", cancel_requested_at=None)
+  repo = SimpleNamespace(get_dataset=AsyncMock(return_value=dataset), record_dataset_bundle=AsyncMock(),
+                         get_run=AsyncMock(return_value=row), heartbeat_execution=AsyncMock(return_value=row))
+
+  @contextmanager
+  def store(*args, cancel=None):
+    def publish(bundle, directory):
+      target = remote / bundle.bundle_id
+      if not target.exists():
+        shutil.copytree(directory, target)
+      return bundle.bundle_id
+
+    def fetch(bundle, cache, *, minimum_free_bytes):
+      return materialize_bundle(DirectoryBundleReader(remote), bundle, cache, reserve_bytes=minimum_free_bytes, cancel=cancel)
+
+    yield SimpleNamespace(publish=publish, fetch=fetch)
+
+  monkeypatch.setattr(transfer, "open_store", store)
+  monkeypatch.setattr(transfer.TransferConfig, "load", lambda *args, **kwargs: object())
+  monkeypatch.setattr(transfer.HostPolicy, "load", lambda *args: SimpleNamespace(minimum_free_disk_mib=1))
+  if fault == "registration":
+    repo.record_dataset_bundle.side_effect = [ConnectionError("database unavailable"), None]
+    with pytest.raises(ConnectionError):
+      await transfer.publish_dataset(config(origin), repo, dataset_version="dataset-v1")
+  published = await transfer.publish_dataset(config(origin), repo, dataset_version="dataset-v1")
+  bundle = repo.record_dataset_bundle.call_args.kwargs["bundle"]
+  dataset["source_bundle"] = bundle.model_dump(mode="json")
+  assert published["bundle_id"] == bundle.bundle_id
+  if fault == "corrupt":
+    (remote / bundle.bundle_id / "training-panel.parquet").write_bytes(b"wrong")
+  if fault == "wrong_version":
+    dataset["source_bundle"]["source_id"] = "different-version"
+  if fault in {"corrupt", "wrong_version"}:
+    with pytest.raises((ValueError, RuntimeError)):
+      await transfer.load_dataset(config(destination), repo, dataset, run_id="run", owner="owner")
+    assert not (destination / "dataset-cache" / bundle.bundle_id).exists()
+  else:
+    files = await transfer.load_dataset(config(destination), repo, dataset, run_id="run", owner="owner")
+    assert files["directory"] == destination / "dataset-cache" / bundle.bundle_id
+    assert files["panel_path"].read_bytes() == b"panel"
+    assert not (destination / "datasets").exists()
+
+
 def _dataset(root: Path) -> tuple[dict, dict]:
   directory = root / "dataset-v1"
   directory.mkdir()

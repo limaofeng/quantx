@@ -303,6 +303,7 @@ def materialize_bundle(
   cache_root: Path,
   *,
   reserve_bytes: int,
+  cancel: threading.Event | None = None,
 ) -> Path:
   """Read by inventory hash; expose content only after every file verifies.
 
@@ -317,15 +318,16 @@ def materialize_bundle(
   complete = cache_root / bundle.bundle_id
   reject_links(complete)
   if complete.exists():
-    return verify_bundle(complete, bundle)
+    return verify_bundle(complete, bundle, cancel=cancel)
   staging = cache_root / (bundle.bundle_id + ".partial")
   reject_links(staging)
   staging.mkdir(exist_ok=True)
   try:
     for entry in bundle.files:
+      _check_cancel(cancel)
       destination = staging / entry.path
       reject_links(destination)
-      if verify_file(destination, entry):
+      if verify_file(destination, entry, cancel=cancel):
         continue
       if shutil.disk_usage(cache_root).free < entry.size + reserve_bytes:
         raise BundleTransferError("BUNDLE_DISK_RESERVE")
@@ -344,6 +346,7 @@ def materialize_bundle(
         temporary.open("xb") as output,
       ):
         while block := incoming.read(CHUNK_BYTES):
+          _check_cancel(cancel)
           count += len(block)
           if count > entry.size:
             raise BundleTransferError("BUNDLE_OBJECT_SIZE_MISMATCH")
@@ -356,7 +359,7 @@ def materialize_bundle(
       if count != entry.size or digest.hexdigest() != entry.sha256:
         raise BundleTransferError("BUNDLE_OBJECT_INTEGRITY_MISMATCH")
       os.replace(temporary, destination)
-    verify_bundle(staging, bundle)
+    verify_bundle(staging, bundle, cancel=cancel)
     # Never merge into an existing result directory or expose partial contents.
     staging.rename(complete)
     return complete

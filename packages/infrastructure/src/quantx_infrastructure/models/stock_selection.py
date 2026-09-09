@@ -368,6 +368,7 @@ class StockSelectionDatasetVersion(Base):
   stock_count = Column(Integer, nullable=False)
   trading_day_count = Column(Integer, nullable=False)
   quality_summary = Column(JSON, nullable=False, default=dict)
+  source_bundle = Column(JSON, nullable=True)
   created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

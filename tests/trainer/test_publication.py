@@ -381,7 +381,7 @@ async def test_trainer_normal_flow_publishes_before_success_and_resumes_failed_t
   process = subprocess.Popen([sys.executable, "-c", "pass"])
   process.wait(timeout=5)
   monkeypatch.setattr(flow, "current_config", lambda: result.config)
-  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda *args, **kwargs: {})
+  monkeypatch.setattr(flow, "load_dataset", AsyncMock(return_value={}))
   monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
   monkeypatch.setattr(flow, "_spawn_process", lambda *args, **kwargs: process)
   result.repository.fail_run = AsyncMock()

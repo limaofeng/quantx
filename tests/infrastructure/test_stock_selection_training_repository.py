@@ -140,6 +140,26 @@ async def test_execution_capability_requires_fresh_certificate(age):
 
 
 @pytest.mark.asyncio
+async def test_dataset_bundle_registration_is_immutable(session_factory):
+  bundle = TrainingBundle(schema_version=1, kind="DATASET", source_id="dataset-v1", files=[
+    BundleFile(path=name, size=1, sha256="a" * 64)
+    for name in ("manifest.json", "training-panel.parquet", "data-quality.json")
+  ])
+  async with session_factory() as db:
+    repo = StockSelectionTrainingRepository(db)
+    await repo.certify_dataset(DATASET)
+    await repo.record_dataset_bundle("dataset-v1", bundle=bundle)
+    await repo.record_dataset_bundle("dataset-v1", bundle=bundle)
+    changed = bundle.model_dump()
+    changed["files"][0]["sha256"] = "b" * 64
+    with pytest.raises(TrainingRepositoryError, match="immutable"):
+      await repo.record_dataset_bundle("dataset-v1", bundle=TrainingBundle.model_validate(changed))
+    await db.rollback()
+    row = await repo.get_dataset("dataset-v1")
+    assert TrainingBundle.model_validate(row.source_bundle).bundle_id == bundle.bundle_id
+
+
+@pytest.mark.asyncio
 async def test_capability_heartbeat_persists_naive_utc_and_returns_aware_utc() -> None:
   class Session:
     persisted_updated_at = None

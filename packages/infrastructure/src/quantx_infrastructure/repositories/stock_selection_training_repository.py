@@ -554,6 +554,32 @@ class StockSelectionTrainingRepository:
   # ---------------------------------------------------------------------
   # Immutable dataset/spec creation and idempotent queue insertion
   # ---------------------------------------------------------------------
+  async def record_dataset_bundle(
+    self, dataset_version: str, *, bundle: TrainingBundle,
+  ) -> StockSelectionDatasetVersion:
+    """Freeze a read-back-verified remote inventory for one certified version."""
+    if bundle.kind != "DATASET" or bundle.source_id != dataset_version:
+      raise TrainingRepositoryError("dataset bundle identity mismatch")
+    if {entry.path for entry in bundle.files} != {
+      "manifest.json", "training-panel.parquet", "data-quality.json",
+    }:
+      raise TrainingRepositoryError("dataset bundle inventory mismatch")
+    result = await self.db.execute(
+      select(StockSelectionDatasetVersion)
+      .where(StockSelectionDatasetVersion.dataset_version == dataset_version)
+      .with_for_update().execution_options(populate_existing=True)
+    )
+    row = result.scalar_one_or_none()
+    if row is None or row.status != "CERTIFIED":
+      raise TrainingRepositoryError("dataset is not certified")
+    if row.source_bundle is not None:
+      if TrainingBundle.model_validate(row.source_bundle).bundle_id != bundle.bundle_id:
+        raise TrainingRepositoryError("dataset bundle is immutable")
+      return row
+    row.source_bundle = bundle.model_dump(mode="json")
+    await self.db.commit()
+    return row
+
   async def certify_dataset(
     self,
     values: Mapping[str, Any] | None = None,

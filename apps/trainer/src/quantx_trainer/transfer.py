@@ -100,7 +100,7 @@ class TrainingStore:
   ) -> Path:
     reader = self.datasets if bundle.kind == "DATASET" else self.artifacts
     return materialize_bundle(
-      reader, bundle, cache_root, reserve_bytes=minimum_free_bytes
+      reader, bundle, cache_root, reserve_bytes=minimum_free_bytes, cancel=self.cancel
     )
 
   def publish(self, bundle: TrainingBundle, directory: Path) -> str:

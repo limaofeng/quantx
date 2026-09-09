@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -129,10 +130,12 @@ def _is_link_or_junction(path: Path) -> bool:
   return False
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path, *, cancel: threading.Event | None = None) -> str:
   digest = hashlib.sha256()
   with path.open("rb") as stream:
     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+      if cancel is not None and cancel.is_set():
+        raise ValueError("DATASET_VERIFICATION_CANCELLED")
       digest.update(chunk)
   return digest.hexdigest()
 
@@ -167,7 +170,8 @@ def _manifest_evidence_sha256(manifest: Mapping[str, Any]) -> str:
 
 
 def resolve_dataset_directory(
-  dataset: Any, *, root: Path | None = None
+  dataset: Any, *, root: Path | None = None, directory: Path | None = None,
+  cancel: threading.Event | None = None,
 ) -> dict[str, Any]:
   """Resolve and verify a certified dataset without trusting DB paths."""
 
@@ -183,7 +187,7 @@ def resolve_dataset_directory(
     if isinstance(dataset, Mapping)
     else getattr(dataset, "source_reference", "")
   )
-  candidate = research_root / Path(reference)
+  candidate = directory if directory is not None else research_root / Path(reference)
   if not _within(research_root, candidate):
     raise ValueError("dataset source_reference escapes research root")
   _reject_symlink_components(research_root, candidate)
@@ -232,7 +236,7 @@ def resolve_dataset_directory(
   _reject_symlink_components(research_root, panel_path)
   if not panel_path.is_file():
     raise ValueError("certified dataset panel is missing")
-  panel_hash = _sha256_file(panel_path)
+  panel_hash = _sha256_file(panel_path, cancel=cancel)
   files = manifest.get("files")
   if not isinstance(files, Mapping):
     raise ValueError("certified dataset file evidence is missing")
@@ -273,7 +277,7 @@ def resolve_dataset_directory(
   if not isinstance(quality_file_evidence, Mapping):
     raise ValueError("certified dataset quality evidence is missing")
   quality_bytes = quality_path.stat().st_size
-  quality_hash = _sha256_file(quality_path)
+  quality_hash = _sha256_file(quality_path, cancel=cancel)
   try:
     declared_quality_bytes = int(manifest.get("quality_bytes", -1))
     file_quality_bytes = int(quality_file_evidence.get("bytes", -1))
