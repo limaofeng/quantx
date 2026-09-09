@@ -43,6 +43,24 @@ GPU 构建探针同样在微型拟合前检查显存并使用准入线程预算�
 
 ## 独立配置
 
+### 开发控制面跨机端口
+
+macOS 的 `ops/config/compose.development.yaml` 默认只映射回环地址。Windows Trainer 需要访问开发 PostgreSQL/Prefect 时，额外使用 `ops/config/compose.trainer-development.yaml`，显式设置 `QUANTX_DEV_TRAINER_BIND_HOST` 为开发机局域网 IPv4。合并后保留回环映射，仅为 PostgreSQL 5432 和 Prefect 4200 增加该地址；Redis/InfluxDB 不随之开放。省略地址会在 Compose 配置解析时失败。
+
+由外部服务运维在确认可短暂停止这两个开发容器后应用。必须沿用现有 Compose 项目名称和 PostgreSQL 密码，不新建数据卷；当前开发项目名为 `quantx-development`。在项目根目录、已有私有 `QUANTX_DEV_POSTGRES_PASSWORD` 环境变量的终端执行：
+
+```bash
+export QUANTX_DEV_TRAINER_BIND_HOST=192.168.5.12 # 替换为实际开发机地址
+docker compose -p quantx-development \
+  -f ops/config/compose.development.yaml \
+  -f ops/config/compose.trainer-development.yaml \
+  up -d --no-deps --no-build --pull never postgres prefect
+```
+
+这会重建对应容器以应用端口映射，不能由普通 Trainer 启停自动执行；执行后从 Windows 复核连通性及开发目标身份。端口开放不替代数据库最小权限、运行账户 ACL 或受限 SFTP 配置。
+
+### Trainer TOML
+
 使用本机私有 TOML 文件显式提供全部字段，不读取 API `.env`，不提交凭据：
 
 ```toml

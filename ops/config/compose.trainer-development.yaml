@@ -1,0 +1,10 @@
+# Optional development control-plane access from the isolated Windows Trainer.
+# Apply together with compose.development.yaml using the existing project name.
+# Keep loopback mappings from the base file; bind only the chosen development LAN IP.
+services:
+  postgres:
+    ports:
+      - "${QUANTX_DEV_TRAINER_BIND_HOST:?Set the development machine LAN IPv4 address}:5432:5432"
+  prefect:
+    ports:
+      - "${QUANTX_DEV_TRAINER_BIND_HOST:?Set the development machine LAN IPv4 address}:4200:4200"
