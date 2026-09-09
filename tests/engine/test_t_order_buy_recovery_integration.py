@@ -628,7 +628,9 @@ async def test_cutoff_retires_crashed_buy_replacement_and_never_resumes_next_day
   buy_chain, prepared, filled
 ):
   from quantx_engine.t_order_lifecycle import advance_order
-  from quantx_infrastructure.services.t_order_lifecycle_state import t_order_lifecycle_active
+  from quantx_infrastructure.services.t_order_lifecycle_state import (
+    t_order_lifecycle_active,
+  )
 
   client = await initial_order(buy_chain)
   await converge_first_attempt(buy_chain, client, filled)
