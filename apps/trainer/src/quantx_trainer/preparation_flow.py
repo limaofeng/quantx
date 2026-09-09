@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -20,13 +21,15 @@ from quantx_infrastructure.services.research_preparation import (
 from quantx_infrastructure.training_bundle_store import reject_links
 from quantx_infrastructure.training_process_evidence import (
   begin_execution,
+  inspect_execution,
+  local_success_recorded,
   record_exit,
   record_spawn,
 )
 from quantx_infrastructure.training_result import safe_public_details
 
 from quantx_trainer.dataset_transfer import load_dataset
-from quantx_trainer.publication import read_object
+from quantx_trainer.publication import publication_lock, read_object
 from quantx_trainer.runtime import current_config, training_session
 from quantx_trainer.training_flow import _host_admission_reason
 
@@ -35,10 +38,59 @@ class PreparationStopUnconfirmed(RuntimeError):
   pass
 
 
-async def run_gpu_job(config, job, files, check):
+def attempt_directory(config, job):
+  if (
+    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", job.job_id)
+    or not job.flow_run_id
+  ):
+    raise ValueError("GPU_PREPARATION_IDENTITY_INVALID")
   attempt = hashlib.sha256(job.flow_run_id.encode()).hexdigest()
   directory = config.state_root / "preparation" / job.job_id / attempt
   reject_links(directory)
+  return directory
+
+
+async def recover_gpu_results(config, repository):
+  recovered = []
+  for job in await repository.running_jobs(kinds=("GPU",)):
+    try:
+      directory = attempt_directory(config, job)
+      # Never manufacture missing evidence directories while inspecting jobs.
+      if not directory.is_dir():
+        continue
+      with publication_lock(directory):
+        evidence = directory / "process.json"
+        identity = dict(
+          run_id=job.job_id, owner=job.flow_run_id, request=directory / "request.json"
+        )
+        state = inspect_execution(evidence, **identity)
+        if state != "EXITED" and not local_success_recorded(evidence, **identity):
+          continue
+        process = read_object(evidence)
+        if (
+          process.get("state") != "EXITED"
+          or type(process.get("returncode")) is not int
+          or process["returncode"] != 0
+        ):
+          continue
+        result = read_object(directory / "result.json")
+        if type(result.get("ready")) is not bool:
+          continue
+        await repository.progress(
+          job.job_id,
+          expected_flow_run_id=job.flow_run_id,
+          status="SUCCEEDED" if result["ready"] else "FAILED",
+          phase="资格验证完成",
+          result=safe_public_details(result),
+        )
+        recovered.append(job.job_id)
+    except Exception:
+      continue  # Retain local facts when locked, unverifiable or disconnected.
+  return recovered
+
+
+async def run_gpu_job(config, job, files, check):
+  directory = attempt_directory(config, job)
   directory.mkdir(parents=True, exist_ok=True)
   gpu_root = config.state_root / "gpu"
   reject_links(gpu_root)
@@ -69,7 +121,9 @@ async def run_gpu_job(config, job, files, check):
       env=config.research_environment(os.environ),
       stdout=subprocess.DEVNULL,
       stderr=subprocess.DEVNULL,
-      creationflags=(subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS)
+      creationflags=(
+        subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS
+      )
       if sys.platform == "win32"
       else 0,
     )
@@ -107,51 +161,63 @@ async def run_gpu_job(config, job, files, check):
 @flow(name="trainer-gpu-preparation", retries=0)
 async def trainer_gpu_preparation_flow(config_path: str):
   async with training_session(config_path) as db:
+    config = current_config()
+    repository = ResearchPreparationRepository(db)
+    recovered = await recover_gpu_results(config, repository)
     reason = await asyncio.to_thread(_host_admission_reason)
     if reason:
       return {"status": "QUEUED", "reason": reason}
-    config = current_config()
-    repository = ResearchPreparationRepository(db)
     job = await repository.claim(str(uuid.uuid4()), kinds=("GPU",))
     if job is None:
-      return {"status": "IDLE"}
+      return {"status": "IDLE", "recovered_job_ids": recovered}
     job_id, owner = job.job_id, job.flow_run_id
 
     async def check():
       await repository.progress(job_id, expected_flow_run_id=owner)
 
-    try:
-      dataset = await StockSelectionTrainingRepository(db).get_dataset(
-        job.request["dataset_version"]
-      )
-      files = await load_dataset(
-        config, repository, dataset, run_id=job_id, owner=owner, check=check
-      )
-      await check()
-      result = await run_gpu_job(config, job, files, check)
-      status = "SUCCEEDED" if result.get("ready") is True else "FAILED"
-      await repository.progress(
-        job_id,
-        expected_flow_run_id=owner,
-        status=status,
-        phase="资格验证完成",
-        result=safe_public_details(result),
-      )
-      return {"job_id": job_id, "status": status}
-    except PreparationStopUnconfirmed:
-      return {
-        "job_id": job_id,
-        "status": "RUNNING",
-        "reason": "GPU_PREPARATION_STOP_UNCONFIRMED",
-      }
-    except asyncio.CancelledError:
-      raise
-    except Exception:
-      await repository.progress(
-        job_id,
-        expected_flow_run_id=owner,
-        status="FAILED",
-        phase="资格验证失败",
-        error="GPU_PREPARATION_RETRY_REQUIRED",
-      )
-      return {"job_id": job_id, "status": "FAILED"}
+    directory = attempt_directory(config, job)
+    directory.mkdir(parents=True, exist_ok=True)
+    with publication_lock(directory):
+      registration_started = False
+      try:
+        dataset = await StockSelectionTrainingRepository(db).get_dataset(
+          job.request["dataset_version"]
+        )
+        files = await load_dataset(
+          config, repository, dataset, run_id=job_id, owner=owner, check=check
+        )
+        await check()
+        result = await run_gpu_job(config, job, files, check)
+        status = "SUCCEEDED" if result.get("ready") is True else "FAILED"
+        registration_started = True
+        await repository.progress(
+          job_id,
+          expected_flow_run_id=owner,
+          status=status,
+          phase="资格验证完成",
+          result=safe_public_details(result),
+        )
+        return {"job_id": job_id, "status": status}
+      except PreparationStopUnconfirmed:
+        return {
+          "job_id": job_id,
+          "status": "RUNNING",
+          "reason": "GPU_PREPARATION_STOP_UNCONFIRMED",
+        }
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        if registration_started:
+          return {
+            "job_id": job_id,
+            "status": "RUNNING",
+            "reason": "GPU_RESULT_REGISTRATION_PENDING",
+          }
+        await repository.progress(
+          job_id,
+          expected_flow_run_id=owner,
+          status="FAILED",
+          phase="资格验证失败",
+          error="GPU_PREPARATION_RETRY_REQUIRED",
+        )
+        return {"job_id": job_id, "status": "FAILED"}

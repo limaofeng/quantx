@@ -10,7 +10,7 @@ from quantx_trainer import preparation_flow as flow
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["ready", "blocked", "unconfirmed"])
+@pytest.mark.parametrize("outcome", ["ready", "blocked", "unconfirmed", "registration"])
 async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
   monkeypatch, tmp_path, outcome
 ):
@@ -20,7 +20,18 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
     kind="GPU",
     request={"dataset_version": "dataset"},
   )
-  repo = SimpleNamespace(claim=AsyncMock(return_value=job), progress=AsyncMock())
+  repo = SimpleNamespace(
+    claim=AsyncMock(return_value=job),
+    progress=AsyncMock(),
+    running_jobs=AsyncMock(return_value=[]),
+  )
+  if outcome == "registration":
+
+    async def progress(*args, **kwargs):
+      if "status" in kwargs:
+        raise ConnectionError("registration unavailable")
+
+    repo.progress.side_effect = progress
 
   @asynccontextmanager
   async def session(path):
@@ -35,10 +46,12 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
     assert files["directory"] == tmp_path / "verified"
     if outcome == "unconfirmed":
       raise flow.PreparationStopUnconfirmed()
-    return {"ready": outcome == "ready"}
+    return {"ready": outcome in {"ready", "registration"}}
 
   monkeypatch.setattr(flow, "training_session", session)
-  monkeypatch.setattr(flow, "current_config", lambda: object())
+  monkeypatch.setattr(
+    flow, "current_config", lambda: SimpleNamespace(state_root=tmp_path)
+  )
   monkeypatch.setattr(flow, "_host_admission_reason", lambda: None)
   monkeypatch.setattr(flow, "ResearchPreparationRepository", lambda db: repo)
   monkeypatch.setattr(
@@ -52,17 +65,30 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
   assert repo.claim.await_args.kwargs["kinds"] == ("GPU",)
   assert (
     result["status"]
-    == {"ready": "SUCCEEDED", "blocked": "FAILED", "unconfirmed": "RUNNING"}[outcome]
+    == {
+      "ready": "SUCCEEDED",
+      "blocked": "FAILED",
+      "unconfirmed": "RUNNING",
+      "registration": "RUNNING",
+    }[outcome]
   )
   for call in repo.progress.await_args_list:
     assert call.kwargs["expected_flow_run_id"] == "owner"
     if outcome == "unconfirmed":
       assert "status" not in call.kwargs
+    if outcome == "registration":
+      assert call.kwargs.get("status") != "FAILED"
 
 
 @pytest.mark.asyncio
-async def test_interrupted_spawn_keeps_unknown_execution_evidence(monkeypatch, tmp_path):
-  monkeypatch.setattr(flow.asyncio, "create_subprocess_exec", AsyncMock(side_effect=asyncio.CancelledError))
+async def test_interrupted_spawn_keeps_unknown_execution_evidence(
+  monkeypatch, tmp_path
+):
+  monkeypatch.setattr(
+    flow.asyncio,
+    "create_subprocess_exec",
+    AsyncMock(side_effect=asyncio.CancelledError),
+  )
   config = SimpleNamespace(state_root=tmp_path, research_environment=lambda ambient: {})
   job = SimpleNamespace(job_id="job", flow_run_id="owner", request={})
   with pytest.raises(flow.PreparationStopUnconfirmed):
@@ -108,3 +134,39 @@ async def test_gpu_supervisor_uses_file_request_and_records_real_child_exit(
   evidence = json.loads(request.with_name("process.json").read_text())
   assert evidence["state"] == "EXITED"
   assert evidence["returncode"] == 0
+  repo = SimpleNamespace(
+    running_jobs=AsyncMock(return_value=[job]),
+    progress=AsyncMock(side_effect=[ConnectionError("lost DB"), None]),
+  )
+  assert await flow.recover_gpu_results(config, repo) == []
+  assert await flow.recover_gpu_results(config, repo) == ["job"]
+  assert repo.progress.await_args.kwargs["status"] == "SUCCEEDED"
+  assert repo.progress.await_args.kwargs["expected_flow_run_id"] == "owner"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["locked", "request", "nonzero", "result"])
+async def test_recovery_rejects_active_or_unverifiable_gpu_attempt(tmp_path, fault):
+  from contextlib import nullcontext
+
+  config = SimpleNamespace(state_root=tmp_path)
+  job = SimpleNamespace(job_id="job", flow_run_id="owner")
+  directory = flow.attempt_directory(config, job)
+  directory.mkdir(parents=True)
+  request = directory / "request.json"
+  request.write_text("{}")
+  identity = dict(run_id="job", owner="owner", request=request)
+  evidence = directory / "process.json"
+  flow.begin_execution(evidence, **identity)
+  flow.record_exit(evidence, returncode=1 if fault == "nonzero" else 0, **identity)
+  (directory / "result.json").write_text(
+    "{}" if fault == "result" else '{"ready":true}'
+  )
+  if fault == "request":
+    request.write_text("changed")
+  repo = SimpleNamespace(
+    running_jobs=AsyncMock(return_value=[job]), progress=AsyncMock()
+  )
+  with flow.publication_lock(directory) if fault == "locked" else nullcontext():
+    assert await flow.recover_gpu_results(config, repo) == []
+  repo.progress.assert_not_called()

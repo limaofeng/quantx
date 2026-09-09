@@ -107,4 +107,6 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assigned = await repo.claim("trainer", kinds=("GPU",))
     assert assigned.job_id == gpu.job_id
     assert assigned.flow_run_id == "trainer"
+    assert [row.job_id for row in await repo.running_jobs(kinds=("GPU",))] == [gpu.job_id]
+    assert await repo.running_jobs(kinds=("DOWNLOAD",)) == []
   await engine.dispose()

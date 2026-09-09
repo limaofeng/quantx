@@ -149,6 +149,12 @@ class ResearchPreparationRepository:
       ).all()
     )
 
+  async def running_jobs(self, *, kinds):
+    return list((await self.db.scalars(
+      select(Job).where(Job.status == "RUNNING", Job.kind.in_(tuple(kinds)))
+      .execution_options(populate_existing=True)
+    )).all())
+
   async def submit(self, *, kind, config, request_key, dataset_version=None):
     if kind not in {"COVERAGE", "DOWNLOAD", "CERTIFY", "GPU"}:
       raise ValueError("未知准备任务类型")
