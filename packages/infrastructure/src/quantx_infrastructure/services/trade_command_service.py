@@ -2736,7 +2736,7 @@ class TradeCommandService:
         and str(correlation.broker_order_id or "") == broker_order_id
         and all(
           getattr(correlation, field) == getattr(pending, field)
-          for field in ("account_id", "owner_type", "owner_id", "environment", "intent_id", "batch_id", "t_trade_role")
+          for field in ("account_id", "owner_type", "owner_id", "environment", "intent_id", "batch_id", "t_trade_role", "bucket", "strategy_run_id")
         )
         and broker_order.account_id == pending.account_id
         and broker_order.stock_code == pending.instrument_code
@@ -2745,7 +2745,11 @@ class TradeCommandService:
         )
         and int(broker_order.volume or 0) == int(pending.volume or 0)
         and 0 <= filled_volume <= int(pending.volume or 0)
-        and all(int(trade.volume or 0) > 0 for trade in trades)
+        and all(
+          int(trade.volume or 0) > 0
+          and int(trade.order_type) == int(broker_order.type)
+          for trade in trades
+        )
         and int(broker_order.status) in _AUTHORITATIVE_ENTRY_TERMINAL_STATUSES
         and int(broker_order.traded_volume or 0) == filled_volume
         and not unapplied

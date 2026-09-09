@@ -114,7 +114,7 @@ async def test_replace_requires_converged_broker_fills_and_applied_runtime_event
     return pending if model is PendingTradeOrder else broker
   db = SimpleNamespace(
     get=get, scalar=AsyncMock(side_effect=[pending, unapplied]),
-    scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [SimpleNamespace(volume=trade_filled)] if trade_filled else [])),
+    scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [SimpleNamespace(volume=trade_filled, order_type=24)] if trade_filled else [])),
   )
   result = await commands.TradeCommandService(db).evaluate_t_order_replacement(
     client_order_id="client-0", now=datetime(2026, 9, 4, 2, 0, 31, tzinfo=timezone.utc),

@@ -879,6 +879,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   新旧 owner 的缺成交/未消费回报阻断用例、owner 回归共 32 项通过，证据
   `.codex_screenshots/p6-live-lifecycle-regression.log`。续单本身尚未接通：旧分支依赖
   StrategyRun，新 T 需要专用的当前风险/审批与原生命周期剩余量审查，不能只放宽 owner。
+- LIVE 续单前置审查组件已完成：按 head→source→intent→pending 锁序读取，要求唯一首单、
+  原委托权威终态、成交/意图/批次数量一致和全部回报 APPLIED；复用已消费确认及确认后
+  COMMITTED 分配，重新检查来源、操作者、累计数量和金额上限。不重写确认、分配或状态，
+  保留原 60 秒期限及最多一次续单，首次入场接口仍拒绝已提交意图。
+  公共续单证据同时补齐成交买卖方向、correlation bucket/strategy_run_id 一致性检查。
+  106 项相关回归通过；新增定价类型检查后 19 项前置审查边界通过，证据
+  `.codex_screenshots/p6-live-replacement-preflight*.log`。使用实际隔离 SQLite 确认/分配和
+  合成持久化委托/成交，未验证 PostgreSQL 并发锁序。该组件尚未接入实际续单命令；
+  接线须先完成当前持仓/风险复核与共享准入，不能将前置审查结果直接视为下单授权。
 - 剩余开发顺序：
   补齐 LIVE 续单审查/准入与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

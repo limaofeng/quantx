@@ -24,6 +24,29 @@ from quantx_infrastructure.services.t_entry_confirmation import (
 async def authorize_live_entry(
   db, *, intent, account_id, instrument_code, volume, limit_price, now
 ):
+  return await _authorize_live_entry(
+    db,
+    intent=intent,
+    account_id=account_id,
+    instrument_code=instrument_code,
+    volume=volume,
+    limit_price=limit_price,
+    now=now,
+    allowed_statuses={"EXECUTION_READY"},
+  )
+
+
+async def _authorize_live_entry(
+  db,
+  *,
+  intent,
+  account_id,
+  instrument_code,
+  volume,
+  limit_price,
+  now,
+  allowed_statuses,
+):
   if not db.in_transaction():
     raise ValueError("T_ENTRY_CALLER_TRANSACTION_REQUIRED")
   if now.tzinfo is None or now.utcoffset() is None:
@@ -36,7 +59,7 @@ async def authorize_live_entry(
     or intent.direction != "BUY"
     or intent.account_id != account_id
     or intent.instrument_code != instrument_code
-    or intent.status != "EXECUTION_READY"
+    or intent.status not in allowed_statuses
     or str(metadata.get("t_trade_role") or "").upper() != "ENTRY"
   ):
     raise ValueError("T_ENTRY_AUTHORIZATION_SCOPE_INVALID")
@@ -53,7 +76,8 @@ async def authorize_live_entry(
     populate_existing=True,
   )
   if (
-    head is None
+    source is None
+    or head is None
     or not head.enabled
     or head.strategy_run_id
     or head.account_id != account_id
