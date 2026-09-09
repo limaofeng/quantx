@@ -187,3 +187,26 @@ async def _load_bundle(
   lock.mkdir(parents=True, exist_ok=True)
   with publication_lock(lock):
     return await _supervised_io(fetch, repository, run_id, owner, cancel, check=check)
+
+
+async def load_certification_input(config, repository, job, *, check):
+  from quantx_contracts.research_preparation import CertificationInputReference
+
+  reference = CertificationInputReference.model_validate(job.request["certification_input"])
+  version = job.request["dataset_version"]
+  if reference.bundle.source_id != version:
+    raise ValueError("CERTIFICATION_INPUT_IDENTITY_MISMATCH")
+
+  def validate(directory, cache, cancel):
+    from quantx_research.certification_inputs import load_certification_inputs
+
+    load_certification_inputs(
+      directory, dataset_version=version, manifest_sha256=reference.manifest_sha256,
+      cancel=cancel,
+    )
+    return {"directory": directory, "manifest_sha256": reference.manifest_sha256}
+
+  return await _load_bundle(
+    config, repository, reference.bundle, run_id=job.job_id, owner=job.flow_run_id,
+    cache_name="certification-cache", validate=validate, check=check,
+  )

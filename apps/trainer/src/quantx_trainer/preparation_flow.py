@@ -43,7 +43,7 @@ class PreparationStopUnconfirmed(RuntimeError):
   pass
 
 
-class GPUAdmissionDenied(RuntimeError):
+class PreparationAdmissionDenied(RuntimeError):
   pass
 
 
@@ -133,7 +133,6 @@ async def run_gpu_job(config, job, files, check):
   gpu_root = config.state_root / "gpu"
   reject_links(gpu_root)
   gpu_root.mkdir(exist_ok=True)
-  request = directory / "request.json"
   payload = {
     **job.request,
     "kind": "GPU",
@@ -143,6 +142,25 @@ async def run_gpu_job(config, job, files, check):
     ),
     "qualification_output": str(gpu_root / "qualification.json"),
   }
+  return await _run_preparation_process(config, job, payload, check)
+
+
+async def run_certification_job(config, job, files, check):
+  payload = {
+    "kind": "CERTIFY_FROZEN",
+    "dataset_version": job.request["dataset_version"],
+    "certification_input": job.request["certification_input"],
+    "input_directory": str(files["directory"]),
+    "output_root": str(config.state_root / "datasets"),
+  }
+  return await _run_preparation_process(config, job, payload, check)
+
+
+async def _run_preparation_process(config, job, payload, check):
+  directory = attempt_directory(config, job)
+  directory.mkdir(parents=True, exist_ok=True)
+  request = directory / "request.json"
+  label = "GPU" if payload["kind"] == "GPU" else "CERTIFICATION"
   with request.open("x", encoding="utf-8") as stream:
     json.dump(payload, stream)
     stream.flush()
@@ -168,7 +186,7 @@ async def run_gpu_job(config, job, files, check):
   except BaseException:
     # An interrupted asynchronous spawn may have created a child without
     # returning its handle. Preserve STARTING and never make it retryable.
-    raise PreparationStopUnconfirmed("GPU_PREPARATION_SPAWN_UNCONFIRMED") from None
+    raise PreparationStopUnconfirmed(f"{label}_PREPARATION_SPAWN_UNCONFIRMED") from None
   waiter = asyncio.create_task(process.wait())
   try:
     record_spawn(
@@ -181,9 +199,9 @@ async def run_gpu_job(config, job, files, check):
       if not done:
         await check()
     if waiter.result() == 75:
-      raise GPUAdmissionDenied("GPU_PREPARATION_HOST_ADMISSION_DENIED")
+      raise PreparationAdmissionDenied(f"{label}_PREPARATION_HOST_ADMISSION_DENIED")
     if waiter.result() != 0:
-      raise ValueError("GPU_PREPARATION_PROCESS_FAILED")
+      raise ValueError(f"{label}_PREPARATION_PROCESS_FAILED")
     return read_object(directory / "result.json")
   finally:
     try:
@@ -193,7 +211,7 @@ async def run_gpu_job(config, job, files, check):
     if not stopped:
       waiter.cancel()
       await asyncio.gather(waiter, return_exceptions=True)
-      raise PreparationStopUnconfirmed("GPU_PREPARATION_STOP_UNCONFIRMED")
+      raise PreparationStopUnconfirmed(f"{label}_PREPARATION_STOP_UNCONFIRMED")
     await waiter
     record_exit(evidence, returncode=process.returncode, **identity)
 
@@ -241,7 +259,7 @@ async def trainer_gpu_preparation_flow(config_path: str):
             result=safe_public_details(result),
           )
           return {"job_id": job_id, "status": status}
-        except GPUAdmissionDenied:
+        except PreparationAdmissionDenied:
           await repository.requeue_gpu_admission(job_id, expected_flow_run_id=owner)
           return {
             "job_id": job_id,

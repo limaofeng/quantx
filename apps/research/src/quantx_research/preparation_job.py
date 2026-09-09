@@ -258,6 +258,34 @@ async def _coverage_source(
 
 async def execute(request, directory):
   kind = request["kind"]
+  if kind == "CERTIFY_FROZEN":
+    from quantx_contracts.research_preparation import CertificationInputReference
+
+    from quantx_research.certification_inputs import certify_frozen_inputs
+    from quantx_research.next_day_selection_dataset import (
+      load_certified_dataset_manifest,
+    )
+
+    reference = CertificationInputReference.model_validate(request["certification_input"])
+    version = request["dataset_version"]
+    if reference.bundle.source_id != version:
+      raise ValueError("Certification input identity mismatch")
+    inputs, output_root = Path(request["input_directory"]), Path(request["output_root"])
+    for path in (inputs, output_root):
+      if not path.is_absolute():
+        raise ValueError("Frozen certification requires absolute local paths")
+      reject_links(path)
+    output = await certify_frozen_inputs(
+      inputs, dataset_version=version, manifest_sha256=reference.manifest_sha256,
+      work_directory=directory, output_root=output_root,
+    )
+    manifest = load_certified_dataset_manifest(output)
+    return {
+      "ready": True, "dataset_version": manifest["dataset_version"],
+      "manifest_sha256": manifest["manifest_sha256"],
+      "sample_count": manifest["quality"]["sample_count"],
+      "input_manifest_sha256": reference.manifest_sha256,
+    }
   config = ResearchPreparationConfig.model_validate(request["config"])
   if kind in {"COVERAGE", "DOWNLOAD"}:
     return await coverage(config)

@@ -112,7 +112,7 @@ async def export_certification_inputs(
       shutil.rmtree(staging)
 
 
-def load_certification_inputs(directory, *, dataset_version, manifest_sha256):
+def load_certification_inputs(directory, *, dataset_version, manifest_sha256, cancel=None):
   """Validate the expected identity and return a relocated config plus file source."""
   directory = Path(directory).absolute()
   _no_links(directory)
@@ -143,7 +143,7 @@ def load_certification_inputs(directory, *, dataset_version, manifest_sha256):
     if (
       not path.is_file()
       or path.stat().st_size != evidence["size"]
-      or _digest(path) != evidence["sha256"]
+      or _digest(path, cancel=cancel) != evidence["sha256"]
     ):
       raise ValueError("Certification input file integrity mismatch")
   actual = set()
@@ -169,7 +169,7 @@ def load_certification_inputs(directory, *, dataset_version, manifest_sha256):
     or config.data.verified_panel_path is not None
   ):
     raise ValueError("Frozen certification cannot use external paths")
-  frozen = FrozenResearchDataSource(directory / "source")
+  frozen = FrozenResearchDataSource(directory / "source", cancel=cancel)
   allowed = {"config.json", *history_names, "source/manifest.json"}
   allowed.update(f"source/{name}" for name in frozen.manifest["files"])
   if set(expected) != allowed:

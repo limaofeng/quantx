@@ -34,9 +34,16 @@ def _json(path, value):
   )
 
 
-def _digest(path):
+def _digest(path, *, cancel=None):
+  digest = hashlib.sha256()
   with path.open("rb") as stream:
-    return hashlib.file_digest(stream, "sha256").hexdigest()
+    while True:
+      if cancel is not None and cancel.is_set():
+        raise ValueError("Frozen input verification cancelled")
+      block = stream.read(1024 * 1024)
+      if not block:
+        return digest.hexdigest()
+      digest.update(block)
 
 
 def _no_links(path):
@@ -122,7 +129,8 @@ async def export_frozen_source(
 class FrozenResearchDataSource:
   """Strictly bounded source and SH calendar, without infrastructure imports."""
 
-  def __init__(self, directory):
+  def __init__(self, directory, *, cancel=None):
+    self.cancel = cancel
     self.directory = Path(directory).absolute()
     _no_links(self.directory)
     path = self.directory / "manifest.json"
@@ -190,7 +198,7 @@ class FrozenResearchDataSource:
     if (
       not path.is_file()
       or path.stat().st_size != evidence["size"]
-      or _digest(path) != evidence["sha256"]
+      or _digest(path, cancel=self.cancel) != evidence["sha256"]
     ):
       raise ValueError(f"Frozen source file integrity mismatch: {name}")
     return path

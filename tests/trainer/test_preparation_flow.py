@@ -116,7 +116,7 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
     if outcome == "unconfirmed":
       raise flow.PreparationStopUnconfirmed()
     if outcome == "admission":
-      raise flow.GPUAdmissionDenied()
+      raise flow.PreparationAdmissionDenied()
     return {"ready": outcome in {"ready", "registration"}}
 
   monkeypatch.setattr(flow, "training_session", session)
@@ -166,7 +166,7 @@ async def test_real_host_denial_exit_is_recorded_before_requeue(monkeypatch, tmp
   monkeypatch.setattr(flow.asyncio, "create_subprocess_exec", spawn)
   config = SimpleNamespace(state_root=tmp_path, research_environment=lambda ambient: {})
   job = SimpleNamespace(job_id="job", flow_run_id="owner", request={})
-  with pytest.raises(flow.GPUAdmissionDenied):
+  with pytest.raises(flow.PreparationAdmissionDenied):
     await flow.run_gpu_job(config, job, {"directory": tmp_path / "cache"}, AsyncMock())
   evidence = json.loads(
     (flow.attempt_directory(config, job) / "process.json").read_text()

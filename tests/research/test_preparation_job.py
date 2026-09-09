@@ -27,14 +27,17 @@ async def test_gpu_preparation_uses_downloaded_official_wheel(tmp_path, monkeypa
   wheel.touch()
   monkeypatch.setattr(dataset, "resolve_dataset_directory", lambda version: tmp_path / version)
 
-  def qualify(directory, *, build_evidence):
+  def qualify(directory, *, build_evidence, output):
     assert directory == tmp_path / "certified"
     assert build_evidence == wheel
+    assert output == tmp_path / "qualification.json"
     raise RuntimeError("qualification invoked")
 
   monkeypatch.setattr(gpu, "qualify_lightgbm_gpu", qualify)
   request = {
     "kind": "GPU", "dataset_version": "certified",
+    "build_evidence": str(wheel), "dataset_directory": str(tmp_path / "certified"),
+    "qualification_output": str(tmp_path / "qualification.json"),
     "config": {"date_start": "2025-01-02", "date_end": "2025-01-10"},
   }
   with pytest.raises(RuntimeError, match="qualification invoked"):
