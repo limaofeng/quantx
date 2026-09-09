@@ -152,6 +152,71 @@ def test_digest_cannot_escape_export_directory():
     content_path("../credentials")
 
 
+@pytest.mark.parametrize("reason", [
+  "SOURCE_COVERAGE_MISSING", "PERSISTED_COVERAGE_UNPROVEN",
+  "PERSISTED_COVERAGE_CHANGED", "HISTORICAL_SOURCE_IDENTITY_MISSING",
+])
+def test_safe_export_error_preserves_known_codes(reason):
+  from quantx_worker.prefector.flows.development_data_export_flow import (
+    safe_export_error,
+  )
+
+  assert safe_export_error(ValueError(reason)) == reason
+  assert safe_export_error(ValueError("private connection detail")) == "ValueError"
+
+
+async def test_empty_replacement_does_not_create_another_request(monkeypatch):
+  from contextlib import asynccontextmanager
+  from types import SimpleNamespace
+  from unittest.mock import AsyncMock
+
+  from quantx_worker.prefector.flows import development_data_export_flow as flow
+
+  request = HistoryPartitionRequest(
+    instrument="000001.SZ", period="tick", trading_date=date(2026, 8, 3)
+  )
+  row = dict(id="export", request=request.model_dump(mode="json"),
+             state="QUEUED", source_request_id="old")
+
+  class Connection:
+    async def scalar(self, *args):
+      return True
+
+    async def execute(self, statement, parameters=None):
+      if parameters and "source" in parameters:
+        row["source_request_id"] = parameters["source"]
+      return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [dict(row)]))
+
+  @asynccontextmanager
+  async def connect():
+    yield Connection()
+
+  async def source(identity):
+    return dict(status="COMPLETED", development_only=identity != "old",
+                ingestion_result={"day_coverage": []})
+
+  store = SimpleNamespace(
+    engine=SimpleNamespace(connect=connect, begin=connect),
+    market_data_request=source,
+    create_market_data_request=AsyncMock(return_value="replacement"),
+    close=AsyncMock(),
+  )
+  monkeypatch.setenv("ENV", "production")
+  monkeypatch.setattr(flow, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(flow, "cleanup_expired", AsyncMock())
+  monkeypatch.setattr(flow, "history_window_open", AsyncMock(return_value=True))
+  monkeypatch.setattr(flow, "load_uploaded_request_manifest", AsyncMock(return_value=({}, {}, [])))
+  failed = AsyncMock()
+  monkeypatch.setattr(flow, "set_failed", failed)
+  await flow.dispatch_once()
+  row["state"] = "WAITING_SOURCE"
+  await flow.dispatch_once()
+  store.create_market_data_request.assert_awaited_once_with(
+    request.agent_payload(), idempotency_scope="development-retry:old", development_only=True
+  )
+  failed.assert_awaited_once_with(store, "export", "SOURCE_COVERAGE_MISSING")
+
+
 @pytest.mark.parametrize("limits", [(11.0, 9.0), (None, None)])
 async def test_persisted_daily_limits_round_trip(monkeypatch, tmp_path, limits):
   from types import SimpleNamespace

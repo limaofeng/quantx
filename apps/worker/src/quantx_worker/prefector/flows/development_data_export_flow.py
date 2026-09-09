@@ -278,6 +278,7 @@ async def dispatch_once() -> dict:
           if (
             source
             and source["status"] == "COMPLETED"
+            and source.get("development_only") is False
             and row.get("source_request_id")
             and row.get("state") in {"QUEUED", "WAITING_SOURCE"}
             and not _has_positive_source_coverage(source, request)
@@ -377,12 +378,26 @@ async def dispatch_once() -> dict:
                 },
               )
           except (ValueError, OSError, MarketDataValidationError) as exc:
-            await set_failed(store, row["id"], type(exc).__name__)
+            await set_failed(store, row["id"], safe_export_error(exc))
         return {"status": "processed", "partitions": len(rows)}
       finally:
         await connection.execute(text("SELECT pg_advisory_unlock(817234591)"))
   finally:
     await store.close()
+
+
+def safe_export_error(exc: Exception) -> str:
+  known = {
+    "SOURCE_COVERAGE_MISSING",
+    "PERSISTED_COVERAGE_UNPROVEN",
+    "PERSISTED_COVERAGE_CHANGED",
+    "HISTORICAL_SOURCE_IDENTITY_MISSING",
+    "EXPORT_TRANSFER_BUDGET_EXCEEDED",
+    "EXPORT_DISK_BUDGET_EXCEEDED",
+    "EXPORT_CHECKSUM_MISMATCH",
+    "EXPORT_RECORD_BUDGET_EXCEEDED",
+  }
+  return str(exc) if str(exc) in known else type(exc).__name__
 
 
 async def set_failed(store, identity: str, reason: str) -> None:
