@@ -1117,7 +1117,17 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   精确重试只有一条命令；设备会话撤销或最终容量不足不产生 outbox，原计划退出义务保留。
   **6 项跨日用例及 9 项 TradingService 回归通过**，相关 Ruff 通过；证据
   `.codex_screenshots/p6-live-exit-outbox-final.log`、`p6-live-exit-routing-regression.log`。
-  平台/设备和账户容量读取仍使用隔离替身，尚需券商回报和原计划成交收敛；不计实盘闭环。
+  随后接通合成券商回报→真实 Order/Trade 仓储→runtime event staging/router→原计划扣减
+  →T order lifecycle finalizer：两笔 50 股成交及重复回放只累计 100 股，终态证明前不释放，
+  终态后清理 pending 并关闭原批次，完成后重复回报不改变批次版本或重复扣减。
+  修复 EXIT_PLAN owner 与批次原 source owner 不同而跳过批次投影的遗漏，严格核对原计划、
+  source、账户、标的、bucket、批次与环境；单笔退出完成但批次仍有余量时保持 EXIT_PARTIAL。
+  **53 项定向验证通过**（含 8 项来源范围漂移拒绝），Ruff 与差异检查通过；证据
+  `.codex_screenshots/p6-live-exit-reports-final.log`、`p6-exit-batch-partial.log`。
+  额外 runtime 回归有 4 项旧 PublicPlanSession 缺少 execute 的失败，修改前 HEAD 同样复现，
+  证据 `p6-exit-reports-runtime-baseline.log`，未将这组记为通过。
+  平台/设备和账户容量读取仍用隔离替身，回报为合成输入，未验证真实 Agent inbox 传输、
+  PostgreSQL 并发锁或实盘闭环；P6 正式门保持未完成。
   iOS 按用户要求暂停，已有改动保留；继续后端与 macOS 可完成的验证。
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。

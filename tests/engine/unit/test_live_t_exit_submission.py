@@ -3,7 +3,7 @@
 Platform/device/capacity reads are isolated; no real order is sent.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,23 +12,34 @@ import pytest
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_contracts.agent import PROTOCOL_VERSION
 from quantx_domain.trading.exit_plan import ExitEvaluationContext, ExitPlanTemplate
+from quantx_engine import report_processor
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  AgentReportInbox,
   OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
+  StrategyRuntimeEvent,
   TradeCommandOutbox,
+  TTradeBatch,
 )
 from quantx_infrastructure.models.auth import AuthDeviceSession
-from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
+from quantx_infrastructure.models.auto_exit_plan import (
+  AutoExitPlanEvent,
+  AutoExitPlanRecord,
+)
 from quantx_infrastructure.models.liquidation import ConditionalLiquidationOrder
+from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import (
   exit_plan_authorization_service as authorization_module,
 )
+from quantx_infrastructure.services import order_service as order_module
 from quantx_infrastructure.services import trade_command_service as command_module
 from quantx_infrastructure.services import trade_intent_processor as processor_module
+from quantx_infrastructure.services import trade_service as trade_module
 from quantx_infrastructure.services import trading_service as trading_module
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from sqlalchemy import select
@@ -272,3 +283,185 @@ async def test_next_day_original_plan_authorization_reaches_sized_order_port(
       assert outbox.delivery_status == "QUEUED" and outbox.attempts == 0
       assert outbox.delivered_at is None and outbox.acknowledged_at is None
       assert outbox.payload["side"] == "SELL" and outbox.payload["volume"] == 100
+    await _verify_incremental_exit_reports(factory, monkeypatch, clock, queued_id)
+
+
+async def _verify_incremental_exit_reports(
+  factory, monkeypatch, clock, client_order_id
+):
+  """Feed synthetic broker facts through real public persistence and plan projection."""
+  async with factory.kw["bind"].begin() as connection:
+    for model in (Order, Trade, StrategyRuntimeEvent):
+      await connection.run_sync(model.__table__.create)
+
+  async def sessions():
+    async with factory() as db:
+      yield db
+
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", factory)
+  monkeypatch.setattr(report_processor, "utcnow", lambda: clock.now - timedelta(hours=8))
+  monkeypatch.setattr(order_module, "get_async_db", sessions)
+  monkeypatch.setattr(trade_module, "get_async_db", sessions)
+
+  async def process(message_type, payload):
+    report = AgentReportInbox(
+      message_id=f"synthetic-{message_type}-{payload['source_sequence']}",
+      device_id="device-1",
+      message_type=message_type,
+      protocol_version=PROTOCOL_VERSION,
+      payload=payload,
+    )
+    await report_processor._process(report)
+    await report_processor._stage_runtime_events(report)
+    await report_processor._drain_runtime_events()
+
+  common = {
+    "client_order_id": client_order_id,
+    "source_event_at": (clock.now - timedelta(hours=8)).isoformat() + "Z",
+  }
+  event_timestamp = int(
+    (clock.now - timedelta(hours=8)).replace(tzinfo=timezone.utc).timestamp()
+  )
+  order = {
+    "account_id": auth.ACCOUNT_ID,
+    "stock_code": auth.INSTRUMENT,
+    "order_id": 987654,
+    "order_type": 24,
+    "order_volume": 100,
+    "order_time": event_timestamp,
+    "price": 10.79,
+    "order_status": 50,
+    "traded_volume": 0,
+  }
+  await process("order_report", {**common, "source_sequence": 1, "order": order})
+  for index in (1, 2):
+    payload = {
+      **common,
+      "source_sequence": index + 1,
+      "execution": {
+        "account_id": auth.ACCOUNT_ID,
+        "stock_code": auth.INSTRUMENT,
+        "order_id": 987654,
+        "execution_id": f"exit-fill-{index}",
+        "traded_volume": 50,
+        "traded_price": 10.79,
+        "traded_time": event_timestamp,
+      },
+    }
+    await process("execution_report", payload)
+    await process("execution_report", payload)
+    async with factory() as db:
+      plan = await db.get(AutoExitPlanRecord, auth.PLAN_ID)
+      assert plan.remaining_volume == 100 - index * 50
+      assert plan.source_execution_owner_id == auth.RUN_ID
+      assert plan.source_id == auth.BATCH_ID
+      # Fill completion alone must not release the original order lifecycle.
+      assert plan.plan_state["pending_intent_id"]
+      trades = list(await db.scalars(select(Trade)))
+      events = list(
+        await db.scalars(
+          select(AutoExitPlanEvent).where(
+            AutoExitPlanEvent.event_type == "EXECUTION_FILL",
+          )
+        )
+      )
+      assert len(trades) == index and len(events) == index
+      assert sum(trade.volume for trade in trades) == index * 50
+  async with factory() as db, db.begin():
+    pending = await db.get(PendingTradeOrder, client_order_id)
+    assert not await report_processor.finalize_t_order_lifecycle(db, pending)
+  await process(
+    "order_report",
+    {
+      **common,
+      "source_sequence": 4,
+      "order": {
+        **order,
+        "order_status": 56,
+        "traded_volume": 100,
+        "traded_price": 10.79,
+      },
+    },
+  )
+  async with factory() as db, db.begin():
+    pending = await db.get(PendingTradeOrder, client_order_id)
+    assert await report_processor.finalize_t_order_lifecycle(db, pending)
+  async with factory() as db:
+    plan = await db.get(AutoExitPlanRecord, auth.PLAN_ID)
+    assert plan.remaining_volume == 0 and not plan.plan_state["pending_intent_id"]
+    intent = await db.get(TradeIntentRecord, pending.intent_id)
+    assert intent.status == "FILLED" and intent.executed_volume == 100
+    runtime_events = list(await db.scalars(select(StrategyRuntimeEvent)))
+    assert len(runtime_events) == 4
+    assert all(event.application_status == "APPLIED" for event in runtime_events)
+    batch = await db.get(TTradeBatch, auth.BATCH_ID)
+    assert batch.exit_filled_volume == 100 and batch.status == "CLOSED"
+    assert batch.closed_at == clock.now - timedelta(hours=8)
+    assert batch.terminal_at == batch.closed_at
+    batch_version = batch.version
+  await process("execution_report", payload)
+  await process(
+    "order_report",
+    {
+      **common,
+      "source_sequence": 5,
+      "order": {
+        **order,
+        "order_status": 56,
+        "traded_volume": 100,
+        "traded_price": 10.79,
+      },
+    },
+  )
+  async with factory() as db:
+    plan = await db.get(AutoExitPlanRecord, auth.PLAN_ID)
+    batch = await db.get(TTradeBatch, auth.BATCH_ID)
+    assert plan.remaining_volume == 0 and not plan.plan_state["pending_intent_id"]
+    assert batch.version == batch_version and batch.exit_filled_volume == 100
+    assert (
+      batch.source_execution_owner_id == auth.RUN_ID and batch.strategy_run_id is None
+    )
+    assert len(list(await db.scalars(select(StrategyRuntimeEvent)))) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "authorization_database", ["T_ASSISTANT_EXECUTION"], indirect=True
+)
+@pytest.mark.parametrize(
+  "target,field,value",
+  [
+    ("plan", "source_id", "other-batch"),
+    ("plan", "source_execution_owner_id", "other-source"),
+    ("plan", "account_id", "other-account"),
+    ("plan", "instrument_code", "000001.SZ"),
+    ("plan", "bucket", "core"),
+    ("correlation", "environment", "PAPER"),
+    ("correlation", "t_trade_role", "ENTRY"),
+    ("correlation", "batch_id", "other-batch"),
+  ],
+)
+async def test_exit_report_batch_projection_rejects_source_scope_drift(
+  authorization_database,
+  target,
+  field,
+  value,
+):
+  async with authorization_database() as db:
+    plan = await db.get(AutoExitPlanRecord, auth.PLAN_ID)
+    batch = await db.get(TTradeBatch, auth.BATCH_ID)
+    correlation = SimpleNamespace(
+      owner_type="EXIT_PLAN",
+      owner_id=auth.PLAN_ID,
+      environment="LIVE",
+      batch_id=auth.BATCH_ID,
+      account_id=auth.ACCOUNT_ID,
+      bucket="swing",
+      t_trade_role="EXIT",
+    )
+    assert await report_processor._t_batch_matches_order_owner(db, batch, correlation)
+    setattr(plan if target == "plan" else correlation, field, value)
+    with db.no_autoflush:
+      assert not await report_processor._t_batch_matches_order_owner(
+        db, batch, correlation
+      )

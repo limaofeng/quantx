@@ -4371,6 +4371,12 @@ async def finalize_t_order_lifecycle(db, pending: PendingTradeOrder) -> bool:
       plan_id=owner_id, event_type="ORDER_LIFECYCLE_FINALIZED",
       payload={"intent_id": pending.intent_id, "status": status, "filled_volume": total},
     )
+    batch = await db.get(TTradeBatch, pending.batch_id) if pending.batch_id else None
+    if batch is not None and await _t_batch_matches_order_owner(db, batch, last_correlation):
+      await _project_t_trade_event(
+        batch, event_type="ORDER", role="EXIT",
+        item={"effective_order_status": status, "order_id": pending.broker_order_id},
+      )
   elif owner_type in {ExecutionOwnerType.STRATEGY_RUN.value, ExecutionOwnerType.T_ASSISTANT_EXECUTION.value}:
     business_key = f"t-order-lifecycle:{pending.intent_id}"
     report = {
@@ -4397,6 +4403,30 @@ async def finalize_t_order_lifecycle(db, pending: PendingTradeOrder) -> bool:
       **dict(attempt.request_metadata or {}), "t_order_lifecycle_finished": True,
     }
   return True
+
+
+async def _t_batch_matches_order_owner(db, batch, correlation) -> bool:
+  """An EXIT_PLAN may project only its exact, immutable source batch."""
+  owner = _durable_owner_triple(correlation)
+  source = _durable_owner_triple(batch)
+  if owner is None or source is None:
+    return False
+  if source == owner:
+    return True
+  if owner[0] != "EXIT_PLAN" or str(correlation.t_trade_role or "").upper() != "EXIT":
+    return False
+  plan = await db.get(AutoExitPlanRecord, owner[1], with_for_update=True)
+  return bool(
+    plan is not None
+    and _durable_owner_triple(plan) == source
+    and owner[2] == source[2]
+    and str(plan.source_type or "") == "T_TRADE_BATCH"
+    and str(plan.source_id or "") == str(batch.batch_id)
+    and str(correlation.batch_id or "") == str(batch.batch_id)
+    and str(plan.account_id) == str(batch.account_id) == str(correlation.account_id)
+    and str(plan.instrument_code) == str(batch.instrument_code)
+    and str(plan.bucket) == str(correlation.bucket)
+  )
 
 
 async def _project_t_trade_event(
@@ -4481,7 +4511,10 @@ async def _project_t_trade_event(
         "PENDING": "EXIT_TRIGGERED",
         "SUBMITTED": "EXIT_SUBMITTED",
         "PARTIAL_FILLED": "EXIT_PARTIAL",
-        "FILLED": "CLOSED",
+        "FILLED": (
+          "CLOSED" if int(batch.exit_filled_volume or 0) >= int(batch.entry_filled_volume or 0)
+          else "EXIT_PARTIAL"
+        ),
         "REJECTED": "EXIT_REJECTED",
         "CANCELLED": "EXIT_REJECTED",
         "EXPIRED": "EXIT_REJECTED",
@@ -4948,7 +4981,7 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           pending.status = "RECONCILED_ZERO_FILL"
         if correlation.batch_id:
           batch = await db.get(TTradeBatch, correlation.batch_id)
-          if batch is not None and _durable_owner_triple(batch) == owner_triple:
+          if batch is not None and await _t_batch_matches_order_owner(db, batch, correlation):
             await _project_t_trade_event(
               batch,
               event_type=event_type,

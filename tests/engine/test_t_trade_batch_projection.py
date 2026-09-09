@@ -18,6 +18,20 @@ def _batch() -> TTradeBatch:
 
 
 @pytest.mark.asyncio
+async def test_filled_exit_attempt_does_not_close_partially_exited_batch() -> None:
+  batch = _batch()
+  batch.entry_filled_volume = 200
+  batch.exit_filled_volume = 100
+  batch.status = "EXIT_PARTIAL"
+  await _project_t_trade_event(
+    batch, event_type="ORDER", role="EXIT",
+    item={"effective_order_status": "FILLED", "order_id": 123},
+  )
+  assert batch.status == "EXIT_PARTIAL"
+  assert batch.exit_filled_volume == 100 and batch.closed_at is None
+
+
+@pytest.mark.asyncio
 async def test_trade_projection_freezes_first_entry_and_final_exit_times() -> None:
   batch = _batch()
   shanghai = ZoneInfo("Asia/Shanghai")
