@@ -317,3 +317,71 @@ async def test_api_dispatch_stops_on_shared_capacity_block(durable_store, monkey
     )
     is None
   )
+
+
+@pytest.mark.parametrize("changed", [False, True])
+async def test_sector_audit_recovers_committed_checkpoint_without_republishing(
+  durable_store, tmp_path, monkeypatch, changed
+):
+  from quantx_infrastructure.services.market_data_ingestion_progress import (
+    IngestionProgress,
+  )
+
+  from tests.infrastructure.test_market_data_transfer_ingestion import _sector_payload
+
+  store, _ = durable_store
+  records = [{"sector": "沪深A股", "code": "600000.SH"}]
+  store.manifest = [_write_chunk(tmp_path, records)]
+  async with store.engine.begin() as connection:
+    await connection.execute(
+      text(
+        "UPDATE market_data_request SET request_payload=CAST(:payload AS json) WHERE request_id='request-1'"
+      ),
+      {"payload": json.dumps(_sector_payload())},
+    )
+  token = await store.claim_market_data_request("request-1")
+  progress = IngestionProgress(store, "request-1", token)
+  await progress.apply("begin")
+  result = await ingestion.ingest_uploaded_market_data_request(
+    store, "request-1", progress=progress
+  )
+  saved = (await store.market_data_request("request-1"))["ingestion_progress"]
+  assert saved["phase"] == "READBACK" and saved["manifest_hash"]
+  assert saved["write_result"] == result
+  assert result["records_saved"] == 0 and result["records_received"] == 1
+  await store.release_market_data_request_claim(
+    "request-1", claim_token=token, error="completion interrupted"
+  )
+  if changed:
+    store.manifest = [
+      _write_chunk(tmp_path, [{"sector": "沪深A股", "code": "000001.SZ"}])
+    ]
+  token = await store.claim_market_data_request("request-1")
+  recovery = IngestionProgress(store, "request-1", token)
+  await recovery.apply("begin")
+
+  async def unexpected_write(*args, **kwargs):
+    pytest.fail("recovered audit must not be republished")
+
+  monkeypatch.setattr(store, "persist_market_data_reference", unexpected_write)
+  if changed:
+    with pytest.raises(IngestionEvidenceConflict, match="MANIFEST_CHANGED"):
+      await ingestion.ingest_uploaded_market_data_request(
+        store, "request-1", progress=recovery
+      )
+    assert (await store.market_data_request("request-1"))["ingestion_progress"][
+      "write_result"
+    ] == result
+  else:
+    assert (
+      await ingestion.ingest_uploaded_market_data_request(
+        store, "request-1", progress=recovery
+      )
+      == result
+    )
+    await store.finish_market_data_request(
+      "request-1", status="COMPLETED", ingestion_result=result, claim_token=token
+    )
+    assert (await store.market_data_request("request-1"))["ingestion_progress"][
+      "phase"
+    ] == "VERIFIED"

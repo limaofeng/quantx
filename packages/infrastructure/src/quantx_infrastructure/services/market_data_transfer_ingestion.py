@@ -980,11 +980,45 @@ async def load_uploaded_request_records(
 async def ingest_uploaded_sector_membership_request(
   store: MarketDataTransferStore,
   request_id: str,
+  *,
+  progress: IngestionProgress | None = None,
 ) -> dict[str, Any]:
   """Certify one sector generation without writing it to a market-data store."""
 
-  _, payload, records = await load_uploaded_request_records(store, request_id)
-  return build_sector_membership_audit(records, payload)
+  _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
+  _, _, records = await load_uploaded_request_records(store, request_id)
+  audit = build_sector_membership_audit(records, payload)
+  if progress is None:
+    return audit
+  await progress.apply(
+    "manifest",
+    sha256=evidence_hash(
+      {
+        "payload": payload,
+        "chunks": [
+          {key: value for key, value in item.items() if key != "storage_reference"}
+          for item in manifest
+        ],
+      }
+    ),
+  )
+  if progress.state["phase"] == "VALIDATE":
+    await progress.apply("advance", phase="WRITE")
+  if progress.state["phase"] == "READBACK":
+    if progress.state["write_result"] != audit:
+      raise MarketDataValidationError("sector audit differs from persisted checkpoint")
+    return progress.state["write_result"]
+
+  async def persist(_db):
+    # This operation certifies membership; it does not write instrument rows.
+    return audit
+
+  progress.state = await store.persist_market_data_reference(
+    request_id,
+    claim_token=progress.claim_token,
+    persist=persist,
+  )
+  return progress.state["write_result"]
 
 
 def _validate_bar_manifest(
@@ -1376,7 +1410,9 @@ async def ingest_uploaded_market_data_request(
       raise _validation_error(
         "sector_instruments request must use audit_only destination"
       )
-    return await ingest_uploaded_sector_membership_request(store, request_id)
+    return await ingest_uploaded_sector_membership_request(
+      store, request_id, progress=progress
+    )
   if destination == "influxdb":
     return await ingest_uploaded_bar_request(store, request_id, progress=progress)
   raise _validation_error("market-data request destination is unsupported")
