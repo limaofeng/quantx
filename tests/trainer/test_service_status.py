@@ -58,6 +58,8 @@ def test_service_lease_and_live_identity_are_both_required(tmp_path):
     assert service_status(tmp_path, config) == {
       "service": "ALIVE",
       "phase": "PREFLIGHT",
+      "code": reporter.identity["code"],
+      "heartbeat_at": json.loads((root / "status.json").read_text())["updated_at"],
       "instance_id": reporter.identity["instance_id"],
       "execution_state": "NOT_INSPECTED",
     }
@@ -74,7 +76,7 @@ def test_service_lease_and_live_identity_are_both_required(tmp_path):
 
 
 @pytest.mark.parametrize(
-  "fault", ["host", "pid", "birth", "exe", "config", "json", "future", "stale", "link"]
+  "fault", ["host", "pid", "birth", "exe", "config", "json", "future", "stale", "link", "nan"]
 )
 def test_uncertain_or_stale_service_evidence_is_never_alive(tmp_path, fault):
   config = tmp_path / "config.toml"
@@ -95,6 +97,8 @@ def test_uncertain_or_stale_service_evidence_is_never_alive(tmp_path, fault):
       value["executable"] = "wrong-executable"
     elif fault == "config":
       config.write_text("changed")
+    elif fault == "nan":
+      value["updated_at"] = float("nan")
     elif fault == "future":
       value["updated_at"] += 60
     elif fault == "stale":
@@ -108,3 +112,46 @@ def test_uncertain_or_stale_service_evidence_is_never_alive(tmp_path, fault):
     assert service_status(tmp_path, config)["service"] == (
       "STALE" if fault in {"future", "stale"} else "UNKNOWN"
     )
+
+
+def test_code_identity_is_captured_once_and_returned_with_heartbeat(tmp_path, monkeypatch):
+  from quantx_trainer import service_status as module
+
+  config = tmp_path / "config.toml"
+  config.write_text("fixture")
+  root = tmp_path / "service"
+  root.mkdir()
+  code = {"commit": "a" * 40, "manifest_sha256": "b" * 64, "dirty": False}
+  monkeypatch.setattr(module, "_code_identity", lambda: dict(code))
+  with publication_lock(root):
+    reporter = ServiceReporter(root, config)
+    reporter.write("WORKER_LOOP")
+    first = service_status(tmp_path, config)
+    code["commit"] = "c" * 40
+    reporter.write()
+    second = service_status(tmp_path, config)
+    assert first["code"] == second["code"] == {"commit": "a" * 40, "manifest_sha256": "b" * 64, "dirty": False}
+    assert second["heartbeat_at"] >= first["heartbeat_at"]
+
+
+@pytest.mark.parametrize("code", [None, {}, {"commit": "/private/path", "manifest_sha256": "b" * 64, "dirty": False}, {"commit": "a" * 40, "manifest_sha256": None, "dirty": False}, {"commit": "a" * 40, "manifest_sha256": "b" * 64, "dirty": 0}])
+def test_invalid_code_identity_never_escapes_status(tmp_path, code):
+  config = tmp_path / "config.toml"
+  config.write_text("fixture")
+  root = tmp_path / "service"
+  root.mkdir()
+  with publication_lock(root):
+    ServiceReporter(root, config).write()
+    path = root / "status.json"
+    payload = json.loads(path.read_text())
+    payload["code"] = code
+    path.write_text(json.dumps(payload))
+    assert service_status(tmp_path, config) == {"service": "UNKNOWN", "execution_state": "NOT_INSPECTED"}
+
+
+def test_reporter_projects_packaged_source_without_paths(monkeypatch):
+  from quantx_research import packaged_source
+  from quantx_trainer import service_status as module
+
+  monkeypatch.setattr(packaged_source, "packaged_source_state", lambda root: {"commit": "a" * 40, "code_manifest_sha256": "b" * 64, "dirty": False, "unrelated": "/private/path"})
+  assert module._code_identity() == {"commit": "a" * 40, "manifest_sha256": "b" * 64, "dirty": False}
