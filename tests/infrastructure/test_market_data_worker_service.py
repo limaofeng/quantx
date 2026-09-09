@@ -297,7 +297,7 @@ async def test_reference_backlog_does_not_hide_supported_work(workers):
     await connection.execute(
       text("""
       INSERT INTO market_data_request(request_id,status,request_payload,updated_at,created_at)
-      SELECT 'reference-' || i,'UPLOADED','{"operation":"divid_factors"}'::json,
+      SELECT 'reference-' || i,'UPLOADED','{"operation":"instrument_details"}'::json,
              '2020-01-01'::timestamp,'2020-01-01'::timestamp
       FROM generate_series(1,30) AS i
     """)

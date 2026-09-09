@@ -66,7 +66,6 @@ async def test_sector_membership_upload_uses_audit_only_ingestion(monkeypatch) -
     )
   )
   ingest = AsyncMock(return_value={"operation": "sector_instruments"})
-  records = AsyncMock()
   monkeypatch.setattr(
     durable_agent_flows,
     "load_uploaded_request_manifest",
@@ -77,17 +76,11 @@ async def test_sector_membership_upload_uses_audit_only_ingestion(monkeypatch) -
     "ingest_uploaded_market_data_request",
     ingest,
   )
-  monkeypatch.setattr(
-    durable_agent_flows,
-    "load_uploaded_request_records",
-    records,
-  )
 
   result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
   assert result == {"operation": "sector_instruments"}
   ingest.assert_awaited_once_with(store, "request-1", progress=None)
-  records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -439,7 +432,9 @@ async def test_bar_ingestion_uses_direct_durable_persistence(monkeypatch) -> Non
   assert ingest.await_args.args == (store, "request-1")
   save = AsyncMock(return_value={"saved_count": 2})
   monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
-  assert await ingest.await_args.kwargs["save_period"](period="tick", market_data={}) == {"saved_count": 2}
+  assert await ingest.await_args.kwargs["save_period"](
+    period="tick", market_data={}
+  ) == {"saved_count": 2}
   save.assert_awaited_once_with(period="tick", market_data={})
 
 
@@ -471,8 +466,6 @@ async def test_market_data_wait_timeout_keeps_durable_status(monkeypatch) -> Non
     "durable_status": "QUEUED",
     "reason": "wait attempt expired; durable request remains open",
   }
-
-
 
 
 @pytest.mark.asyncio
@@ -624,14 +617,20 @@ async def test_explicit_reprocess_returns_ingestion_failure_to_failed(
     ingestion,
   )
 
-  with pytest.raises(RuntimeError, match="did not complete.*DEPENDENCY_OPERATION_FAILED"):
+  with pytest.raises(
+    RuntimeError, match="did not complete.*DEPENDENCY_OPERATION_FAILED"
+  ):
     await durable_agent_flows.reprocess_uploaded_market_data_request("request-1")
 
   store.mutate_market_data_ingestion.assert_awaited_with(
     "request-1",
     claim_token="claim-token-1",
     action="defer",
-    values={"reason_code": "DEPENDENCY_OPERATION_FAILED", "blocked": False, "diagnostic": {}},
+    values={
+      "reason_code": "DEPENDENCY_OPERATION_FAILED",
+      "blocked": False,
+      "diagnostic": {},
+    },
   )
   store.release_market_data_request_claim.assert_not_awaited()
   store.finish_market_data_request.assert_not_awaited()

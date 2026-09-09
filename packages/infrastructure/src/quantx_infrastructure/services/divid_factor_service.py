@@ -23,12 +23,11 @@ SIX_PLACES = Decimal("0.000001")
 class DividFactorService:
   """除权因子服务类"""
 
-  def __init__(self):
+  def __init__(self, db_session=None):
     self.logger = logging.getLogger(__name__)
+    self.db_session = db_session
 
-  def _normalize_query_time(
-    self, value: Optional[datetime]
-  ) -> Optional[datetime]:
+  def _normalize_query_time(self, value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
       return None
     if isinstance(value, pd.Timestamp):
@@ -60,9 +59,11 @@ class DividFactorService:
       return []
 
     # 转换时间（转换为上海时区后去掉时区信息，以适配 TIMESTAMP WITHOUT TIME ZONE）
-    factors["time"] = pd.to_datetime(
-      factors["time"], unit="ms", utc=True
-    ).dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    factors["time"] = (
+      pd.to_datetime(factors["time"], unit="ms", utc=True)
+      .dt.tz_convert("Asia/Shanghai")
+      .dt.tz_localize(None)
+    )
 
     # 重命名字段
     factors.rename(
@@ -202,6 +203,13 @@ class DividFactorService:
       if normalized:
         all_factors.extend(normalized)
 
+    if self.db_session is not None:
+      return await DividFactorRepository(self.db_session).replace_range(
+        all_factors,
+        stock_codes=stock_codes,
+        start_ex_date=start_ex_date,
+        end_ex_date=end_ex_date,
+      )
     async for db in get_async_db():
       repo = DividFactorRepository(db)
       return await repo.replace_range(

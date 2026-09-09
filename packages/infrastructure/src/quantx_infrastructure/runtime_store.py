@@ -14,7 +14,7 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 from quantx_application.market_data.ingestion import transition as ingestion_transition
 from sqlalchemy import bindparam, text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from quantx_infrastructure.services.qmt_launch_guard import (
   qmt_agent_launch_started_at,
@@ -74,7 +74,7 @@ class DurableRuntimeStore:
   async def close(self) -> None:
     await self.engine.dispose()
 
-  async def _guard_ingestion_owner(self, connection) -> None:
+  async def _guard_ingestion_owner(self, connection, *, lock=True) -> None:
     """Owner fence hook; standalone workers require their process lease here."""
 
   async def heartbeat(
@@ -984,10 +984,14 @@ class DurableRuntimeStore:
     claim_token: str,
     action: str,
     values: dict[str, Any] | None = None,
+    _connection=None,
   ) -> dict[str, Any]:
     """Apply one progress transition only while this ingestion lease is valid."""
     now = _utcnow()
-    async with self.engine.begin() as connection:
+    transaction = (
+      nullcontext(_connection) if _connection is not None else self.engine.begin()
+    )
+    async with transaction as connection:
       await self._guard_ingestion_owner(connection)
       row = (
         (
@@ -1036,6 +1040,41 @@ class DurableRuntimeStore:
         },
       )
       return progress
+
+  async def persist_market_data_reference(self, request_id, *, claim_token, persist):
+    """Commit reference rows and their audit checkpoint in one fenced transaction."""
+    async with self.engine.begin() as connection:
+      # Do not hold the worker lease row while doing expensive relational writes:
+      # renewals must proceed. Lock and recheck it immediately before committing.
+      await self._guard_ingestion_owner(connection, lock=False)
+      state = (
+        await connection.execute(
+          text("""
+        SELECT ingestion_progress FROM market_data_request
+        WHERE request_id=:id AND status='PROCESSING'
+          AND processing_claim_token=:token AND updated_at >= :stale_before
+        FOR UPDATE
+      """),
+          {
+            "id": request_id,
+            "token": claim_token,
+            "stale_before": _utcnow() - timedelta(minutes=5),
+          },
+        )
+      ).scalar_one_or_none()
+      if not state or state["phase"] != "WRITE":
+        raise RuntimeError("reference ingestion has no valid WRITE claim")
+      async with AsyncSession(
+        bind=connection, join_transaction_mode="rollback_only"
+      ) as db:
+        result = await persist(db)
+      return await self.mutate_market_data_ingestion(
+        request_id,
+        claim_token=claim_token,
+        action="advance",
+        values={"phase": "READBACK", "write_result": result},
+        _connection=connection,
+      )
 
   async def resume_blocked_market_data_request(
     self, request_id: str, *, reason: str

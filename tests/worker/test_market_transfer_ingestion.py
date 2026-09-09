@@ -13,6 +13,7 @@ from quantx_contracts import (
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
   historical_bar_key,
 )
+from quantx_infrastructure.services import market_data_reference_ingestion as reference
 from quantx_infrastructure.services import market_data_transfer_ingestion as ingestion
 from quantx_worker.prefector.flows import durable_agent_flows
 
@@ -496,7 +497,7 @@ async def test_uploaded_financial_rows_are_validated_saved_and_rebuilt(
     manifest=[_transfer(tmp_path, records)],
   )
   captured = {}
-  parse_report_date = durable_agent_flows.FinancialService._parse_report_date
+  parse_report_date = reference.FinancialService._parse_report_date
 
   class FakeFinancialService:
     _parse_report_date = staticmethod(parse_report_date)
@@ -512,7 +513,7 @@ async def test_uploaded_financial_rows_are_validated_saved_and_rebuilt(
       }
 
   monkeypatch.setattr(
-    durable_agent_flows,
+    reference,
     "FinancialService",
     FakeFinancialService,
   )

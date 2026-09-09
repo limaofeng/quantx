@@ -31,11 +31,13 @@ async def sweep(store, *, ingest=None) -> int:
     request = await store.market_data_request(request_id)
     if request is None:
       continue
-    # Reference ingestion moves in the coordinated writer migration; do not
-    # terminally reject an existing reference task merely because it is pending.
+    # Inline reference replies move with the dedicated Agent history session.
+    # Until then, leave unsupported operations for that coordinated migration.
     if request["request_payload"].get("operation", "bars") not in {
       "bars",
       "sector_instruments",
+      "divid_factors",
+      "financial_data",
     }:
       continue
     result = await claim_ingest_and_finish_market_data_request(

@@ -5,7 +5,7 @@ import hashlib
 import json
 
 import pytest
-from quantx_worker.prefector.flows import durable_agent_flows
+from quantx_infrastructure.services import market_data_reference_ingestion as reference
 
 
 class FakeStore:
@@ -92,7 +92,7 @@ async def test_uploaded_divid_factors_are_replaced_and_audited(
       return {
         "audit_schema_version": 2,
         "stock_count": 2,
-        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+        "stock_codes_sha256": reference.divid_factor_codes_sha256(
           ["000001.SZ", "600519.SH"]
         ),
         "prior_count": 0,
@@ -107,12 +107,12 @@ async def test_uploaded_divid_factors_are_replaced_and_audited(
       }
 
   monkeypatch.setattr(
-    durable_agent_flows,
+    reference,
     "DividFactorService",
     FakeService,
   )
 
-  result = await durable_agent_flows._ingest_uploaded_request(
+  result = await reference.ingest_uploaded_reference_request(
     store,
     "request-1",
   )
@@ -148,7 +148,7 @@ async def test_empty_divid_factor_result_still_clears_exact_window(
       return {
         "audit_schema_version": 2,
         "stock_count": 2,
-        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+        "stock_codes_sha256": reference.divid_factor_codes_sha256(
           ["000001.SZ", "600519.SH"]
         ),
         "prior_count": 2,
@@ -163,12 +163,12 @@ async def test_empty_divid_factor_result_still_clears_exact_window(
       }
 
   monkeypatch.setattr(
-    durable_agent_flows,
+    reference,
     "DividFactorService",
     FakeService,
   )
 
-  result = await durable_agent_flows._ingest_uploaded_request(
+  result = await reference.ingest_uploaded_reference_request(
     store,
     "request-1",
   )
@@ -207,7 +207,7 @@ async def test_divid_factor_ingestion_rejects_audit_before_completed(
       return {
         "audit_schema_version": 2,
         "stock_count": 2,
-        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+        "stock_codes_sha256": reference.divid_factor_codes_sha256(
           ["000001.SZ", "600519.SH"]
         ),
         "prior_count": 0,
@@ -221,10 +221,10 @@ async def test_divid_factor_ingestion_rejects_audit_before_completed(
         "code_audits": _code_audits(),
       }
 
-  monkeypatch.setattr(durable_agent_flows, "DividFactorService", FakeService)
+  monkeypatch.setattr(reference, "DividFactorService", FakeService)
 
   with pytest.raises(RuntimeError, match="content digest mismatch"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await reference.ingest_uploaded_reference_request(store, "request-1")
 
 
 @pytest.mark.asyncio
@@ -242,7 +242,7 @@ async def test_divid_factor_ingestion_rejects_incomplete_per_code_audit(
       return {
         "audit_schema_version": 2,
         "stock_count": 2,
-        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+        "stock_codes_sha256": reference.divid_factor_codes_sha256(
           ["000001.SZ", "600519.SH"]
         ),
         "prior_count": 0,
@@ -262,15 +262,15 @@ async def test_divid_factor_ingestion_rejects_incomplete_per_code_audit(
         },
       }
 
-  monkeypatch.setattr(durable_agent_flows, "DividFactorService", FakeService)
+  monkeypatch.setattr(reference, "DividFactorService", FakeService)
 
   with pytest.raises(RuntimeError, match="per-code scope mismatch"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await reference.ingest_uploaded_reference_request(store, "request-1")
 
 
 def test_divid_factor_transfer_rejects_unrequested_code():
   with pytest.raises(RuntimeError, match="unexpected"):
-    durable_agent_flows._normalize_divid_factor_records(
+    reference._normalize_divid_factor_records(
       [
         {
           "code": "000002.SZ",

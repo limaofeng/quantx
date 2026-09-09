@@ -74,7 +74,10 @@ class MarketDataWorkerStore(MarketDataDemandStore):
       return True
 
   async def recoverable_market_data_request_ids(
-    self, *, limit=20, operations=("bars", "sector_instruments")
+    self,
+    *,
+    limit=20,
+    operations=("bars", "sector_instruments", "divid_factors", "financial_data"),
   ):
     return await super().recoverable_market_data_request_ids(
       limit=limit, operations=operations
@@ -130,14 +133,17 @@ class MarketDataWorkerStore(MarketDataDemandStore):
         {"owner": self.owner_id, "epoch": self.epoch},
       )
 
-  async def _guard_ingestion_owner(self, connection) -> None:
+  async def _guard_ingestion_owner(self, connection, *, lock=True) -> None:
     value = (
       await connection.execute(
-        text("""
+        text(
+          """
       SELECT epoch FROM market_data_worker_lease
       WHERE id = 1 AND owner_id = :owner AND epoch = :epoch
-        AND expires_at > clock_timestamp() FOR SHARE
-    """),
+        AND expires_at > clock_timestamp()
+    """
+          + (" FOR SHARE" if lock else "")
+        ),
         {"owner": self.owner_id, "epoch": self.epoch},
       )
     ).scalar_one_or_none()
