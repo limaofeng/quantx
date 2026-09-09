@@ -955,6 +955,11 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   尚未发生时的重放；账户漂移、审批丢失/哈希变化、额外字段、非法 head version 均拒绝且
   不改变旧源或发布头。30 项 successor/CANARY 测试通过，证据
   `.codex_screenshots/p7-successor-command.log`。这不是公开人工发布入口或正式 P6 审批。
+  successor 成功重放现同时核对首次准备审计、approval hash、原 expected head version
+  及冻结配置字段；缺失审计或携带不同 head 版本的请求不能仅凭新源存在而返回成功。
+  两项新增用例修改前复现、修复后 **14 项 successor 验证通过**，含真实内部命令领取及
+  完成回写前重放；Ruff/差异检查通过。证据 `p7-successor-replay-before.log`、
+  `p7-successor-replay-final.log`。新增审计字段为当前唯一契约，不恢复缺失证据的旧准备结果。
   legacy 当前仅由 global monitor 调用 entry authority 失效并阻断新源，尚未接通持久化 DRAINING，
   不能据此清除 head.strategy_run_id 或判定切换完成。
 - legacy 义务清单冻结组件已完成：按配置头/旧 run/版本锁定读取原 owner 的 intent、pending、

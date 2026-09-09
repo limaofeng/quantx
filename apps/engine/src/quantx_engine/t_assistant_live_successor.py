@@ -177,12 +177,32 @@ async def prepare_live_auto_successor(
     )
     existing = await db.get(TAssistantExecutionRecord, successor_id)
     if existing is not None:
+      prepared = await db.scalar(
+        select(TAssistantExecutionEventRecord).where(
+          TAssistantExecutionEventRecord.execution_id == successor_id,
+          TAssistantExecutionEventRecord.event_key == f"successor-created:{successor_id}",
+        )
+      )
+      prepared_payload = dict(prepared.payload or {}) if prepared is not None else {}
       if (
         existing.config_snapshot_hash != version.config_snapshot_hash
+        or existing.config_id != version.config_id
+        or existing.frozen_config_version != version.version
         or existing.account_id != predecessor.account_id
         or existing.environment != "LIVE"
         or existing.entry_authorization != "AUTO"
         or existing.config_version_id != config_version_id
+        or existing.policy_version != version.policy_version
+        or existing.feature_schema_version != version.feature_schema_version
+        or existing.scorer_mode != "RULE_ONLY"
+        or existing.rollout_stage != version.rollout_stage.value
+        or prepared is None
+        or prepared.event_type != "LIVE_AUTO_SUCCESSOR_PREPARED"
+        or prepared_payload.get("predecessor_id") != predecessor_id
+        or prepared_payload.get("approval_event_key") != approval_event_key
+        or prepared_payload.get("approval_hash") != stable_manifest_hash(evidence)
+        or prepared_payload.get("config_snapshot_hash") != version.config_snapshot_hash
+        or prepared_payload.get("expected_head_version") != expected_head_version
       ):
         raise ValueError("T_SUCCESSOR_IDEMPOTENCY_CONFLICT")
       return successor_id
@@ -251,6 +271,8 @@ async def prepare_live_auto_successor(
         {
           "predecessor_id": predecessor_id,
           "approval_event_key": approval_event_key,
+          "approval_hash": stable_manifest_hash(evidence),
+          "expected_head_version": expected_head_version,
           "config_snapshot_hash": version.config_snapshot_hash,
           "retained_intent_ids": list(drained.retained_intent_ids),
           "retained_client_order_ids": list(drained.retained_client_order_ids),

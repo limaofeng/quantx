@@ -13,7 +13,10 @@ from quantx_infrastructure.models.agent_runtime import (
   PendingTradeOrder,
   TradeCommandOutbox,
 )
-from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
+from quantx_infrastructure.models.t_assistant_execution import (
+  TAssistantExecutionEventRecord,
+  TAssistantExecutionRecord,
+)
 from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.t_assistant_config_repository import (
@@ -22,7 +25,7 @@ from quantx_infrastructure.repositories.t_assistant_config_repository import (
 from quantx_infrastructure.repositories.t_assistant_execution_repository import (
   TAssistantExecutionRepository,
 )
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from tests.engine.unit.test_t_assistant_live_drain import (
   base_sessions as _base_sessions,
@@ -112,6 +115,26 @@ async def test_successor_is_warming_and_keeps_original_order_ownership(sessions)
     assert (
       await db.scalar(select(func.count()).select_from(TAssistantExecutionRecord)) == 2
     )
+
+
+@pytest.mark.parametrize("damage", ["head_version", "missing_audit"])
+async def test_successor_replay_requires_original_request_and_preparation_audit(sessions, damage):
+  async with sessions() as db, db.begin():
+    identity = await prepare(db)
+  async with sessions() as db, db.begin():
+    if damage == "missing_audit":
+      # Simulate incomplete recovery evidence in the isolated database.
+      await db.execute(delete(TAssistantExecutionEventRecord).where(
+        TAssistantExecutionEventRecord.execution_id == identity,
+        TAssistantExecutionEventRecord.event_key == f"successor-created:{identity}",
+      ))
+  async with sessions() as db, db.begin():
+    with pytest.raises(ValueError, match="T_SUCCESSOR_IDEMPOTENCY_CONFLICT"):
+      await prepare(db, **({"expected_head_version": 2} if damage == "head_version" else {}))
+  async with sessions() as db:
+    head = await db.get(TTradeGlobalConfig, "config-1")
+    assert head.active_config_version_id == "config-version-2" and head.state_version == 2
+    assert (await db.get(TAssistantExecutionRecord, identity)).status == "WARMING"
 
 
 @pytest.mark.parametrize(
