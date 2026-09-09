@@ -78,3 +78,50 @@ async def test_recovery_supervisor_stops_without_control_session():
   await asyncio.wait_for(runtime._history_recovery_supervisor(), 1)
   assert runtime._history_recovery_results == {"request": "UPLOAD_ACCEPTED"}
   runtime._history_pipeline.recover_retained_uploads.assert_awaited_once()
+
+
+async def test_session_reset_releases_routes_but_preserves_original_requests(tmp_path):
+  from quantx_qmt_agent.journal import LocalJournal
+
+  journal = LocalJournal(tmp_path / "journal.sqlite")
+  runtime = SimpleNamespace(
+    _market_spool_root=tmp_path,
+    configuration=SimpleNamespace(
+      device_id=str(UUID(int=9)), api_url="http://local.test"
+    ),
+    _market_data_upload_client=lambda: Mock(),
+    _history_access_token=AsyncMock(),
+    _historical_worker_lock=asyncio.Lock(),
+    journal=journal,
+    _available_history_spool_bytes=lambda: 1024 * 1024,
+  )
+  pipeline = HistoryPipeline(runtime)
+  requests = [
+    HistoryRequest(
+      request_id=UUID(int=value),
+      payload={"operation": "instrument_details", "stock_list": ["000001.SZ"]},
+      unit_count=1,
+      completed_units=0,
+    )
+    for value in (1, 2, 3)
+  ]
+  try:
+    for request in requests[:2]:
+      await pipeline.handle(request)
+    original = {
+      key: (job.directory / "request.json").read_bytes()
+      for key, job in pipeline.active.items()
+    }
+    await pipeline.reset_session()
+    assert pipeline.active == {}
+    for key, raw in original.items():
+      assert (pipeline.jobs.load(key).directory / "request.json").read_bytes() == raw
+    for request in requests[1:]:
+      await pipeline.handle(request)
+    assert set(pipeline.active) == {request.request_id for request in requests[1:]}
+    assert (
+      pipeline.jobs.load(requests[0].request_id).request.request_id
+      == requests[0].request_id
+    )
+  finally:
+    journal.connection.close()

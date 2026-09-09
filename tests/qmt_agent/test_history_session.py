@@ -67,6 +67,7 @@ def connection():
     token=AsyncMock(return_value="history-token"),
     health=lambda: HistoryHeartbeat(xtdata_ready=True),
     handle=AsyncMock(),
+    reset=AsyncMock(),
   )
   return client, socket, options
 
@@ -232,6 +233,7 @@ async def test_client_on_real_local_websocket():
       token=AsyncMock(return_value="local-test-token"),
       health=lambda: HistoryHeartbeat(xtdata_ready=True),
       handle=handle,
+      reset=AsyncMock(),
     )
     task = asyncio.create_task(client.run())
     try:
@@ -243,3 +245,62 @@ async def test_client_on_real_local_websocket():
       with pytest.raises(asyncio.CancelledError):
         await task
     assert client.session_id is None
+
+
+async def test_repeated_cancellation_joins_native_before_reset_and_reconnect(
+  connection,
+):
+  import threading
+
+  from quantx_qmt_agent.collection_execution import join_history_thread
+
+  client, socket, _ = connection
+  entered, release = threading.Event(), threading.Event()
+  ended = False
+
+  def native():
+    nonlocal ended
+    entered.set()
+    if not release.wait(3):
+      raise RuntimeError("test did not release native call")
+    ended = True
+
+  async def handle(_):
+    await join_history_thread(native)
+
+  async def reset():
+    assert ended
+    assert client._running
+    assert client.session_id is None and client.last_ack_monotonic is None
+
+  client.handle, client.reset = handle, AsyncMock(side_effect=reset)
+  await socket.incoming.put(
+    HistoryRequest(
+      request_id=uuid4(), payload=PAYLOAD, unit_count=1, completed_units=0
+    ).model_dump_json()
+  )
+  running = asyncio.create_task(client.run())
+  try:
+    assert await asyncio.to_thread(entered.wait, 1)
+    for _ in range(3):
+      running.cancel()
+      await asyncio.sleep(0)
+      assert not running.done()
+      client.reset.assert_not_awaited()
+      with pytest.raises(RuntimeError, match="already connected"):
+        await client.run()
+  finally:
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await running
+  client.reset.assert_awaited_once()
+  assert not client._running
+
+
+async def test_authentication_failure_resets_routes_once(connection):
+  client, _, _ = connection
+  client.token = AsyncMock(side_effect=ConnectionError("token unavailable"))
+  with pytest.raises(ConnectionError):
+    await client.run()
+  client.reset.assert_awaited_once()
+  assert not client._running and client.session_id is None

@@ -47,11 +47,13 @@ class HistorySessionClient:
     token: Callable[[], Awaitable[str]],
     health: Callable[[], HistoryHeartbeat],
     handle: Callable[[HistoryWork], Awaitable[None]],
+    reset: Callable[[], Awaitable[None]],
   ):
     self.url = websocket_url(api_url, "/ws/agent/history")
     self.device_id = str(UUID(device_id))
     self.capabilities = list(capabilities)
     self.connect, self.token, self.health, self.handle = connect, token, health, handle
+    self.reset = reset
     self.session_id: UUID | None = None
     self.last_ack_monotonic: float | None = None
     self._running = False
@@ -61,6 +63,7 @@ class HistorySessionClient:
       raise RuntimeError("history session already connected")
     self._running = True
     tasks = []
+    cleanup_started = False
     try:
       async with asyncio.timeout(10):
         token = await self.token()
@@ -183,13 +186,35 @@ class HistorySessionClient:
           for task in done:
             task.result()
         finally:
-          self.session_id = None
-          self.last_ack_monotonic = None
-          for task in tasks:
-            task.cancel()
-          # A native handler must join its outstanding call before returning.
-          await asyncio.gather(*tasks, return_exceptions=True)
+          cleanup_started = True
+          await self._end_session(tasks)
     finally:
-      self._running = False
-      self.session_id = None
-      self.last_ack_monotonic = None
+      try:
+        if not cleanup_started:
+          await self._end_session(tasks)
+      finally:
+        self._running = False
+        self.session_id = None
+        self.last_ack_monotonic = None
+
+  async def _end_session(self, tasks):
+    self.session_id = None
+    self.last_ack_monotonic = None
+    for task in tasks:
+      task.cancel()
+
+    async def cleanup():
+      # Native work and disk writes must finish before dropping route ownership.
+      await asyncio.gather(*tasks, return_exceptions=True)
+      await self.reset()
+
+    joining = asyncio.create_task(cleanup())
+    cancelled = False
+    while not joining.done():
+      try:
+        await asyncio.shield(joining)
+      except asyncio.CancelledError:
+        cancelled = True
+    joining.result()
+    if cancelled:
+      raise asyncio.CancelledError

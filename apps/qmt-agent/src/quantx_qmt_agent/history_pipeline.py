@@ -51,6 +51,11 @@ class HistoryPipeline:
       max_bytes=self.runtime._available_history_spool_bytes()
     )
 
+  async def reset_session(self):
+    """Release only routes, after the transport has joined its old consumer."""
+    async with self.runtime._historical_worker_lock:
+      self.active.clear()
+
   def _stop_failed_native(self, error):
     from .runtime import _FatalMarketDataPreparationError
 
