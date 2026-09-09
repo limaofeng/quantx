@@ -43,10 +43,17 @@ frozen_config = candidate_tests.frozen_config
 
 
 async def source(
-  sessions, status="ALLOCATION_PENDING", environment=ExecutionEnvironment.PAPER
+  sessions,
+  status="ALLOCATION_PENDING",
+  environment=ExecutionEnvironment.PAPER,
+  *,
+  candidate_at=None,
 ):
   seed = await candidate_tests.seed_candidate_cycle(
-    sessions, extra_tick=True, environment=environment.value
+    sessions,
+    extra_tick=True,
+    environment=environment.value,
+    **({"candidate_at": candidate_at} if candidate_at is not None else {}),
   )
   async with sessions() as db, db.begin():
     row = await db.get(TradeIntentRecord, seed.intent_id)

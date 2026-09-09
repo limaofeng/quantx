@@ -1,9 +1,10 @@
-"""Retire provably expired unsubmitted LIVE candidates; retain broker obligations."""
+"""Retire expired or cutoff unsubmitted LIVE candidates; retain broker obligations."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 
+from quantx_domain.clock import SHANGHAI
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantExecutionEvent,
   stable_manifest_hash,
@@ -148,6 +149,8 @@ async def recover_live_entry_work(db, *, execution_id, now):
       target, reason = (
         ("EXPIRED", "T_INTENT_EXPIRED") if now >= deadline else (None, None)
       )
+      if target is None and now.astimezone(SHANGHAI).time() >= time(14, 50):
+        target, reason = "CANCELLED", "T_ENTRY_CUTOFF_REACHED"
       request = metadata.get("risk_increase_order_request")
       if target is None and request is not None:
         try:

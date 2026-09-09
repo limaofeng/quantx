@@ -1091,6 +1091,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   该集成文件已补齐排空守卫所需真实表，**13 项测试与 Ruff 通过**，日志
   `.codex_screenshots/p6-cutoff-recovery-v2.log`。准入/持久化/恢复使用实际实现，账户容量、
   设备和券商回报为隔离夹具；不替代独立新源和次日原 ExitPlan 整链验收。
+  独立新源恢复补齐未提交 BUY 的 14:50 主动回收：TTL 尚未到时，待分配、待确认和
+  EXECUTION_READY 意图到截止点转 CANCELLED，原子追加 `T_ENTRY_CUTOFF_REACHED`
+  审计并反馈候选抑制；已投递/有订单或成交线索、COMMITTED 及有效处理租约继续保留。
+  已复现修复前三种未提交状态未回收；修复后截止前一微秒保留、到点回收、次日幂等。
+  **49 项恢复/候选控制测试及 Ruff 通过**，日志
+  `.codex_screenshots/p6-independent-cutoff-verified.log`；使用实际候选生成、不可变 intake、
+  恢复与候选控制代码配合隔离数据库，不代替独立新源券商闭环和跨日 ExitPlan 验收。
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

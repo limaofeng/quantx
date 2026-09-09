@@ -1,6 +1,6 @@
 """Retirement uses real frozen intake and preserves pending/claimed obligations."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from quantx_contracts import ExecutionEnvironment
@@ -55,7 +55,12 @@ frozen_config = _frozen_config
 async def test_retirement_fences_real_intake_and_retains_durable_work(
   sessions, frozen_config, fault, monkeypatch
 ):
-  seed, _, states = await source(sessions, "EXECUTION_READY", ExecutionEnvironment.LIVE)
+  seed, _, states = await source(
+    sessions,
+    "EXECUTION_READY",
+    ExecutionEnvironment.LIVE,
+    candidate_at=datetime(2026, 9, 3, 2, tzinfo=UTC),
+  )
   now = seed.now + timedelta(minutes=2)
   async with sessions() as db, db.begin():
     await db.run_sync(
@@ -218,7 +223,10 @@ async def test_expired_staged_quote_cancels_without_extending_original_intent(
   )
 
   seed, execution, states = await source(
-    sessions, "EXECUTION_READY", ExecutionEnvironment.LIVE
+    sessions,
+    "EXECUTION_READY",
+    ExecutionEnvironment.LIVE,
+    candidate_at=datetime(2026, 9, 3, 2, tzinfo=UTC),
   )
   tick = seed.latest_tick
   sample = tick.sample
@@ -305,7 +313,12 @@ async def test_background_scan_retires_waiting_intents_before_account_dispatch(
     TAssistantDecisionCycleRecord,
   )
 
-  seed, _, _ = await source(sessions, status, ExecutionEnvironment.LIVE)
+  seed, _, _ = await source(
+    sessions,
+    status,
+    ExecutionEnvironment.LIVE,
+    candidate_at=datetime(2026, 9, 3, 2, tzinfo=UTC),
+  )
   now = seed.now + timedelta(minutes=2)
   async with sessions() as db, db.begin():
     await db.run_sync(
@@ -346,3 +359,71 @@ async def test_background_scan_retires_waiting_intents_before_account_dispatch(
   ).recover_once()
   assert result == {"accounts": 1, "dispatched": 0}
   assert dispatched == ["account-1"]
+
+
+@pytest.mark.parametrize(
+  "status", ["ALLOCATION_PENDING", "AWAITING_APPROVAL", "EXECUTION_READY"]
+)
+async def test_cutoff_retires_unsubmitted_intent_before_its_ttl(
+  sessions, frozen_config, status
+):
+  seed, _, states = await source(
+    sessions,
+    status,
+    ExecutionEnvironment.LIVE,
+    candidate_at=datetime(2026, 9, 3, 6, 49, 58, tzinfo=UTC),
+  )
+  cutoff = datetime(2026, 9, 3, 6, 50, tzinfo=UTC)
+  async with sessions() as db, db.begin():
+    await db.run_sync(
+      lambda session: Base.metadata.create_all(
+        session.connection(),
+        tables=[
+          PendingTradeOrder.__table__,
+          OrderCorrelation.__table__,
+          TradeCommandOutbox.__table__,
+          AccountRiskIncreaseAdmissionBatch.__table__,
+        ],
+      )
+    )
+    intent = await db.get(TradeIntentRecord, seed.intent_id)
+    metadata = intent.intent_metadata
+    deadline = datetime.fromisoformat(metadata["intent_created_at"]) + timedelta(
+      milliseconds=metadata["approval_ttl_ms"]
+    )
+    assert seed.now < cutoff < deadline
+    from quantx_infrastructure.models.t_assistant_execution import (
+      TAssistantDecisionCycleRecord,
+    )
+
+    cycle = await db.get(TAssistantDecisionCycleRecord, intent.allocation_cycle_id)
+    cycle.created_at = seed.now
+  async with sessions() as db, db.begin():
+    before = await recover_live_entry_work(
+      db, execution_id=seed.execution_id, now=cutoff - timedelta(microseconds=1)
+    )
+    assert not before.expired and not before.cancelled
+    result = await recover_live_entry_work(
+      db, execution_id=seed.execution_id, now=cutoff
+    )
+    assert result.cancelled == (seed.intent_id,) and result.expired == ()
+    again = await recover_live_entry_work(
+      db, execution_id=seed.execution_id, now=cutoff + timedelta(days=1)
+    )
+    assert not again.cancelled and not again.expired
+    row = await db.get(TradeIntentRecord, seed.intent_id)
+    assert row.status == "CANCELLED" and row.executed_volume is None
+    projected = await controls(
+      db, seed, states, environment=ExecutionEnvironment.LIVE, as_of=cutoff
+    )
+    assert projected["600000.SH"].suppress_candidate_id
+    events = list(
+      await db.scalars(
+        select(TAssistantExecutionEventRecord).where(
+          TAssistantExecutionEventRecord.event_type == "LIVE_ENTRY_RETIRED",
+        )
+      )
+    )
+    assert len(events) == 1
+    assert events[0].payload["reason"] == "T_ENTRY_CUTOFF_REACHED"
+    assert not list(await db.scalars(select(TradeCommandOutbox)))
