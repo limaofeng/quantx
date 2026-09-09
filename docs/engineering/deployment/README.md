@@ -6,6 +6,47 @@ Windows 独占 QMT/XTData/XTTrading，使用 `production/full/live`；macOS 使�
 `dev/full/paper` 和本机独立数据服务。两端通过只读行情接口连接，不共享账户、数据库、
 Redis、Prefect 工作池或设备密钥。不得把 QMT Agent 同时登记到两个环境。
 
+## 生产机 SSH 与开发工具
+
+以下信息于 2026-09-09 核实，版本和安装路径变更后应重新确认。
+
+| 项目 | 已确认信息 |
+| --- | --- |
+| SSH | `ssh limao@192.168.5.6`，使用开发机本地 SSH 密钥，无需复制私钥到远端 |
+| 远端主机 / 用户 | Windows `MyPC` / `mypc\limao`，默认终端为 PowerShell |
+| 生产项目目录 | `F:\Workspace\quantx`，核实时分支为 `main` |
+| 运维入口 | `F:\Workspace\quantx\ops\quantx.ps1` |
+| Codex CLI（npm 全局安装） | `C:\Users\limao\AppData\Local\nvm\v22.21.1\codex.cmd` |
+| Codex CLI 升级记录 | `0.133.0` → `0.153.4`，已在生产项目目录验证启动与版本 |
+| 其他 Codex 安装 | 桌面应用内置 `0.153.4`；VS Code 扩展内置 `0.153.0`，此次未修改 |
+
+连接并在项目目录启动 Codex：
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=10 limao@192.168.5.6
+```
+
+在远端 PowerShell 执行：
+
+```powershell
+Set-Location F:\Workspace\quantx
+& C:\Users\limao\AppData\Local\nvm\v22.21.1\codex.cmd --version
+& C:\Users\limao\AppData\Local\nvm\v22.21.1\codex.cmd
+```
+
+核实时 SSH 会话无法通过 PATH 直接找到 `codex` 和 `npm`，完整路径可用；
+该 PATH 问题尚未修复。项目没有单独的 `node_modules/@openai/codex` 安装。
+上面的 Node 路径仅用于已安装的 Codex CLI，项目 Node 版本仍遵循 `.nvmrc`。
+
+本次升级使用下列命令；今后升级应先核实当前版本与最新稳定版，并取得升级授权：
+
+```powershell
+& C:\Users\limao\AppData\Local\nvm\v22.21.1\npm.cmd install -g @openai/codex@latest --registry=https://registry.npmjs.org
+```
+
+SSH 会话可能在任务结束后失效，后续操作按需重新连接。连接或开发工具维护不等于
+授权生产部署、服务重启或真实交易；本次检查和升级未修改项目代码或重启生产服务。
+
 ## 环境配置与启动
 
 Windows 使用 `apps/api/.env.production`，macOS 使用 `.env.development`；

@@ -19,6 +19,7 @@
 
 ## 运行与进程边界
 
+- 生产机通过本地 SSH 密钥连接 `limao@192.168.5.6`，项目位于 `F:\Workspace\quantx`；远端 PowerShell、Codex CLI 完整路径及已知 SSH PATH 问题见 [生产机 SSH 与开发工具](docs/engineering/deployment/README.md#生产机-ssh-与开发工具)。
 - Python 虚拟环境统一使用 Conda，不创建或使用 `.venv`、`venv`、virtualenv。API、Engine、Worker、macOS Research、Monitor 与验证工具使用 `quantx` Conda 环境；Windows 独立开发 Trainer 及其 Research 子进程使用 `quantx-train`，不得安装到生产环境；QMT Agent 使用 `xtquant-demo`，不得把研究依赖安装进券商环境。脚本通过明确的 Conda 环境或该环境的 Python 绝对路径运行；依赖同步工具也必须显式指向 Conda Python，不能隐式创建 `.venv`。
 
 - Windows 主链默认为 production 实盘环境，macOS 为 dev 开发环境。Windows 可承载显式隔离的开发 Trainer：独立代码、`quantx-train`、开发配置、状态目录和开发数据权限，不继承生产或券商配置，生产 full 启停不代管 Trainer。QMT/XTData/XTTrading、券商运行时和设备密钥只在 Windows；macOS 使用独立本地数据服务、paper 执行和只读远程行情接口，不连接生产数据库、Redis、Prefect，也不启动生产 Engine 或 QMT Agent。
