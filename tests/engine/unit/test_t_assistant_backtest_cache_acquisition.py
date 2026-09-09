@@ -11,6 +11,9 @@ from tests.engine.unit.test_t_assistant_backtest_runtime import CODES
 
 
 class HistoricalCache(History):
+  async def get_kline_data(self, **kwargs):
+    return []
+
   async def iter_tick_pages(self, **kwargs):
     async for page in super().iter_tick_pages(**kwargs):
       for row in page:
@@ -75,3 +78,50 @@ async def test_source_error_stops_without_querying_other_symbols(tmp_path):
   assert len(history.calls) == 1
   assert dataset.manifest["material"]["status"] == "INCOMPLETE"
   assert dataset.manifest["material"]["unattempted_partitions"] == 1
+
+
+async def test_backtest_requires_daily_limits_even_when_tick_has_them(tmp_path):
+  class NoDailyReference(History):
+    async def get_kline_data(self, **kwargs):
+      return []
+
+  dataset = await acquire_backtest_dataset(
+    history=NoDailyReference(),
+    calendar=Calendar(),
+    source_version="daily-reference-v1",
+    instruments=CODES,
+    start=date(2026, 9, 3),
+    end=date(2026, 9, 3),
+    root=tmp_path,
+    latency_ms=0,
+    preserve_raw=True,
+  )
+  assert dataset.manifest["material"]["status"] == "REFERENCE_REQUIRED"
+
+
+async def test_reference_replay_joins_daily_limits_and_detects_changes(tmp_path):
+  class DailyHistory(History):
+    limit = 111.0
+
+    async def get_kline_data(self, **kwargs):
+      bars = await super().get_kline_data(**kwargs)
+      bars[0].up_stop_price = self.limit
+      return bars
+
+  history = DailyHistory()
+  dataset = await acquire_backtest_dataset(
+    history=history,
+    calendar=Calendar(),
+    source_version="daily-reference-v1",
+    instruments=CODES,
+    start=date(2026, 9, 3),
+    end=date(2026, 9, 3),
+    root=tmp_path,
+    latency_ms=0,
+    freeze=False,
+  )
+  events = [event async for event in dataset.events()]
+  assert events and all(event.market.limit_up == 111.0 for event in events)
+  history.limit = 112.0
+  with pytest.raises(ValueError, match="BACKTEST_SOURCE_CHANGED"):
+    [event async for event in dataset.events()]

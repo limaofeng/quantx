@@ -375,8 +375,6 @@ def _validate_bar_schema(record: dict[str, Any], *, period: str) -> None:
       "lastSettlementPrice",
       "settlementPrice",
       "priceTick",
-      "upperLimit",
-      "lowerLimit",
     ):
       if field in record:
         _finite_number(record[field], field=field)
@@ -391,7 +389,8 @@ def _validate_bar_schema(record: dict[str, Any], *, period: str) -> None:
     return
 
   missing = _KLINE_REQUIRED_FIELDS - fields
-  extra = fields - _KLINE_REQUIRED_FIELDS - _KLINE_VARIANT_FIELDS
+  daily_fields = {"upperLimit", "lowerLimit"} if period == "1d" else set()
+  extra = fields - _KLINE_REQUIRED_FIELDS - _KLINE_VARIANT_FIELDS - daily_fields
   if missing:
     raise _validation_error(f"kline record is missing fields: {sorted(missing)}")
   if extra:
@@ -410,6 +409,8 @@ def _validate_bar_schema(record: dict[str, Any], *, period: str) -> None:
     raise _validation_error("kline record contains conflicting open interest fields")
   for field in fields - {"code", "period", "time"}:
     _finite_number(record[field], field=field)
+    if field in daily_fields and record[field] <= 0:
+      raise _validation_error("daily price limit must be positive when present")
 
 
 class _BarTransferValidator:
@@ -652,15 +653,11 @@ def preprocess_market_data(
         "askVol": "ask_vol",
         "bidVol": "bid_vol",
         "priceTick": "price_tick",
-        "upperLimit": "up_stop_price",
-        "lowerLimit": "down_stop_price",
       },
       inplace=True,
     )
     for column, default in {
       "price_tick": 0.01,
-      "up_stop_price": 0.0,
-      "down_stop_price": 0.0,
     }.items():
       if column not in values:
         values[column] = default
@@ -673,8 +670,6 @@ def preprocess_market_data(
       "settlement_price",
       "last_settlement_price",
       "price_tick",
-      "up_stop_price",
-      "down_stop_price",
     ]
     values[price_columns] = values[price_columns].astype(float).round(3)
     values[["volume", "amount", "pvolume", "tickvol"]] = (
@@ -703,8 +698,6 @@ def preprocess_market_data(
         "settlement_price",
         "transaction_num",
         "price_tick",
-        "up_stop_price",
-        "down_stop_price",
         "ask_price",
         "bid_price",
         "ask_vol",
@@ -725,6 +718,8 @@ def preprocess_market_data(
       "openInt": "open_interest",
       "preClose": "pre_close",
       "suspendFlag": "suspend_flag",
+      "upperLimit": "up_stop_price",
+      "lowerLimit": "down_stop_price",
     },
     inplace=True,
   )
@@ -743,6 +738,10 @@ def preprocess_market_data(
     "open_interest",
     "suspend_flag",
   ]
+  if period == "1d":
+    columns.extend(
+      field for field in ("up_stop_price", "down_stop_price") if field in values
+    )
   values[["open", "high", "low", "close", "pre_close", "settelement_price"]] = (
     values[["open", "high", "low", "close", "pre_close", "settelement_price"]]
     .astype(float)

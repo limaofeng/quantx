@@ -326,9 +326,6 @@ class Settings(BaseSettings):
   redis_url: str = Field(default="redis://localhost:6379/0", description="Redis连接URL")
   cache_ttl: int = Field(default=300, description="缓存TTL(秒)")
 
-  # 外部API配置
-  tushare_token: str = Field(default="", description="Tushare API Token")
-
   # LLM/AI 服务配置
   llm_api_key: str = Field(default="", description="LLM API Key (兼容 Gemini 等)")
   llm_api_url: str = Field(

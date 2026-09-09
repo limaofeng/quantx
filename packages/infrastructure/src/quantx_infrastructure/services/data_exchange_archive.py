@@ -29,8 +29,6 @@ TICK_FIELDS = {
   "askVol": "ask_vol",
   "bidVol": "bid_vol",
   "priceTick": "price_tick",
-  "upperLimit": "up_stop_price",
-  "lowerLimit": "down_stop_price",
   "tick_ordinal": "tick_ordinal",
 }
 KLINE_FIELDS = {
@@ -77,6 +75,12 @@ async def persisted_partition(
   else:
     rows = await service.get_kline_data(**kwargs, period=request.period)
     fields = KLINE_FIELDS
+    if request.period == "1d":
+      fields = {
+        **fields,
+        "upperLimit": "up_stop_price",
+        "lowerLimit": "down_stop_price",
+      }
   if len(rows) != coverage[0]["point_count"] or len(rows) > 500000:
     raise ValueError("PERSISTED_COVERAGE_CHANGED")
   records = []
@@ -93,7 +97,12 @@ async def persisted_partition(
         "code": request.instrument,
         "period": request.period,
         "time": stamp,
-        **{wire: getattr(row, field) for wire, field in fields.items()},
+        **{
+          wire: getattr(row, field)
+          for wire, field in fields.items()
+          if wire not in {"upperLimit", "lowerLimit"}
+          or (getattr(row, field, None) is not None and getattr(row, field) > 0)
+        },
       }
     )
   return records

@@ -239,20 +239,28 @@ async def dispatch_once() -> dict:
               await set_failed(store, row["id"], "SOURCE_REQUEST_FAILED")
             continue
           try:
-            try:
-              _, _, files = await load_uploaded_request_manifest(store, source_id)
-              records = await asyncio.to_thread(
-                partition_records, _iter_transfer_chunks(files), request
-              )
-            except (FileNotFoundError, MarketDataValidationError):
-              from quantx_infrastructure.services.data_exchange_archive import (
-                persisted_partition,
-              )
+            from quantx_infrastructure.services.data_exchange_archive import (
+              persisted_partition,
+            )
 
+            if request.period == "1d":
+              # Stored daily references survive later historical re-downloads.
               persisted_rows = await persisted_partition(
                 request, source.get("ingestion_result") or {}
               )
               records = partition_records([persisted_rows], request)
+            else:
+              try:
+                _, _, files = await load_uploaded_request_manifest(store, source_id)
+                records = await asyncio.to_thread(
+                  partition_records, _iter_transfer_chunks(files), request
+                )
+                validate_bar_records_against_request(records, payload)
+              except (FileNotFoundError, MarketDataValidationError):
+                persisted_rows = await persisted_partition(
+                  request, source.get("ingestion_result") or {}
+                )
+                records = partition_records([persisted_rows], request)
             validate_bar_records_against_request(records, payload)
             chunks = await asyncio.to_thread(publish, records)
             reference = await export_reference(request.instrument, request.trading_date)

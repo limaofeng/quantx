@@ -2387,6 +2387,45 @@ def _read_history_frames(
   return frames
 
 
+def _daily_price_limits(
+  manager: Any, code: str, source_time_ms: int
+) -> dict[str, float]:
+  """Use current contract details only for a demonstrably current daily bar."""
+  today = datetime.now(SHANGHAI_TIMEZONE).date()
+  bar_day = datetime.fromtimestamp(source_time_ms / 1000, SHANGHAI_TIMEZONE).date()
+  if bar_day != today:
+    return {}
+  try:
+    tick = manager.get_full_tick([code]).get(code) or {}
+    tick_day = datetime.fromtimestamp(
+      float(tick.get("time", 0)) / 1000, SHANGHAI_TIMEZONE
+    ).date()
+    if tick_day != today:
+      return {}
+    detail = manager.get_instrument_detail(code, iscomplete=True) or {}
+    if datetime.now(SHANGHAI_TIMEZONE).date() != today:
+      return {}
+    result = {}
+    for target, source in (
+      ("upperLimit", "UpStopPrice"),
+      ("lowerLimit", "DownStopPrice"),
+    ):
+      value = detail.get(source)
+      if (
+        isinstance(value, Real)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 < value < 1e10
+      ):
+        result[target] = float(value)
+    return result
+  except Exception as exc:
+    logger.warning(
+      "Daily price reference unavailable: code=%s error=%s", code, type(exc).__name__
+    )
+    return {}
+
+
 def _iter_market_data_records_unbounded(
   manager: Any,
   payload: dict[str, Any],
@@ -2490,6 +2529,8 @@ def _iter_market_data_records_unbounded(
           period=period,
           source_time_ms=int(row[_NORMALIZED_MARKET_TIME_COLUMN]),
         )
+        if period == "1d":
+          record.update(_daily_price_limits(manager, normalized_code, record["time"]))
         if record["time"] < lower_bound or record["time"] > upper_bound:
           raise ValueError(
             "XTData returned bar time outside requested range: "

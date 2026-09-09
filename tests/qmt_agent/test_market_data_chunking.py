@@ -3742,3 +3742,90 @@ def test_market_data_records_fail_closed_on_unparseable_time() -> None:
         "download": False,
       },
     )
+
+
+@pytest.mark.parametrize(
+  "bar_offset,tick_offset,expected", [(0, 0, True), (-1, 0, False), (0, -1, False)]
+)
+def test_daily_limits_only_enrich_current_day(bar_offset, tick_offset, expected):
+  today = datetime.now(broker_module.SHANGHAI_TIMEZONE).replace(hour=15, minute=5)
+
+  class Manager:
+    def get_full_tick(self, codes):
+      return {
+        codes[0]: {
+          "time": int((today + timedelta(days=tick_offset)).timestamp() * 1000)
+        }
+      }
+
+    def get_instrument_detail(self, code, **kwargs):
+      return {"UpStopPrice": 11.0, "DownStopPrice": 9.0}
+
+  actual = broker_module._daily_price_limits(
+    Manager(), "600000.SH", int((today + timedelta(days=bar_offset)).timestamp() * 1000)
+  )
+  assert actual == ({"upperLimit": 11.0, "lowerLimit": 9.0} if expected else {})
+
+
+@pytest.mark.parametrize(
+  "invalid", [0, -1, float("nan"), float("inf"), 1.7976931348623157e308]
+)
+def test_daily_limits_do_not_publish_vendor_missing_sentinels(invalid):
+  now = datetime.now(broker_module.SHANGHAI_TIMEZONE)
+  manager = SimpleNamespace(
+    get_full_tick=lambda codes: {codes[0]: {"time": int(now.timestamp() * 1000)}},
+    get_instrument_detail=lambda *args, **kwargs: {
+      "UpStopPrice": invalid,
+      "DownStopPrice": invalid,
+    },
+  )
+  assert (
+    broker_module._daily_price_limits(manager, "600000.SH", int(now.timestamp() * 1000))
+    == {}
+  )
+
+
+def test_current_daily_transfer_includes_contract_limits():
+  now = datetime.now(broker_module.SHANGHAI_TIMEZONE)
+  today = now.strftime("%Y%m%d")
+  source_time = int(
+    now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
+  )
+  manager = SimpleNamespace(
+    get_market_data=lambda **kwargs: {
+      "600000.SH": pd.DataFrame(
+        [
+          {
+            "time": source_time,
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.5,
+            "close": 10.1,
+            "preClose": 10.0,
+            "volume": 100,
+            "amount": 100000,
+            "suspendFlag": 0,
+            "settlementPrice": 0.0,
+            "openInterest": 0,
+          }
+        ]
+      )
+    },
+    get_full_tick=lambda codes: {codes[0]: {"time": int(now.timestamp() * 1000)}},
+    get_instrument_detail=lambda *args, **kwargs: {
+      "UpStopPrice": 11.0,
+      "DownStopPrice": 9.0,
+    },
+  )
+  payload = {
+    "operation": "bars",
+    "stock_list": ["600000.SH"],
+    "periods": ["1d"],
+    "start_time": today,
+    "end_time": today,
+    "download": False,
+  }
+  records = _market_data_records(manager, payload)
+  ingestion.validate_bar_records_against_request(records, payload)
+  assert _bar_rows(records)[0]["upperLimit"] == 11.0
+  assert _bar_rows(records)[0]["lowerLimit"] == 9.0

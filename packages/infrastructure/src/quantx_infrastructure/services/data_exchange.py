@@ -34,7 +34,7 @@ def content_path(digest: str) -> Path:
 
 async def submit(request: HistoryPartitionRequest) -> str:
   encoded = json.dumps(request.model_dump(mode="json"), sort_keys=True)
-  identity = hashlib.sha256(encoded.encode()).hexdigest()
+  identity = hashlib.sha256(("daily-limits-v2:" + encoded).encode()).hexdigest()
   async with AsyncSessionLocal() as db:
     await db.execute(text("SELECT pg_advisory_xact_lock(817234592)"))
     existing = await db.scalar(

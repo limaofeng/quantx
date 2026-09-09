@@ -106,8 +106,6 @@ def _tick_row(
     "askVol": [100.0, 0.0, 0.0, 0.0, 0.0],
     "bidVol": [200.0, 0.0, 0.0, 0.0, 0.0],
     "priceTick": 0.01,
-    "upperLimit": 10.84,
-    "lowerLimit": 8.87,
   }
 
 
@@ -394,7 +392,27 @@ class AtomicRequestStore:
     return []
 
 
-def test_tick_preprocessing_preserves_source_key_and_optional_limit_fields() -> None:
+def test_daily_limits_survive_ingestion_and_history_can_remain_empty() -> None:
+  row = _kline_row(period="1d")
+  for limits in ({}, {"upperLimit": 11.0, "lowerLimit": 9.0}):
+    record = {**row, **limits}
+    ingestion._validate_bar_schema(record, period="1d")
+    frame = pd.DataFrame(
+      [{k: v for k, v in record.items() if k not in {"code", "period"}}]
+    )
+    result = ingestion.preprocess_market_data("1d", {"600000.SH": frame})
+    if limits:
+      assert result.iloc[0]["up_stop_price"] == 11.0
+      assert result.iloc[0]["down_stop_price"] == 9.0
+    else:
+      assert "up_stop_price" not in result
+  with pytest.raises(ingestion.MarketDataValidationError):
+    ingestion._validate_bar_schema({**_tick_row(), "upperLimit": 11.0}, period="tick")
+  with pytest.raises(ingestion.MarketDataValidationError):
+    ingestion._validate_bar_schema({**_kline_row(), "upperLimit": 11.0}, period="1m")
+
+
+def test_tick_preprocessing_preserves_source_key_without_limit_fields() -> None:
   row = _tick_row()
   frame = pd.DataFrame(
     [{key: value for key, value in row.items() if key not in {"code", "period"}}]
@@ -404,8 +422,8 @@ def test_tick_preprocessing_preserves_source_key_and_optional_limit_fields() -> 
 
   result = normalized.iloc[0]
   assert result["price_tick"] == pytest.approx(0.01)
-  assert result["up_stop_price"] == pytest.approx(10.84)
-  assert result["down_stop_price"] == pytest.approx(8.87)
+  assert "up_stop_price" not in result
+  assert "down_stop_price" not in result
   assert result["source_time_ms"] == row["time"]
   assert result[HISTORICAL_TICK_ORDINAL_FIELD] == 0
   assert result["settlement_price"] == 0.0

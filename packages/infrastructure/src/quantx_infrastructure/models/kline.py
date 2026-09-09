@@ -34,6 +34,10 @@ class KLine(BaseModel):
   """若是股票，则openInt含义为股票状态，非股票则是持仓量: 14:集合竞价, 15:连续竞价"""
   suspend_flag: int
   """#停牌标记 0 - 正常 1 - 停牌 -1 - 当日起复牌"""
+  up_stop_price: float | None = None
+  """采集当日 MiniQMT 合约详情的涨停价；历史未采集为空。"""
+  down_stop_price: float | None = None
+  """采集当日 MiniQMT 合约详情的跌停价；历史未采集为空。"""
 
   def __init__(self, **kwargs):
     super().__init__()
@@ -76,4 +80,6 @@ class KLine(BaseModel):
       settelement_price=data.get("settlementPrice", 0.0),
       open_interest=data.get("openInt", 0),
       suspend_flag=data.get("suspendFlag", 0),
+      up_stop_price=data.get("upperLimit") if period == "1d" else None,
+      down_stop_price=data.get("lowerLimit") if period == "1d" else None,
     )
