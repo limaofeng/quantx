@@ -11,6 +11,7 @@ from quantx_contracts.history_session import (
   HistoryAuthResult,
   HistoryHeartbeat,
   HistoryHeartbeatAck,
+  HistoryRequestRemoved,
 )
 from quantx_infrastructure.auth.agent_access import authenticate_agent_session
 from quantx_infrastructure.auth.errors import AuthError
@@ -94,6 +95,14 @@ async def history_websocket(socket: WebSocket):
           value = message.model_dump(mode="json")
           key = (value["type"], value.get("request_id") or value["permit"]["permit_id"])
           current[key] = value
+        # Retire routing eligibility before admitting replacement requests.
+        # A removed request can still own durable files or an uncertain native call.
+        for kind, request_id in previous.keys() - current.keys():
+          if kind == "REQUEST":
+            await send(
+              HistoryRequestRemoved(request_id=request_id).model_dump(mode="json")
+            )
+        for key, value in current.items():
           if previous.get(key) != value:
             await send(value)
         previous = current

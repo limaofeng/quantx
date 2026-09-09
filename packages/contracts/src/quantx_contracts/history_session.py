@@ -3,9 +3,9 @@
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .collection_permit import CollectionPermit
+from .collection_permit import MAX_COLLECTION_UNITS, CollectionPermit
 
 HISTORY_SESSION_SUBPROTOCOL = "quantx.history.v1"
 
@@ -48,6 +48,22 @@ class HistoryRequest(BaseModel):
   type: Literal["REQUEST"] = "REQUEST"
   request_id: UUID
   payload: dict[str, Any]
+  unit_count: int = Field(ge=1, le=MAX_COLLECTION_UNITS, strict=True)
+  completed_units: int = Field(ge=0, le=MAX_COLLECTION_UNITS, strict=True)
+
+  @model_validator(mode="after")
+  def progress_within_plan(self):
+    if self.completed_units > self.unit_count:
+      raise ValueError("history completion exceeds plan")
+    return self
+
+
+class HistoryRequestRemoved(BaseModel):
+  """No longer eligible for delivery; this is not permission to delete files."""
+
+  model_config = ConfigDict(extra="forbid", frozen=True)
+  type: Literal["REQUEST_REMOVED"] = "REQUEST_REMOVED"
+  request_id: UUID
 
 
 class HistoryGrant(BaseModel):

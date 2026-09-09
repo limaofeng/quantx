@@ -237,6 +237,19 @@ class LocalJournal:
       self._refresh_size_cache()
     return existing is None
 
+  def collection_permit_received(self, permit: CollectionPermit) -> bool:
+    """Require original authorization evidence when the server reports STARTED."""
+    with self.lock:
+      row = self.connection.execute(
+        "SELECT permit_sha256 FROM history_collection_receipts WHERE permit_id=?",
+        (str(permit.permit_id),),
+      ).fetchone()
+    if row is None:
+      return False
+    if row["permit_sha256"] != payload_hash(permit.model_dump(mode="json")):
+      raise ValueError("collection receipt conflicts with original authorization")
+    return True
+
   def collection_execution_started(self, permit: CollectionPermit) -> bool:
     """Read original execution identity without renewing its start authorization."""
     with self.lock:

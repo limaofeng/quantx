@@ -244,7 +244,10 @@ async def test_receipt_consumer_runs_while_ingestion_waits(monkeypatch):
 
 
 async def test_agent_executor_through_authenticated_api_and_worker(
-  receipts, gateway_auth, tmp_path, monkeypatch  # noqa: F811
+  receipts,
+  gateway_auth,  # noqa: F811
+  tmp_path,
+  monkeypatch,
 ):
   import asyncio
 
@@ -343,6 +346,7 @@ async def test_agent_executor_through_authenticated_api_and_worker(
 
         artifact = await executor.execute(
           grant,
+          server_state="ISSUED",
           unit_payload=payload,
           start=start,
           finish=finish,

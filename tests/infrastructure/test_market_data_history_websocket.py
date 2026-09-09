@@ -82,7 +82,9 @@ async def connection(gateway_auth, monkeypatch):  # noqa: F811
     close=AsyncMock(),
     work=AsyncMock(
       return_value=[
-        HistoryRequest(request_id=request, payload=payload),
+        HistoryRequest(
+          request_id=request, payload=payload, unit_count=1, completed_units=0
+        ),
         HistoryGrant(permit=permit, state="ISSUED", unit_payload=payload),
       ]
     ),
@@ -167,3 +169,31 @@ async def test_oversized_heartbeat_does_not_renew_and_releases_session(connectio
   store.heartbeat.assert_not_awaited()
   store.close.assert_awaited_once_with(SESSION)
   assert socket.closed[-1]["reason"] == "HISTORY_SESSION_UNAVAILABLE"
+
+
+async def test_removed_request_precedes_replacement_delivery(connection):
+  configuration, store = connection
+  old = store.work.return_value[0]
+  replacement = old.model_copy(update={"request_id": uuid4()})
+  store.work.side_effect = [[old], [replacement]]
+  token, _ = issue_access_token(
+    "user", "device", configuration, scopes={"agent:history"}
+  )
+
+  class ReplacementSocket(Socket):
+    async def send_text(self, raw):
+      await super().send_text(raw)
+      if json.loads(raw).get("request_id") == str(replacement.request_id):
+        self.delivered.set()
+
+  socket = ReplacementSocket(auth(token))
+  await asyncio.wait_for(api.history_websocket(socket), 2)
+  assert [
+    message["type"]
+    for message in socket.messages
+    if message["type"].startswith("REQUEST")
+  ] == ["REQUEST", "REQUEST_REMOVED", "REQUEST"]
+  removed = next(
+    message for message in socket.messages if message["type"] == "REQUEST_REMOVED"
+  )
+  assert removed["request_id"] == str(old.request_id)

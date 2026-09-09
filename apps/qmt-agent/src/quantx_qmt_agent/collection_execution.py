@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from quantx_contracts.collection_permit import CollectionPermit, CollectionUnit
@@ -49,6 +49,7 @@ class CollectionExecution:
     permit: CollectionPermit,
     *,
     unit_payload: dict[str, Any],
+    server_state: Literal["ISSUED", "STARTED"],
     start: Callable[[CollectionPermit], Awaitable[None]],
     finish: Callable[[CollectionPermit, NativeUnitArtifact], Awaitable[None]],
     collect: Callable[[], Iterable[dict[str, Any]]],
@@ -58,8 +59,16 @@ class CollectionExecution:
     )
     if str(permit.device_id) != self.device_id or unit != permit.unit:
       raise ValueError("collection execution scope mismatch")
+    if server_state not in {"ISSUED", "STARTED"}:
+      raise ValueError("unexpected collection permit state")
     # The same process-wide native lock must be shared by every history caller.
     async with self.native_lock:
+      if server_state == "STARTED" and not self.journal.collection_permit_received(
+        permit
+      ):
+        raise CollectionOutcomeUnknown(
+          "server reports native entry without local authorization evidence"
+        )
       if self.journal.collection_execution_started(permit):
         artifact = await self._join_native_thread(self._recover, permit)
       else:

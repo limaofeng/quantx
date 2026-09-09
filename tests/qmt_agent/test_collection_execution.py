@@ -73,7 +73,12 @@ async def test_native_entry_and_finish_follow_durable_ack_order(execution):
     order.append("finish")
 
   artifact = await runner.execute(
-    permit, unit_payload=PAYLOAD, start=start, finish=finish, collect=collect
+    permit,
+    server_state="ISSUED",
+    unit_payload=PAYLOAD,
+    start=start,
+    finish=finish,
+    collect=collect,
   )
   assert order == ["start", "native", "finish"]
   assert list(runner.artifacts.replay(artifact)) == [{"value": 1}]
@@ -87,6 +92,7 @@ async def test_lost_finish_recovers_original_expired_permit_without_recollection
   with pytest.raises(ConnectionError):
     await runner.execute(
       permit,
+      server_state="ISSUED",
       unit_payload=PAYLOAD,
       start=AsyncMock(),
       finish=AsyncMock(side_effect=ConnectionError),
@@ -99,7 +105,12 @@ async def test_lost_finish_recovers_original_expired_permit_without_recollection
   start, finish = AsyncMock(), AsyncMock()
   try:
     result = await runner.execute(
-      permit, unit_payload=PAYLOAD, start=start, finish=finish, collect=collect
+      permit,
+      server_state="STARTED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=finish,
+      collect=collect,
     )
     collect.assert_called_once()
     start.assert_not_awaited()
@@ -114,6 +125,7 @@ async def test_start_not_confirmed_cannot_enter_native(execution):
   with pytest.raises(ConnectionError):
     await runner.execute(
       permit,
+      server_state="ISSUED",
       unit_payload=PAYLOAD,
       start=AsyncMock(side_effect=ConnectionError),
       finish=finish,
@@ -133,7 +145,12 @@ async def test_expiry_while_waiting_for_start_does_not_enter_native(execution):
 
   with pytest.raises(ValueError, match="expired"):
     await runner.execute(
-      permit, unit_payload=PAYLOAD, start=start, finish=AsyncMock(), collect=collect
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=AsyncMock(),
+      collect=collect,
     )
   collect.assert_not_called()
   assert not runner.journal.collection_execution_started(permit)
@@ -153,6 +170,7 @@ async def test_expiry_during_thread_scheduling_does_not_enter_native(
   with pytest.raises(ValueError, match="expired"):
     await runner.execute(
       permit,
+      server_state="ISSUED",
       unit_payload=PAYLOAD,
       start=AsyncMock(),
       finish=AsyncMock(),
@@ -168,11 +186,21 @@ async def test_native_failure_is_not_automatically_repeated(execution):
   start, finish = AsyncMock(), AsyncMock()
   with pytest.raises(RuntimeError, match="native failed"):
     await runner.execute(
-      permit, unit_payload=PAYLOAD, start=start, finish=finish, collect=collect
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=finish,
+      collect=collect,
     )
   with pytest.raises(CollectionOutcomeUnknown):
     await runner.execute(
-      permit, unit_payload=PAYLOAD, start=start, finish=finish, collect=collect
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=finish,
+      collect=collect,
     )
   collect.assert_called_once()
   start.assert_awaited_once()
@@ -191,6 +219,7 @@ async def test_sealed_file_survives_failure_before_journal_binding(
   with pytest.raises(OSError):
     await runner.execute(
       permit,
+      server_state="ISSUED",
       unit_payload=PAYLOAD,
       start=AsyncMock(),
       finish=AsyncMock(),
@@ -200,6 +229,7 @@ async def test_sealed_file_survives_failure_before_journal_binding(
   finish = AsyncMock()
   await runner.execute(
     permit,
+    server_state="ISSUED",
     unit_payload=PAYLOAD,
     start=AsyncMock(side_effect=AssertionError),
     finish=finish,
@@ -213,6 +243,7 @@ async def test_completed_but_corrupted_result_never_finishes_or_recollects(execu
   runner, permit = execution
   result = await runner.execute(
     permit,
+    server_state="ISSUED",
     unit_payload=PAYLOAD,
     start=AsyncMock(),
     finish=AsyncMock(),
@@ -223,6 +254,7 @@ async def test_completed_but_corrupted_result_never_finishes_or_recollects(execu
   with pytest.raises(ValueError):
     await runner.execute(
       permit,
+      server_state="ISSUED",
       unit_payload=PAYLOAD,
       start=AsyncMock(),
       finish=finish,
@@ -245,7 +277,12 @@ async def test_repeated_cancellation_keeps_native_lock_until_thread_exits(execut
   finish = AsyncMock()
   task = asyncio.create_task(
     runner.execute(
-      permit, unit_payload=PAYLOAD, start=AsyncMock(), finish=finish, collect=collect
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=finish,
+      collect=collect,
     )
   )
   try:
@@ -264,6 +301,7 @@ async def test_repeated_cancellation_keeps_native_lock_until_thread_exits(execut
   # The completed background result remains recoverable after cancellation.
   await runner.execute(
     permit,
+    server_state="ISSUED",
     unit_payload=PAYLOAD,
     start=AsyncMock(side_effect=AssertionError),
     finish=finish,
@@ -283,7 +321,12 @@ async def test_scope_mismatch_has_no_side_effect(execution, change):
   start, collect = AsyncMock(), Mock()
   with pytest.raises(ValueError, match="scope mismatch"):
     await runner.execute(
-      permit, unit_payload=payload, start=start, finish=AsyncMock(), collect=collect
+      permit,
+      server_state="ISSUED",
+      unit_payload=payload,
+      start=start,
+      finish=AsyncMock(),
+      collect=collect,
     )
   start.assert_not_awaited()
   collect.assert_not_called()
@@ -317,7 +360,12 @@ async def test_new_epoch_received_during_start_wait_fences_native_entry(executio
   collect = Mock()
   with pytest.raises(ValueError, match="owner is stale"):
     await runner.execute(
-      permit, unit_payload=PAYLOAD, start=start, finish=AsyncMock(), collect=collect
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=AsyncMock(),
+      collect=collect,
     )
   collect.assert_not_called()
   assert not runner.journal.collection_execution_started(permit)
@@ -327,6 +375,7 @@ async def test_new_permit_cannot_replace_original_native_execution(execution):
   runner, permit = execution
   await runner.execute(
     permit,
+    server_state="ISSUED",
     unit_payload=PAYLOAD,
     start=AsyncMock(),
     finish=AsyncMock(),
@@ -336,7 +385,12 @@ async def test_new_permit_cannot_replace_original_native_execution(execution):
   start, finish, collect = AsyncMock(), AsyncMock(), Mock()
   with pytest.raises(ValueError, match="another authorization"):
     await runner.execute(
-      newer, unit_payload=PAYLOAD, start=start, finish=finish, collect=collect
+      newer,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=finish,
+      collect=collect,
     )
   start.assert_not_awaited()
   finish.assert_not_awaited()
@@ -347,6 +401,7 @@ async def test_deleted_completed_file_is_unknown_instead_of_recollected(executio
   runner, permit = execution
   artifact = await runner.execute(
     permit,
+    server_state="ISSUED",
     unit_payload=PAYLOAD,
     start=AsyncMock(),
     finish=AsyncMock(),
@@ -357,6 +412,7 @@ async def test_deleted_completed_file_is_unknown_instead_of_recollected(executio
   with pytest.raises(CollectionOutcomeUnknown) as error:
     await runner.execute(
       permit,
+      server_state="ISSUED",
       unit_payload=PAYLOAD,
       start=AsyncMock(),
       finish=AsyncMock(),
@@ -364,3 +420,21 @@ async def test_deleted_completed_file_is_unknown_instead_of_recollected(executio
     )
   assert error.value.reason_code == "COLLECTION_NATIVE_OUTCOME_UNKNOWN"
   collect.assert_not_called()
+
+
+async def test_server_started_without_local_receipt_never_recollects(execution):
+  runner, permit = execution
+  start, finish, collect = AsyncMock(), AsyncMock(), Mock()
+  with pytest.raises(CollectionOutcomeUnknown, match="without local authorization"):
+    await runner.execute(
+      permit,
+      server_state="STARTED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=finish,
+      collect=collect,
+    )
+  start.assert_not_awaited()
+  finish.assert_not_awaited()
+  collect.assert_not_called()
+  assert not runner.journal.collection_permit_received(permit)

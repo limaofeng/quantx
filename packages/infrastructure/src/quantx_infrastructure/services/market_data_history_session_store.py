@@ -109,9 +109,11 @@ class HistorySessionStore:
         (
           await connection.execute(
             text("""
-        SELECT request_id,request_payload FROM market_data_request
-        WHERE device_id=:device AND status IN ('DELIVERED','RECEIVING')
-        ORDER BY created_at,request_id LIMIT 3
+        SELECT r.request_id,r.request_payload,p.unit_count,p.next_unit_index
+        FROM market_data_request r
+        JOIN market_data_collection_plan p ON p.request_id=r.request_id
+        WHERE r.device_id=:device AND r.status IN ('DELIVERED','RECEIVING')
+        ORDER BY r.created_at,r.request_id LIMIT 3
       """),
             {"device": identity},
           )
@@ -141,7 +143,12 @@ class HistorySessionStore:
     if len(grants) > 1:
       raise HistorySessionUnavailable("history native admission invariant violated")
     messages = [
-      HistoryRequest(request_id=row["request_id"], payload=row["request_payload"])
+      HistoryRequest(
+        request_id=row["request_id"],
+        payload=row["request_payload"],
+        unit_count=row["unit_count"],
+        completed_units=row["next_unit_index"],
+      )
       for row in requests
     ]
     for row in grants:
