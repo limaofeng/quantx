@@ -955,8 +955,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   尚未发生时的重放；账户漂移、审批丢失/哈希变化、额外字段、非法 head version 均拒绝且
   不改变旧源或发布头。30 项 successor/CANARY 测试通过，证据
   `.codex_screenshots/p7-successor-command.log`。这不是公开人工发布入口或正式 P6 审批。
-  legacy 当前仅由 global monitor 调用 entry authority 失效并阻断新源，尚无持久化 DRAINING
-  义务清单，不能据此清除 head.strategy_run_id 或判定切换完成。
+  legacy 当前仅由 global monitor 调用 entry authority 失效并阻断新源，尚未接通持久化 DRAINING，
+  不能据此清除 head.strategy_run_id 或判定切换完成。
+- legacy 义务清单冻结组件已完成：按配置头/旧 run/版本锁定读取原 owner 的 intent、pending、
+  correlation、outbox、runtime event、batch 与 source ExitPlan，写入现有 rollout 审计；
+  金额/数量、生命周期状态、消息与策略元数据/plan state 哈希参与清单版本。重复 operation
+  只有当前内容仍一致才返回原哈希；头漂移、未来事实、委托状态或退出剩余量变化拒绝复用。
+  终态外观和孤立 outbox 仍保留为义务，孤立消息箱存在时不列出可失效候选，不改 owner/
+  ExitPlan/source ref，不判定义务归零。6 项隔离验证与 Ruff 通过，证据
+  `.codex_screenshots/p6-legacy-inventory.log`。当前仅冻结复核材料，永久 ENTRY 阻断、
+  真实旧 run 身份校验、排空命令及重启恢复仍需接线；未执行真实维护切换。
 - 剩余开发顺序：
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
