@@ -93,7 +93,8 @@ async def test_download_reuses_scope_and_rechecks_without_certification(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(monkeypatch, tmp_path):
+@pytest.mark.parametrize("unconfirmed", [False, True])
+async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(monkeypatch, tmp_path, unconfirmed):
   stopped = asyncio.Event()
   running = asyncio.Event()
   job = SimpleNamespace(job_id="job", flow_run_id="owner")
@@ -112,12 +113,15 @@ async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(mon
     finally:
       await asyncio.sleep(0)
       stopped.set()
+      if unconfirmed:
+        raise preparation.PreparationProcessUnconfirmed("unknown")
 
   async def heartbeat(*args):
     await running.wait()
     raise ConnectionError("heartbeat lost")
 
   async def update(job_id, **values):
+    assert not unconfirmed
     assert stopped.is_set()
     assert values["status"] == "FAILED"
     assert values["expected_flow_run_id"] == "owner"
@@ -129,8 +133,24 @@ async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(mon
   monkeypatch.setattr(preparation, "perform", work)
   monkeypatch.setattr(preparation, "keep_alive", heartbeat)
   monkeypatch.setattr(preparation, "update_job", update)
-  await preparation.research_preparation_dispatch_flow.fn()
+  result = await preparation.research_preparation_dispatch_flow.fn()
+  if unconfirmed:
+    assert result["status"] == "RUNNING"
+    assert result["reason"] == "PREPARATION_PROCESS_STOP_UNCONFIRMED"
   assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_research_stop_failure_is_explicit_and_not_retryable(monkeypatch, tmp_path):
+  from unittest.mock import AsyncMock
+
+  process = SimpleNamespace(returncode=None, wait=AsyncMock(side_effect=asyncio.CancelledError))
+  stop = AsyncMock(return_value=False)
+  monkeypatch.setattr(preparation.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+  monkeypatch.setattr(preparation, "stop_async_process", stop)
+  with pytest.raises(preparation.PreparationProcessUnconfirmed):
+    await preparation.run_research(SimpleNamespace(kind="COVERAGE", request={}), tmp_path)
+  stop.assert_awaited_once_with(process)
 
 
 @pytest.mark.asyncio

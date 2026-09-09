@@ -9,6 +9,7 @@ from pathlib import Path
 
 from prefect import flow
 from prefect.runtime import flow_run
+from quantx_infrastructure.async_process_stop import stop_async_process
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.repositories.stock_selection_training_repository import (
   StockSelectionTrainingRepository,
@@ -31,6 +32,10 @@ from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
   daily_market_data_sync_flow,
 )
 from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
+
+
+class PreparationProcessUnconfirmed(RuntimeError):
+  """The child may still exist; its job must not become retryable."""
 
 
 async def update_job(job_id, *, expected_flow_run_id, **values):
@@ -64,9 +69,12 @@ async def run_research(job, directory: Path):
       raise RuntimeError("Research 结果格式无效")
     return result
   finally:
-    if process.returncode is None:
-      process.terminate()
-      await process.wait()
+    try:
+      stopped = await stop_async_process(process)
+    except Exception:
+      stopped = False
+    if not stopped:
+      raise PreparationProcessUnconfirmed("PREPARATION_PROCESS_STOP_UNCONFIRMED")
 
 
 async def keep_alive(job_id, owner):
@@ -227,7 +235,8 @@ async def research_preparation_dispatch_flow():
   finally:
     work.cancel()
     heartbeat.cancel()
-    await asyncio.gather(work, heartbeat, return_exceptions=True)
-    if failure:
+    stopped = await asyncio.gather(work, heartbeat, return_exceptions=True)
+    unconfirmed = any(isinstance(value, PreparationProcessUnconfirmed) for value in stopped)
+    if failure and not unconfirmed:
       await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, status="FAILED", **failure)
-  return {"job_id": job.job_id}
+  return {"job_id": job.job_id, **({"status": "RUNNING", "reason": "PREPARATION_PROCESS_STOP_UNCONFIRMED"} if unconfirmed else {})}
