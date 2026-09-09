@@ -307,3 +307,140 @@ async def test_live_market_reader_supplies_the_real_portfolio_cut(db):
   assert result.cut.execution_ref.owner_id == "new-source"
   assert result.entry_blockers == ()
   assert history.calls == []  # No filled T batch means no invented overnight mark.
+
+
+async def add_ready(db, key):
+  from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+
+  db.add(
+    TradeIntentRecord(
+      id=key,
+      owner_type="T_ASSISTANT_EXECUTION",
+      owner_id="new-source",
+      environment="LIVE",
+      idempotency_key=key,
+      account_id="account",
+      instrument_code=CODE,
+      direction="BUY",
+      bucket="swing",
+      status="EXECUTION_READY",
+      allocation_cycle_id="cycle",
+      allocation_version=1,
+      allocation_decision_id=f"decision-{key}",
+      intent_metadata={"t_batch_id": f"batch-{key}", "t_trade_role": "ENTRY"},
+      created_at=NOW,
+      updated_at=NOW,
+    )
+  )
+  db.add(
+    TAllocationBatchRecord(
+      allocation_batch_id=f"allocation-{key}",
+      execution_id="new-source",
+      cycle_id="cycle",
+      environment="LIVE",
+      allocation_attempt=1 if key == "own" else 2,
+      portfolio_input_fingerprint="a" * 64,
+      intent_manifest_hash="b" * 64,
+      portfolio_snapshot={},
+      intent_manifest={},
+      intent_count=1,
+      decision_manifest_hash="c" * 64,
+      status="COMMITTED",
+      created_at=NOW,
+      committed_at=NOW,
+      expires_at=NOW + timedelta(seconds=30),
+    )
+  )
+  await db.flush()
+  db.add(
+    TAllocationDecisionRecord(
+      decision_id=f"decision-{key}",
+      allocation_batch_id=f"allocation-{key}",
+      intent_id=key,
+      intent_version=0,
+      candidate_id=f"candidate-{key}",
+      instrument_code=CODE,
+      rank=1,
+      action="ALLOW",
+      requested_amount_ceiling=1000,
+      allocated_amount_cap=1000,
+      evidence={},
+      created_at=NOW,
+      expires_at=NOW + timedelta(seconds=30),
+    )
+  )
+  await db.flush()
+
+
+async def test_final_review_excludes_only_own_unsubmitted_allocation(db):
+  async with db.begin():
+    await add_ready(db, "own")
+  planned = await read(db)
+  reviewed = await read(db, review_intent_id="own")
+  assert planned.uncovered_buy_amount == 1000
+  assert reviewed.uncovered_buy_amount == 0
+  assert planned.active_batch_count == 1 and reviewed.active_batch_count == 0
+  assert not planned.envelopes[0].positive_t_eligible
+  assert reviewed.envelopes[0].positive_t_eligible
+  assert planned.portfolio_input_fingerprint != reviewed.portfolio_input_fingerprint
+  assert (
+    await read(db, review_intent_id="own")
+  ).portfolio_input_fingerprint == reviewed.portfolio_input_fingerprint
+  async with db.begin():
+    await add_ready(db, "other")
+  both = await read(db, review_intent_id="own")
+  assert both.uncovered_buy_amount == 1000 and both.active_batch_count == 1
+  assert not both.envelopes[0].positive_t_eligible
+
+
+@pytest.mark.parametrize(
+  "fault", ["missing", "awaiting", "filled", "scope", "allocation", "order"]
+)
+async def test_final_review_cannot_hide_unproven_allocation(db, fault):
+  from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+
+  async with db.begin():
+    await add_ready(db, "own")
+    row = await db.get(TradeIntentRecord, "own")
+    if fault == "order":
+      from quantx_infrastructure.models.agent_runtime import PendingTradeOrder
+
+      db.add(
+        PendingTradeOrder(
+          client_order_id="already-queued",
+          user_id="fixture",
+          account_id="account",
+          owner_type="T_ASSISTANT_EXECUTION",
+          owner_id="new-source",
+          environment="LIVE",
+          instrument_code=CODE,
+          side="BUY",
+          order_type="LIMIT",
+          limit_price="10",
+          volume=100,
+          status="QUEUED",
+          batch_id="batch-own",
+          bucket="swing",
+          t_trade_role="ENTRY",
+          intent_id="own",
+          created_at=NOW,
+          updated_at=NOW,
+        )
+      )
+    if fault == "awaiting":
+      row.status = "AWAITING_APPROVAL"
+    elif fault == "filled":
+      row.executed_volume = 100
+    elif fault == "scope":
+      row.allocation_cycle_id = "other-cycle"
+    elif fault == "allocation":
+      row.allocation_version = 2
+    from sqlalchemy.orm.attributes import flag_modified
+
+    row.updated_at = NOW
+    flag_modified(row, "updated_at")
+  with pytest.raises(
+    ValueError,
+    match="LIVE_PORTFOLIO_(REVIEW_INTENT_SCOPE_INVALID|READY_ALLOCATION_REQUIRED|REVIEW_ORDER_ALREADY_EXISTS)",
+  ):
+    await read(db, review_intent_id="missing" if fault == "missing" else "own")

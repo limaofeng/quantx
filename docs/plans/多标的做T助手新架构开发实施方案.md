@@ -812,6 +812,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   150 项 Gate/PAPER 审查/运行回归通过；补充 LIVE 降级与配置错配负例后审查 24 项通过，
   Ruff 通过。证据 `.codex_screenshots/p6-shared-entry-gate{,-final}.log`。
   下一步：LIVE 最终容量读取需区分自身分配额度与其他待入场义务，再接 Sizer/风控/请求生成。
+- LIVE 最终容量与审查组件已实现：显式 review_intent_id 仅排除当前执行/周期的未下单 READY
+  意图分配；确认中、错版本、已成交、已进入 Pending/Correlation 均不能排除。其他分配及
+  订单义务仍计入账户、行业与批次占用，审查用途进入快照指纹，不改变普通分配读取语义。
+  LiveEntryExecutionReview 串联共享 Gate、原 Tick 五档市场见证、当前账户/行业/批次数/
+  老仓上限、真实 OrderSizer/TradingRiskChecker 和最终人工授权，返回 REVIEWED 请求及
+  数量/风控证据；仍未写 Pending/Outbox，也未注册 LIVE 请求生成调度。
+  75 项相关回归通过，Ruff 通过；其中审查 7 项使用实际 LIVE reader/Sizer/风控，Gate 和
+  审批边界为替身，分别由共享审查/确认测试覆盖，不视为完整券商或无替身整链验收。
+  证据 `.codex_screenshots/p6-live-{review-capacity,entry-review,review-regression}.log`。
+  下一步：审查结果持久化、请求生成/账户队列调度及行情变化前置撤销，并补无替身隔离整链。
 - 剩余开发顺序：
   人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

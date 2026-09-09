@@ -27,6 +27,7 @@ from sqlalchemy import select
 
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  OrderCorrelation,
   PendingTradeOrder,
   TTradeBatch,
 )
@@ -73,6 +74,7 @@ class LivePortfolioSnapshotReader:
     as_of,
     market_mark_reader,
     account_max_age_seconds,
+    review_intent_id: str | None = None,
   ):
     as_of = aware_time(as_of).astimezone(UTC)
     codes = tuple(sorted(set(instrument_codes)))
@@ -216,6 +218,27 @@ class LivePortfolioSnapshotReader:
       if row.owner_type == "T_ASSISTANT_EXECUTION"
       or row.intent_metadata.get("t_batch_id")
     ]
+    review_intent = None
+    if review_intent_id is not None:
+      review_intent = next((row for row in intents if row.id == review_intent_id), None)
+      if (
+        review_intent is None
+        or review_intent.owner_type != "T_ASSISTANT_EXECUTION"
+        or review_intent.owner_id != execution_id
+        or review_intent.allocation_cycle_id != cycle_id
+        or review_intent.status != "EXECUTION_READY"
+        or review_intent.instrument_code not in codes
+        or review_intent.order_id
+        or review_intent.executed_volume
+        or str(review_intent.intent_metadata.get("t_trade_role") or "").upper()
+        != "ENTRY"
+      ):
+        raise ValueError("LIVE_PORTFOLIO_REVIEW_INTENT_SCOPE_INVALID")
+      for model in (PendingTradeOrder, OrderCorrelation):
+        if await self.db.scalar(
+          select(model).where(model.intent_id == review_intent_id).limit(1)
+        ):
+          raise ValueError("LIVE_PORTFOLIO_REVIEW_ORDER_ALREADY_EXISTS")
     plans = await rows(
       select(AutoExitPlanRecord)
       .where(
@@ -343,8 +366,11 @@ class LivePortfolioSnapshotReader:
       batch_id = intent.intent_metadata.get("t_batch_id")
       if not isinstance(batch_id, str) or not batch_id:
         raise ValueError("LIVE_PORTFOLIO_READY_BATCH_REQUIRED")
-      pending[intent.instrument_code] += money(decision.allocated_amount_cap)
-      active_ids.add(batch_id)
+      # A final review spends its existing allocation; it is not a second entry.
+      # Preserve the exact decision in the cut, but reserve only other intents.
+      if intent.id != review_intent_id:
+        pending[intent.instrument_code] += money(decision.allocated_amount_cap)
+        active_ids.add(batch_id)
       allocation_material.append(
         (
           decision.decision_id,
@@ -372,6 +398,7 @@ class LivePortfolioSnapshotReader:
         valuation=valuation.evidence_hash,
         capacities={code: cap.obligation_watermark for code, cap in capacities.items()},
         allocations=allocation_material,
+        review_intent_id=review_intent_id,
         controls=dict(
           head_version=head.state_version,
           execution_version=execution.state_version,
