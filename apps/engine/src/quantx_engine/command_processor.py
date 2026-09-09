@@ -236,6 +236,17 @@ async def _dispatch(
   command_id: Optional[str] = None,
 ) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
+  if command_type == "T_ASSISTANT_PREPARE_LEGACY_INVENTORY":
+    from .t_assistant_legacy_inventory import dispatch_legacy_inventory
+
+    account_id = payload.get("account_id")
+    if not isinstance(account_id, str) or not account_id.strip():
+      raise ValueError("LEGACY_T_INVENTORY_ACCOUNT_REQUIRED")
+    async with t_trade_account_coordination_lock(account_id):
+      async with AsyncSessionLocal() as db, db.begin():
+        return await dispatch_legacy_inventory(
+          db, command_id=command_id, payload=payload, now=utcnow().replace(tzinfo=UTC)
+        )
   if command_type == "T_ASSISTANT_CONFIRM_LEGACY_DRAIN":
     from quantx_infrastructure.models.trade_confirmation_challenge import (
       TradeConfirmationChallenge,

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from quantx_api.gqlapi import t_assistant_legacy_drain_confirmation as api
@@ -59,6 +60,38 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
       window_start=(now - timedelta(minutes=1)).isoformat(),
       window_end=(now + timedelta(minutes=1)).isoformat(),
     )
+    monkeypatch.setattr(command_processor, "AsyncSessionLocal", sessions)
+    monkeypatch.setattr(command_processor, "utcnow", lambda: now.replace(tzinfo=None))
+    preparation_id = str(uuid4())
+    preparation_request = {
+      key: request[key]
+      for key in ("account_id", "config_id", "run_id", "expected_head_version")
+    }
+    async with sessions() as db, db.begin():
+      for _ in range(2):
+        assert (
+          await api.enqueue_legacy_inventory(
+            db,
+            principal=principal,
+            request_id=preparation_id,
+            request=preparation_request,
+            now=now,
+          )
+          == preparation_id
+        )
+    claimed = await command_processor._claim_next()
+    assert claimed[0] == preparation_id
+    inventory = await command_processor._dispatch(
+      claimed[1], claimed[2], command_id=claimed[0]
+    )
+    assert inventory == await command_processor._dispatch(
+      claimed[1], claimed[2], command_id=claimed[0]
+    )
+    await command_processor._complete(preparation_id, result=inventory)
+    request.update(
+      inventory_operation_id=inventory["inventory_operation_id"],
+      expected_inventory_hash=inventory["manifest_hash"],
+    )
     async with sessions() as db, db.begin():
       issued = await api.issue_drain_confirmation(
         db, principal=principal, request=request, now=now
@@ -93,7 +126,7 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
           await db.get(TradeConfirmationChallenge, issued["challenge_id"])
         ).consumed_at is None
         assert (
-          await db.scalar(select(func.count()).select_from(EngineCommandOutbox)) == 0
+          await db.scalar(select(func.count()).select_from(EngineCommandOutbox)) == 1
         )
       return
     identity = await consume()
@@ -115,6 +148,10 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
     async with sessions() as db:
       head = await db.get(TTradeGlobalConfig, "head")
       assert head.state_version == 2 and head.strategy_run_id == "plan-1"
-      assert await db.scalar(select(func.count()).select_from(EngineCommandOutbox)) == 1
+      assert await db.scalar(select(func.count()).select_from(EngineCommandOutbox)) == 2
+    # A committed inventory retry preserves its review cut even after drain changed facts.
+    assert inventory == await command_processor._dispatch(
+      claimed[1], claimed[2], command_id=claimed[0]
+    )
   finally:
     await engine.dispose()

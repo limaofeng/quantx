@@ -195,3 +195,67 @@ async def consume_drain_confirmation(
   challenge.result_reference = {"engine_command": {"message_id": identity}}
   await db.flush()
   return identity
+
+
+async def enqueue_legacy_inventory(db, *, principal, request_id, request, now):
+  """Prepare review material only; user confirmation is a separate operation."""
+  from uuid import UUID
+
+  required = {"account_id", "config_id", "run_id", "expected_head_version"}
+  if (
+    not db.in_transaction()
+    or not isinstance(request, dict)
+    or set(request) != required
+    or type(request["expected_head_version"]) is not int
+    or request["expected_head_version"] < 1
+    or any(
+      not isinstance(request[key], str) or not request[key].strip()
+      for key in required - {"expected_head_version"}
+    )
+    or not isinstance(request_id, str)
+    or str(UUID(request_id)) != request_id
+  ):
+    raise ValueError("LEGACY_T_INVENTORY_REQUEST_INVALID")
+  now = aware_time(now).astimezone(UTC)
+  _require_native_control_principal(principal, request["account_id"])
+  current = await TTradeControlChallengeService._lock_current_principal(
+    db, principal, request["account_id"]
+  )
+  payload = {**request, "actor_id": current.user_id}
+  head = await db.get(
+    TTradeGlobalConfig,
+    request["config_id"],
+    with_for_update=True,
+    populate_existing=True,
+  )
+  if head is None or head.account_id != request["account_id"]:
+    raise ValueError("LEGACY_T_INVENTORY_HEAD_CONFLICT")
+  command_type = "T_ASSISTANT_PREPARE_LEGACY_INVENTORY"
+  existing = await db.get(EngineCommandOutbox, request_id)
+  if existing is not None:
+    if (
+      existing.command_type != command_type
+      or existing.aggregate_id != request["run_id"]
+      or existing.payload != payload
+    ):
+      raise ValueError("LEGACY_T_INVENTORY_REQUEST_ID_CONFLICT")
+    return request_id
+  if (
+    head.mode != "live"
+    or head.strategy_run_id != request["run_id"]
+    or head.state_version != request["expected_head_version"]
+  ):
+    raise ValueError("LEGACY_T_INVENTORY_HEAD_CONFLICT")
+  db.add(
+    EngineCommandOutbox(
+      message_id=request_id,
+      idempotency_key=f"legacy-inventory:{request_id}",
+      command_type=command_type,
+      aggregate_id=request["run_id"],
+      payload=payload,
+      available_at=now.replace(tzinfo=None),
+      processing_status="PENDING",
+    )
+  )
+  await db.flush()
+  return request_id

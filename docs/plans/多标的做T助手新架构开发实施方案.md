@@ -987,7 +987,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   inventory/guard 及原发布确认回归通过，Ruff 通过；证据
   `.codex_screenshots/p6-legacy-confirmation-regression.log`。认证刷新与内存端点为合成边界，
   SQLite 验证实际签名/令牌、消息箱和排空持久化，不代表真实设备、PG 并发或完整进程验收。
-  尚需公开 GraphQL/UI 维护入口、清单准备命令、排空后终结/解除旧绑定的整链；不开放新源准入。
+  清单准备命令已补齐：API 从当前原生 Principal 写入 actor，以 UUID 请求号原子去重；
+  Engine 验证持久化命令、旧策略类、账户及版本后冻结清单。已提交命令重试返回原清单，
+  不因后续回报或排空改变复核对象；真正排空仍重算义务并核验哈希。隔离 API 准备→Engine
+  清单→确认→排空整链及原清单/排空、命令边界共 **25 项通过**，Ruff 通过；证据
+  `.codex_screenshots/p6-legacy-inventory-command.log` 和
+  `.codex_screenshots/p6-legacy-inventory-command-boundaries.log`。
+  尚需公开 GraphQL/UI 维护入口、排空后终结/解除旧绑定的整链；不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

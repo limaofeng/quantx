@@ -275,3 +275,85 @@ async def freeze_legacy_t_obligation_inventory(
     )
     await db.flush()
     return digest
+
+
+async def dispatch_legacy_inventory(db, *, command_id, payload, now):
+  """Persist the review once; retry returns that cut, never a silently newer cut."""
+  from quantx_infrastructure.core.assistant_strategy_policy import (
+    T_TRADE_STRATEGY_CLASS_NAME,
+  )
+  from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
+  from quantx_infrastructure.models.enums import StrategyRunMode, StrategyRunStatus
+  from quantx_infrastructure.models.strategy import Strategy
+  from quantx_infrastructure.models.strategy_run import StrategyRun
+
+  required = {"account_id", "config_id", "run_id", "expected_head_version", "actor_id"}
+  if (
+    not db.in_transaction()
+    or not command_id
+    or set(payload) != required
+    or type(payload["expected_head_version"]) is not int
+    or payload["expected_head_version"] < 1
+    or any(
+      not isinstance(payload[key], str) or not payload[key].strip()
+      for key in required - {"expected_head_version"}
+    )
+  ):
+    raise ValueError("LEGACY_T_INVENTORY_REQUEST_INVALID")
+  command = await db.get(EngineCommandOutbox, command_id)
+  if (
+    command is None
+    or command.command_type != "T_ASSISTANT_PREPARE_LEGACY_INVENTORY"
+    or command.aggregate_id != payload["run_id"]
+    or command.payload != payload
+  ):
+    raise ValueError("LEGACY_T_INVENTORY_DURABLE_COMMAND_REQUIRED")
+  head = await db.get(
+    TTradeGlobalConfig,
+    payload["config_id"],
+    with_for_update=True,
+    populate_existing=True,
+  )
+  if head is None or head.account_id != payload["account_id"]:
+    raise ValueError("LEGACY_T_INVENTORY_HEAD_CONFLICT")
+  operation_id = f"legacy-inventory:{command_id}"
+  existing = await db.get(TTradeRolloutEvent, operation_id)
+  if existing is not None:
+    manifest = dict(existing.details.get("manifest") or {})
+    if (
+      existing.event_type != "LEGACY_T_OBLIGATION_INVENTORY_FROZEN"
+      or existing.account_id != payload["account_id"]
+      or existing.actor_user_id != payload["actor_id"]
+      or any(
+        manifest.get(key) != payload[key]
+        for key in ("account_id", "config_id", "run_id")
+      )
+      or manifest.get("head_version") != payload["expected_head_version"]
+      or existing.details.get("manifest_hash") != stable_manifest_hash(manifest)
+    ):
+      raise ValueError("LEGACY_T_INVENTORY_REPLAY_CONFLICT")
+  else:
+    run = await db.get(
+      StrategyRun, payload["run_id"], with_for_update=True, populate_existing=True
+    )
+    strategy = await db.get(Strategy, run.strategy_id) if run else None
+    if (
+      run is None
+      or strategy is None
+      or strategy.class_name != T_TRADE_STRATEGY_CLASS_NAME
+      or run.mode != StrategyRunMode.LIVE
+      or run.status not in {StrategyRunStatus.RUNNING, StrategyRunStatus.PAUSED}
+      or dict(run.parameters or {}).get("account_id") != payload["account_id"]
+    ):
+      raise ValueError("LEGACY_T_INVENTORY_RUN_SCOPE_CONFLICT")
+    await freeze_legacy_t_obligation_inventory(
+      db,
+      config_id=payload["config_id"],
+      run_id=payload["run_id"],
+      expected_head_version=payload["expected_head_version"],
+      operation_id=operation_id,
+      actor_id=payload["actor_id"],
+      now=now,
+    )
+    existing = await db.get(TTradeRolloutEvent, operation_id)
+  return {"success": True, "inventory_operation_id": operation_id, **existing.details}
