@@ -10,7 +10,6 @@ import logging
 import os
 import uuid
 
-import aiofiles
 from fastapi import APIRouter, Header, HTTPException, Request
 from quantx_infrastructure.auth.agent_access import authenticate_agent_session
 from quantx_infrastructure.auth.errors import AuthError
@@ -59,6 +58,44 @@ _MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
 )
 _MARKET_DATA_AGENT_BUSY_REASON = "MARKET_DATA_AGENT_BUSY"
 _market_data_staging_lock = asyncio.Lock()
+
+
+def _publish_upload_file(temporary, destination, raw):
+  """Persist bytes and directory entries before any database receipt is committed."""
+  with temporary.open("xb") as output:
+    output.write(raw)
+    output.flush()
+    os.fsync(output.fileno())
+  os.replace(temporary, destination)
+  if os.name != "nt":
+    # The request directory can have been created by this upload as well.
+    for directory in (destination.parent, destination.parent.parent):
+      descriptor = os.open(directory, os.O_RDONLY)
+      try:
+        os.fsync(descriptor)
+      finally:
+        os.close(descriptor)
+
+
+async def _persist_upload_file(temporary, destination, raw):
+  task = asyncio.create_task(
+    asyncio.to_thread(_publish_upload_file, temporary, destination, raw)
+  )
+  try:
+    await asyncio.shield(task)
+  except asyncio.CancelledError:
+    # Cleanup must not unlink a file while its writer is still publishing it.
+    # A published orphan is retained; no database acknowledgement is fabricated.
+    while not task.done():
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        continue
+      except Exception:
+        break
+    if not task.cancelled():
+      task.exception()
+    raise
 
 
 def _bearer(request: Request) -> str:
@@ -444,9 +481,7 @@ async def upload_market_data_chunk(
       commit_started = False
       committed = False
       try:
-        async with aiofiles.open(temporary, "wb") as output:
-          await output.write(raw)
-        os.replace(temporary, destination)
+        await _persist_upload_file(temporary, destination, raw)
         destination_written = True
         db.add(
           MarketDataTransfer(

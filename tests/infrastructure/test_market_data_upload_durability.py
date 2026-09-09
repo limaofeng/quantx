@@ -1,0 +1,112 @@
+"""Data API must persist file bytes before acknowledging the database receipt."""
+
+import asyncio
+import os
+import stat
+import threading
+from datetime import datetime, timezone
+
+import pytest
+from quantx_infrastructure.models.agent_runtime import (
+  MarketDataRequest,
+  MarketDataTransfer,
+)
+from quantx_market_data import agent_upload as api
+from sqlalchemy import event, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.api.integration.test_agent_market_upload_conflict import (
+  REQUEST_ID,
+  _configure_api,
+  _market_data_database,
+  _seed_dispatch_request,
+  _upload,
+)
+
+
+async def test_fsync_and_rename_precede_database_commit(tmp_path, monkeypatch):
+  events = []
+  fsync, replace = os.fsync, os.replace
+
+  def sync(descriptor):
+    events.append("file" if stat.S_ISREG(os.fstat(descriptor).st_mode) else "directory")
+    return fsync(descriptor)
+
+  def rename(*args):
+    events.append("rename")
+    return replace(*args)
+
+  def commit(_):
+    events.append("commit")
+
+  async with _market_data_database() as (_, sessions):
+    _configure_api(monkeypatch, sessions, tmp_path)
+    await _seed_dispatch_request(
+      sessions,
+      request_id=REQUEST_ID,
+      status="DELIVERED",
+      now=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    monkeypatch.setattr(api.os, "fsync", sync)
+    monkeypatch.setattr(api.os, "replace", rename)
+    event.listen(AsyncSession.sync_session_class, "before_commit", commit)
+    try:
+      result = await _upload(b"compressed-test-bytes", total_chunks=1)
+    finally:
+      event.remove(AsyncSession.sync_session_class, "before_commit", commit)
+    assert result["accepted"]
+    assert events[:2] == ["file", "rename"]
+    assert events[-1] == "commit"
+    if os.name != "nt":
+      assert events[2:-1] == ["directory", "directory"]
+
+
+async def test_fsync_failure_never_records_transfer(tmp_path, monkeypatch):
+  async with _market_data_database() as (_, sessions):
+    _configure_api(monkeypatch, sessions, tmp_path)
+    await _seed_dispatch_request(
+      sessions,
+      request_id=REQUEST_ID,
+      status="DELIVERED",
+      now=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+
+    def fail(_):
+      raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(api.os, "fsync", fail)
+    with pytest.raises(OSError, match="fsync failure"):
+      await _upload(b"compressed-test-bytes", total_chunks=1)
+    async with sessions() as db:
+      assert await db.scalar(select(func.count()).select_from(MarketDataTransfer)) == 0
+      assert (await db.get(MarketDataRequest, REQUEST_ID)).status == "DELIVERED"
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+async def test_cancel_waits_for_publisher_before_cleanup(tmp_path, monkeypatch):
+  entered, release = threading.Event(), threading.Event()
+  original = api._publish_upload_file
+
+  def publish(*args):
+    entered.set()
+    release.wait(3)
+    original(*args)
+
+  monkeypatch.setattr(api, "_publish_upload_file", publish)
+  temporary, destination = tmp_path / "chunk.tmp", tmp_path / "chunk.gz"
+  task = asyncio.create_task(
+    api._persist_upload_file(temporary, destination, b"retained")
+  )
+  try:
+    assert await asyncio.to_thread(entered.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+  finally:
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+  assert destination.read_bytes() == b"retained"
+  assert not temporary.exists()
