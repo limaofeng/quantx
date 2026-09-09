@@ -10,9 +10,20 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
   validate_bar_records_against_request,
 )
 from quantx_worker.prefector.flows.development_data_export_flow import (
+  export_failure_reason,
   partition_records,
   publish,
 )
+
+
+@pytest.mark.parametrize("reason", ["SOURCE_COVERAGE_MISSING", "PERSISTED_COVERAGE_CHANGED", "REFERENCE_DATA_MISSING"])
+def test_export_preserves_known_failure_reason(reason):
+  assert export_failure_reason(ValueError(reason)) == reason
+
+
+@pytest.mark.parametrize("message", ["token=secret", "/private/credentials", "UNKNOWN_SECRET_VALUE"])
+def test_export_does_not_expose_unrecognized_error_details(message):
+  assert export_failure_reason(ValueError(message)) == "ValueError"
 
 
 def bar(code="600000.SH"):

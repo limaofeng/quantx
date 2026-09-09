@@ -29,6 +29,25 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
 from sqlalchemy import text
 
 
+def export_failure_reason(error: Exception) -> str:
+  """Expose only known diagnostic codes, never raw paths or credentials."""
+  reason = str(error)
+  if reason in {
+    "SOURCE_COVERAGE_MISSING",
+    "EXPORT_TRANSFER_BUDGET_EXCEEDED",
+    "EXPORT_DISK_BUDGET_EXCEEDED",
+    "EXPORT_CHECKSUM_MISMATCH",
+    "EXPORT_RECORD_BUDGET_EXCEEDED",
+    "PERSISTED_COVERAGE_UNPROVEN",
+    "PERSISTED_COVERAGE_CHANGED",
+    "HISTORICAL_SOURCE_IDENTITY_MISSING",
+    "REFERENCE_DATA_MISSING",
+    "REFERENCE_DATA_BUDGET_EXCEEDED",
+  }:
+    return reason
+  return type(error).__name__
+
+
 def partition_records(chunks, request: HistoryPartitionRequest) -> list[dict]:
   start = datetime.combine(
     request.trading_date, datetime.min.time(), ZoneInfo("Asia/Shanghai")
@@ -291,7 +310,7 @@ async def dispatch_once() -> dict:
                 },
               )
           except (ValueError, OSError, MarketDataValidationError) as exc:
-            await set_failed(store, row["id"], type(exc).__name__)
+            await set_failed(store, row["id"], export_failure_reason(exc))
         return {"status": "processed", "partitions": len(rows)}
       finally:
         await connection.execute(text("SELECT pg_advisory_unlock(817234591)"))
