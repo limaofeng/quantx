@@ -6033,6 +6033,65 @@ class AgentRuntime:
       except asyncio.TimeoutError:
         pass
 
+  async def _history_collection_supervisor(self):
+    """Own the dedicated transport lifetime independently of trade reconnects."""
+    from quantx_contracts.history_session import HistoryHeartbeat
+
+    from .history_pipeline import HistoryPipeline
+    from .history_session import HistorySessionClient
+
+    await self._broker_ready.wait()
+    if not hasattr(self, "_history_pipeline"):
+      self._history_pipeline = HistoryPipeline(self)
+
+    def health():
+      return HistoryHeartbeat(
+        xtdata_ready=self._is_market_data_ready(),
+        qos_reason=self._history_resource_block_reason() or None,
+      )
+
+    client = HistorySessionClient(
+      api_url=self.configuration.api_url,
+      device_id=self.configuration.device_id,
+      capabilities=self._advertised_capabilities(),
+      connect=_connect_websocket,
+      token=self._history_access_token,
+      health=health,
+      handle=self._handle_history_work,
+      reset=self._history_pipeline.reset_session,
+    )
+    self._history_collection_client = client
+    delay = 1
+    try:
+      while not self._stopped.is_set():
+        started = time.monotonic()
+        try:
+          running = asyncio.create_task(client.run(), name="history-collection-session")
+          stopped = asyncio.create_task(self._stopped.wait())
+          try:
+            done, _ = await asyncio.wait({running, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if running in done:
+              await running
+          finally:
+            running.cancel()
+            stopped.cancel()
+            await asyncio.gather(running, stopped, return_exceptions=True)
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          logger.warning("History collection disconnected: error=%s", exc.__class__.__name__)
+        # A durable connection resets transport backoff; retries never change
+        # the request, permit or collection-attempt budget.
+        if time.monotonic() - started >= 30:
+          delay = 1
+        try:
+          await asyncio.wait_for(self._stopped.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+          pass
+        delay = min(30, delay * 2)
+    finally:
+      self._history_collection_client = None
+
   def _read_retained_history_upload(self, job):
     request_id = str(job.request.request_id)
     return _read_market_data_spool_manifest(

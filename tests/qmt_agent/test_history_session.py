@@ -143,6 +143,11 @@ async def test_old_connection_ack_rejected(connection):
 
 async def test_work_overload_disconnects_instead_of_blocking_reader(connection):
   client, socket, _ = connection
+
+  async def blocked_handler(message):
+    await asyncio.Event().wait()
+
+  client.handle = blocked_handler
   for _ in range(10):
     await socket.incoming.put(
       HistoryRequest(
