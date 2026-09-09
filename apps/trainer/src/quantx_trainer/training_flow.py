@@ -1068,14 +1068,19 @@ async def stock_selection_training_dispatch_flow(
 @flow(name="stock-selection-training-capability", retries=0)
 async def stock_selection_training_capability_flow(config_path: str) -> dict[str, Any]:
   """Only periodic capability writer; never claims or waits for training."""
+  config_digest = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
   async with training_session(config_path) as db:
     probe = await asyncio.to_thread(_probe_capability)
     if probe.get("probe_failed") or not isinstance(probe.get("cpu_available"), bool):
       raise RuntimeError("Research 能力探测未返回有效结果；保留上次成功心跳")
     status, details = _probe_details(probe)
+    observed = _now()
     await StockSelectionTrainingRepository(db).upsert_capability_heartbeat(
-      status=status, details=details, now=_now()
+      status=status, details=details, now=observed
     )
+    from quantx_trainer.backend_status import write_backend_status
+
+    write_backend_status(current_config().state_root, Path(config_path), details, observed_at=observed.timestamp(), expected_config_sha256=config_digest)
     return details
 
 

@@ -106,7 +106,7 @@ def test_status_cli_reports_drain_without_claiming_execution_exit(tmp_path, monk
   monkeypatch.setattr(preflight, "preflight", Mock(side_effect=AssertionError("offline query")))
   assert main.main(["status", "--config", "unused.toml"]) == 0
   value = json.loads(capsys.readouterr().out)
-  assert value == {"service": "OFFLINE", "execution_state": "NOT_INSPECTED", "admission": "OPEN", "host_resources": {"status": "PASS", "reason": None}}
+  assert value == {"service": "OFFLINE", "execution_state": "NOT_INSPECTED", "admission": "OPEN", "host_resources": {"status": "PASS", "reason": None}, "backend": {"state": "UNKNOWN"}}
   assert not (tmp_path / "control").exists()
   monkeypatch.setattr(training_host_guard, "host_resource_status", lambda root: {"status": "UNKNOWN", "reason": "HOST_POLICY_MISSING_OR_INVALID"})
   assert main.main(["status", "--config", "unused.toml"]) == 3

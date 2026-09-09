@@ -109,9 +109,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     from quantx_trainer.admission import admission_status
+    from quantx_trainer.backend_status import read_backend_status
     from quantx_trainer.service_status import service_status
 
     result = service_status(config.state_root, args.config)
+    result["backend"] = read_backend_status(config.state_root, args.config)
     try:
       result["admission"] = admission_status(config.state_root / "control")["admission"]
     except (OSError, ValueError, BundleTransferError):
