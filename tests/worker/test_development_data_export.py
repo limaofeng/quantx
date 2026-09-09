@@ -10,6 +10,8 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
   validate_bar_records_against_request,
 )
 from quantx_worker.prefector.flows.development_data_export_flow import (
+  _has_positive_source_coverage,
+  find_reusable_source_request,
   partition_records,
   publish,
 )
@@ -70,6 +72,79 @@ def test_missing_rows_are_not_successful_empty_coverage():
   )
   with pytest.raises(ValueError, match="COVERAGE_MISSING"):
     partition_records([[]], request)
+
+
+async def test_reusable_source_requires_positive_target_day_coverage():
+  request = HistoryPartitionRequest(
+    instrument="000001.SZ", period="tick", trading_date=date(2026, 8, 3)
+  )
+
+  class Connection:
+    def __init__(self):
+      self.statement = ""
+      self.parameters = {}
+
+    async def scalar(self, statement, parameters):
+      self.statement = str(statement)
+      self.parameters = parameters
+      return None
+
+  connection = Connection()
+  assert (
+    await find_reusable_source_request(
+      connection, request, request.agent_payload()
+    )
+    is None
+  )
+
+  sql = " ".join(connection.statement.split())
+  assert "json_array_elements" in sql
+  assert "day_coverage.value->>'instrument_code' = :instrument" in sql
+  assert "REPLACE(day_coverage.value->>'trading_date', '-', '') = :day" in sql
+  assert "day_coverage.value->>'point_count' ~ '^[1-9][0-9]*$'" in sql
+  assert connection.parameters == {
+    "codes": '["000001.SZ"]',
+    "periods": '["tick"]',
+    "day": "20260803",
+    "instrument": "000001.SZ",
+    "period": "tick",
+  }
+
+
+def test_linked_zero_coverage_source_is_not_reused_on_retry():
+  request = HistoryPartitionRequest(
+    instrument="000001.SZ", period="tick", trading_date=date(2026, 8, 3)
+  )
+  assert not _has_positive_source_coverage(
+    {
+      "ingestion_result": {
+        "day_coverage": [
+          {
+            "instrument_code": "000001.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-03",
+            "point_count": 0,
+          }
+        ]
+      }
+    },
+    request,
+  )
+  assert _has_positive_source_coverage(
+    {
+      "ingestion_result": {
+        "day_coverage": [
+          {
+            "instrument_code": "000001.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-03",
+            "point_count": 1,
+          }
+        ]
+      }
+    },
+    request,
+  )
 
 
 def test_digest_cannot_escape_export_directory():
