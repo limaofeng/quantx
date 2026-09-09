@@ -1,0 +1,53 @@
+mutation IOSPrepareTAssistantLegacyInventory(
+  $requestId: String!
+  $request: TAssistantLegacyInventoryRequest!
+) {
+  prepareTAssistantLegacyInventory(requestId: $requestId, request: $request) {
+    success
+    code
+    message
+    engineCommandId
+  }
+}
+mutation IOSPreviewTAssistantLegacyDrain(
+  $request: TAssistantLegacyDrainRequest!
+) {
+  previewTAssistantLegacyDrain(request: $request) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      expiresAt
+      request
+    }
+  }
+}
+mutation IOSConfirmTAssistantLegacyDrain(
+  $challengeId: String!
+  $confirmationToken: String!
+) {
+  confirmTAssistantLegacyDrain(
+    challengeId: $challengeId
+    confirmationToken: $confirmationToken
+  ) {
+    success
+    code
+    message
+    engineCommandId
+  }
+}
+query IOSTAssistantLegacyMaintenanceOperation(
+  $accountId: String!
+  $commandId: String!
+) {
+  tAssistantLegacyMaintenanceOperation(
+    accountId: $accountId
+    commandId: $commandId
+  ) {
+    commandId
+    status
+    evidence
+  }
+}

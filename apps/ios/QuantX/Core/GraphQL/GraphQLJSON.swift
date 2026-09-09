@@ -1,4 +1,5 @@
 @_spi(Internal) @_spi(Execution) import ApolloAPI
+import CoreFoundation
 import Foundation
 
 /// A lossless, recursively typed value for the public GraphQL `JSON` scalar.
@@ -30,11 +31,15 @@ indirect enum GraphQLJSON: Hashable, Sendable, CustomScalarType {
   }
 
   init(_jsonValue value: JSONValue) throws {
+    // JSONSerialization bridges both booleans and numbers through NSNumber.
+    // `as? Bool` also accepts numeric 0/1, so only CFBoolean is a boolean.
+    if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+      self = .boolean(number.boolValue)
+      return
+    }
     switch value {
     case is NSNull:
       self = .null
-    case let value as Bool:
-      self = .boolean(value)
     case let value as Int:
       self = .integer(value)
     case let value as Int32:

@@ -1002,7 +1002,17 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   实际 `127.0.0.1:8080/graphql` codegen、根 check/lint/test:run/build 通过，Web **895 项通过**。
   证据 `.codex_screenshots/p6-legacy-public-schema.log`、`p6-legacy-client-contracts-final.log`、
   `p6-legacy-codegen.log`、`p6-legacy-web-{check,lint,tests,build}.log`；未执行维护 mutation 或真实交易。
-  尚需可操作维护界面、排空后终结/解除旧绑定的整链；不开放新源准入。
+  原生维护客户端已补准备/查询/预览/确认的 Apollo 操作和 Repository，按实际 Caddy
+  introspection 生成 iOS 类型；清单绑定账户、旧 run/head version、请求命令与哈希，
+  凭据仅驻内存并绑定设备和本地会话轮次，禁用 Apollo 结果缓存。尚未接入控制页。
+  原生线缆 JSON 测试发现 NSNumber 的数字 1 被旧 `as? Bool` 误判；已改用 CFBoolean
+  类型判据，保留真实布尔值。扩大回归同时修复两个旧退出计划正向夹具的来源 ID 不一致，
+  生产归属校验未放宽。33 项相关模拟器用例已具备通过证据，其中旧夹具修复后 18 项复验
+  通过，证据 `p6-legacy-ios-regression.log`、`p6-legacy-ios-exit-fixtures.log`。
+  同轮实际端点 Web codegen/check/lint/build 通过；全量 Web 894 passed/1 failed，
+  服务状态历史图失败文件单独复验 13 passed，证据
+  `.codex_screenshots/p6-legacy-native-web-{test-run,service-recheck}.log`。
+  尚需原生控制页状态/生物确认/结果恢复与可操作界面、排空后终结/解除旧绑定整链；不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

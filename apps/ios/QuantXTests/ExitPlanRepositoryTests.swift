@@ -72,7 +72,8 @@ final class ExitPlanRepositoryTests: XCTestCase {
       sourceType: "T_TRADE_BATCH",
       strategyRunID: "t-run-1",
       executionOwnerType: "EXIT_PLAN",
-      sourceExecutionOwnerType: "STRATEGY_RUN"
+      sourceExecutionOwnerType: "STRATEGY_RUN",
+      sourceExecutionOwnerID: "t-run-1"
     )
 
     let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
@@ -103,7 +104,8 @@ final class ExitPlanRepositoryTests: XCTestCase {
       sourceType: "FIRST_BOARD_PROMOTION_V2",
       strategyRunID: "first-board-run-1",
       executionOwnerType: "EXIT_PLAN",
-      sourceExecutionOwnerType: "STRATEGY_RUN"
+      sourceExecutionOwnerType: "STRATEGY_RUN",
+      sourceExecutionOwnerID: "first-board-run-1"
     )
 
     let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
