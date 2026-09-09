@@ -323,9 +323,9 @@ async def acquire_backtest_dataset(
                 for key in ("price_tick", "up_stop_price", "down_stop_price")
                 if row[key] is None or row[key] <= 0
               ]
-              if missing:
-                for key in missing:
-                  missing_references[key] = missing_references.get(key, 0) + 1
+              for key in missing:
+                missing_references[key] = missing_references.get(key, 0) + 1
+              if "price_tick" in missing:
                 rows.append(row)
                 previous = identity
                 continue
@@ -338,7 +338,11 @@ async def acquire_backtest_dataset(
               or (previous is not None and identity <= previous)
               or any(
                 not isfinite(row[k]) or row[k] <= 0
-                for k in ("up_stop_price", "down_stop_price", "price_tick")
+                for k in ("price_tick",)
+              )
+              or any(
+                row[k] is not None and (not isfinite(row[k]) or row[k] <= 0)
+                for k in ("up_stop_price", "down_stop_price")
               )
               or type(row["stock_status"]) is not int
               or row["stock_status"] not in {-1, 0, 1}
@@ -373,7 +377,7 @@ async def acquire_backtest_dataset(
             "rows_seen": len(rows),
           }
         )
-      if missing_references:
+      if "price_tick" in missing_references:
         references.append(
           {"day": day.isoformat(), "code": code, "missing_fields": missing_references}
         )
@@ -406,6 +410,7 @@ async def acquire_backtest_dataset(
       break
   material = {
     "schema_version": "backtest-tick-dataset.v2",
+    "price_limit_policy": "CHECK_WHEN_AVAILABLE.v1",
     "storage": "SNAPSHOT" if freeze else "REFERENCE",
     "source_version": source_version,
     "instruments": sorted(instruments),

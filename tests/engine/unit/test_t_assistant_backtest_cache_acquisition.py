@@ -80,7 +80,14 @@ async def test_source_error_stops_without_querying_other_symbols(tmp_path):
   assert dataset.manifest["material"]["unattempted_partitions"] == 1
 
 
-async def test_backtest_requires_daily_limits_even_when_tick_has_them(tmp_path):
+@pytest.mark.parametrize("preserve_raw", [True, False])
+async def test_backtest_replays_without_daily_limits_and_never_uses_tick_limits(
+  tmp_path, preserve_raw
+):
+  from quantx_engine.t_assistant_backtest_run import execute_backtest
+
+  from tests.engine.unit.test_t_assistant_backtest_runtime import runtime
+
   class NoDailyReference(History):
     async def get_kline_data(self, **kwargs):
       return []
@@ -94,9 +101,24 @@ async def test_backtest_requires_daily_limits_even_when_tick_has_them(tmp_path):
     end=date(2026, 9, 3),
     root=tmp_path,
     latency_ms=0,
-    preserve_raw=True,
+    preserve_raw=preserve_raw,
   )
-  assert dataset.manifest["material"]["status"] == "REFERENCE_REQUIRED"
+  assert dataset.manifest["material"]["status"] == "FROZEN"
+  events = [event async for event in dataset.events()]
+  assert events and all(
+    event.market.limit_up is None and event.market.limit_down is None
+    for event in events
+  )
+  _, run, result = await execute_backtest(
+    request=runtime(request_only=True), events=dataset,
+    code_manifest={"fixture": "missing-daily-limits-v1"}, root=tmp_path / "runs",
+  )
+  assert len(run.broker.orders) == 4
+  _, _, replay = await execute_backtest(
+    request=runtime(request_only=True), events=dataset,
+    code_manifest={"fixture": "missing-daily-limits-v1"}, root=tmp_path / "runs",
+  )
+  assert result["material"]["result"]["economic_hash"] == replay["material"]["result"]["economic_hash"]
 
 
 async def test_reference_replay_joins_daily_limits_and_detects_changes(tmp_path):

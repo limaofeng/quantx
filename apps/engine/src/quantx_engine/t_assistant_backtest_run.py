@@ -198,6 +198,7 @@ async def execute_backtest(
       "economic_hash": stable_manifest_hash(json_value(economic)),
       "conservation": runtime._conservation(),
       "strategy_admission": "NOT_EVALUATED",
+      "price_limit_policy": "CHECK_WHEN_AVAILABLE.v1",
       "p6_allowed": False,
     }
   )
