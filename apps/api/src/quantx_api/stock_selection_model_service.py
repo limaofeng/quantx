@@ -139,7 +139,11 @@ class StockSelectionModelService:
     if not parent_run_id:
       raise ValueError("FINAL_EVALUATION 缺少 DEVELOPMENT 父运行")
     parent = await self.training_repository.get_run(str(parent_run_id))
-    if parent is None or self._record_value(parent, "run_kind") != "DEVELOPMENT":
+    if (
+      parent is None
+      or self._record_value(parent, "run_kind") != "DEVELOPMENT"
+      or self._record_value(parent, "status") != "SUCCEEDED"
+    ):
       raise ValueError("FINAL_EVALUATION 父运行无效")
     parent_spec_id = self._record_value(parent, "spec_id")
     parent_spec = (
@@ -165,6 +169,13 @@ class StockSelectionModelService:
       raise ValueError(f"模型产物未通过安全校验: {_safe_error(exc)}") from exc
     manifest = bundle.manifest
     metrics = bundle.metrics
+    parent_evidence = metrics.get("parent_development")
+    if (
+      manifest.get("parent_run_id") != parent_run_id
+      or not isinstance(parent_evidence, Mapping)
+      or parent_evidence.get("run_id") != parent_run_id
+    ):
+      raise ValueError("模型产物与数据库的 DEVELOPMENT 父运行不一致")
     for field in ("spec_hash", "coordinate_hash"):
       manifest_value = manifest.get(field)
       spec_value = self._record_value(spec, field)

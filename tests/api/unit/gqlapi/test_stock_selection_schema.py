@@ -304,6 +304,7 @@ async def test_registration_uses_final_db_run_key_and_sanitizes_projection(
     status="SUCCEEDED",
     artifact_manifest_sha256="c" * 64,
   )
+  parent = SimpleNamespace(run_kind="DEVELOPMENT", spec_id="development-spec", status="SUCCEEDED")
 
   class TrainingRepository:
     async def get_run_by_run_key(self, value):
@@ -324,7 +325,7 @@ async def test_registration_uses_final_db_run_key_and_sanitizes_projection(
 
     async def get_run(self, value):
       return (
-        SimpleNamespace(run_kind="DEVELOPMENT", spec_id="development-spec")
+        parent
         if value == "development-run"
         else None
       )
@@ -368,6 +369,7 @@ async def test_registration_uses_final_db_run_key_and_sanitizes_projection(
     "resolved_backend": "CPU",
     "gates": gates,
     "source_reference": "C:/private/source.csv",
+    "parent_run_id": "development-run",
   }
   bundle = SimpleNamespace(
     directory=tmp_path / run_id,
@@ -378,6 +380,7 @@ async def test_registration_uses_final_db_run_key_and_sanitizes_projection(
       "conclusion": "ACTIVE_ELIGIBLE",
       "registerable": True,
       "source_reference": "C:/private/metrics.json",
+      "parent_development": {"run_id": "development-run"},
     },
     data_quality={"source_reference": "C:/private/data.csv", "coverage": 1},
   )
@@ -396,6 +399,19 @@ async def test_registration_uses_final_db_run_key_and_sanitizes_projection(
   assert model_repository.payload["evidence"]["conclusion"] == "ACTIVE_ELIGIBLE"
   assert "source_reference" not in model_repository.payload["metrics"]
   assert "source_reference" not in model_repository.payload["evidence"]["data_quality"]
+
+  for parent_status in ("RUNNING", "FAILED", "CANCELLED"):
+    parent.status = parent_status
+    with pytest.raises(ValueError, match="父运行无效"):
+      await StockSelectionModelService(model_repository, TrainingRepository(), runs_root=tmp_path).register(run_key)
+  parent.status = "SUCCEEDED"
+  for container, field in ((manifest, "parent_run_id"), (bundle.metrics["parent_development"], "run_id")):
+    original = container[field]
+    for invalid in (None, "another-development-run"):
+      container[field] = invalid
+      with pytest.raises(ValueError, match="父运行不一致"):
+        await StockSelectionModelService(model_repository, TrainingRepository(), runs_root=tmp_path).register(run_key)
+    container[field] = original
 
   for field, invalid_value in (
     ("spec_hash", "f" * 64),
