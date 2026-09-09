@@ -102,11 +102,18 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
   if args.command == "status":
+    from quantx_infrastructure.training_bundle_store import BundleTransferError
+
+    from quantx_trainer.admission import admission_status
     from quantx_trainer.service_status import service_status
 
     result = service_status(config.state_root, args.config)
+    try:
+      result["admission"] = admission_status(config.state_root / "control")["admission"]
+    except (OSError, ValueError, BundleTransferError):
+      result["admission"] = "UNKNOWN"
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["service"] in {"ALIVE", "OFFLINE"} else 3
+    return 0 if result["service"] in {"ALIVE", "OFFLINE"} and result["admission"] != "UNKNOWN" else 3
 
   if args.command == "serve":
     from quantx_trainer.service import serve

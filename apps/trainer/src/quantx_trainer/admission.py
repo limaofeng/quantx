@@ -52,7 +52,12 @@ def set_admission(control_root: Path, *, draining: bool) -> dict[str, str]:
 
 
 def admission_status(control_root: Path) -> dict[str, str]:
-  directory = _directory(control_root)
+  # Observation must not create admission directories or alter the drain marker.
+  directory = control_root / "admission"
+  reject_links(directory)
+  reject_links(directory / "draining")
+  if any(path.exists() and not path.is_dir() for path in (directory, *directory.parents)):
+    raise ValueError("TRAINER_ADMISSION_DIRECTORY_INVALID")
   return {
     "admission": "DRAINING" if os.path.lexists(directory / "draining") else "OPEN",
     "execution_state": "NOT_INSPECTED",
