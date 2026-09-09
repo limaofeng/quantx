@@ -9,7 +9,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -86,9 +85,11 @@ def _now() -> datetime:
 
 
 def _research_cli_command() -> list[str]:
-  """Run the isolated Research protocol with the Worker's own interpreter."""
+  """Run isolated Research with containment before computation on Windows."""
 
-  return [sys.executable, "-m", "quantx_research.cli"]
+  from quantx_trainer.contained_process import research_command
+
+  return research_command("quantx_research.cli")
 
 
 def _probe_capability() -> dict[str, Any]:

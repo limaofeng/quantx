@@ -206,3 +206,8 @@ python -m quantx_trainer.main resume --config C:\Users\limao\QuantXTraining\stat
 这些命令仅操作本地状态，不要求数据库、Prefect 或 SFTP 在线。`drain` 设置持久化标记，训练、认证及 GPU 准备的领取事务在写执行证据前检查标记；被拒绝的事务保持排队。标记操作与领取前回调由同一操作系统文件锁串行化，锁占用时拒绝新领取，命令返回失败可重试。已通过回调的领取可能在 `drain` 返回后完成提交，作为已有任务继续执行；结果恢复仍可发布和收敛。
 
 `admission-status` 仅返回 `OPEN` / `DRAINING` 和 `execution_state=NOT_INSPECTED`，不证明任务或进程已退出，不能单凭它升级代码或依赖。完整排空核验、独立启停、进程树有界退出仍在实施中。`resume` 显式删除排空标记，恢复新领取。
+
+
+Windows 的 Research CLI 与准备计算现在经 `quantx_trainer.contained_process` 启动，在导入 Research 前将当前计算进程加入 Job Object。该 Job 仅启用 `KILL_ON_JOB_CLOSE`，不允许后代脱离；唯一句柄不可继承并保留至进程退出。创建、设置限制或加入失败均拒绝计算；保留计算进程原 PID、父进程和退出码，已有进程证据不变。机制依据 [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。macOS 保持直接计算入口。
+
+真实 Windows 正常退出/强制终止后的后代清理测试位于 `tests/trainer/test_contained_process.py`，macOS 上跳过。Job 接入不等于独立服务停止验收：所有后代退出的确认、Trainer 本身崩溃、完整排空和运行端故障测试仍需完成，不能仅凭直接子进程退出开放升级。

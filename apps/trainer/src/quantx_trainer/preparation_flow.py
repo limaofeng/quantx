@@ -178,11 +178,11 @@ async def _run_preparation_process(config, job, payload, check):
   evidence = directory / "process.json"
   identity = dict(run_id=job.job_id, owner=job.flow_run_id, request=request)
   begin_execution(evidence, **identity)
+  from quantx_trainer.contained_process import research_command
+
   try:
     process = await asyncio.create_subprocess_exec(
-      sys.executable,
-      "-m",
-      "quantx_research.preparation_job",
+      *research_command("quantx_research.preparation_job"),
       str(request),
       env=config.research_environment(os.environ),
       stdout=subprocess.DEVNULL,
