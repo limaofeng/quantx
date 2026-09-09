@@ -1399,6 +1399,10 @@ async def ingest_uploaded_market_data_request(
     raise _validation_error("market-data request payload is not an object")
   operation = str(payload.get("operation") or "bars")
   destination = str(payload.get("destination") or "influxdb").strip().lower()
+  if operation == "instrument_details":
+    from .instrument_detail_ingestion import ingest_instrument_details
+
+    return await ingest_instrument_details(store, request_id, progress=progress)
   if operation in {"divid_factors", "financial_data"}:
     from quantx_infrastructure.services.market_data_reference_ingestion import (
       ingest_uploaded_reference_request,

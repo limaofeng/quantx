@@ -87,7 +87,13 @@ class MarketDataWorkerStore(MarketDataDemandStore):
     self,
     *,
     limit=20,
-    operations=("bars", "sector_instruments", "divid_factors", "financial_data"),
+    operations=(
+      "bars",
+      "sector_instruments",
+      "divid_factors",
+      "financial_data",
+      "instrument_details",
+    ),
   ):
     return await super().recoverable_market_data_request_ids(
       limit=limit, operations=operations

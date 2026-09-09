@@ -2284,6 +2284,10 @@ def validate_market_data_request(payload: dict[str, Any]) -> None:
   """
 
   operation = str(payload.get("operation") or "bars")
+  if operation == "instrument_details":
+    from quantx_contracts.instrument_details import instrument_detail_codes
+
+    instrument_detail_codes(payload)
   if operation not in {
     "sector_instruments",
     "instrument_details",
@@ -2437,11 +2441,22 @@ def _iter_market_data_records_unbounded(
         yield {"sector": sector, "code": code}
     return
   if operation == "instrument_details":
-    codes = list(payload.get("stock_list") or [])
+    from quantx_contracts.instrument_details import (
+      instrument_detail_codes,
+      instrument_detail_json,
+    )
+
+    codes = instrument_detail_codes(payload)
     values = manager.get_instrument_detail_list(codes, iscomplete=True)
-    if isinstance(values, dict):
-      for code in sorted(values):
-        yield {"code": code, **_as_dict(values[code])}
+    if not isinstance(values, dict) or set(values) != set(codes):
+      raise ValueError("instrument_details requested records unavailable")
+    for code in codes:
+      fields = _as_dict(values[code])
+      if "code" in fields and fields["code"] != code:
+        raise ValueError("instrument_details source code mismatch")
+      record = {**fields, "code": code}
+      instrument_detail_json(record)
+      yield record
     return
   if operation == "financial_data":
     yield from _financial_data_records(manager, payload)

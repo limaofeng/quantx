@@ -9,7 +9,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
+from quantx_contracts.instrument_details import (
+  INSTRUMENT_CODE_PATTERN,
+  InstrumentDetailSnapshot,
+)
 from quantx_contracts.market_data_service import (
   HistoryDemand,
   HistoryDemandAccepted,
@@ -155,6 +159,27 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
       ) from None
     except Exception:
       raise HTTPException(503, "HISTORY_READ_UNAVAILABLE") from None
+
+  @app.get(
+    "/market-data/internal/v1/requests/{request_id}/instruments/{code}",
+    dependencies=[Depends(authorize)],
+    response_model=InstrumentDetailSnapshot,
+  )
+  async def instrument_snapshot(
+    request_id: Annotated[str, Path(min_length=1, max_length=36)],
+    code: Annotated[str, Path(pattern=INSTRUMENT_CODE_PATTERN)],
+  ):
+    from quantx_infrastructure.services.instrument_detail_ingestion import (
+      read_instrument_detail,
+    )
+
+    try:
+      result = await read_instrument_detail(app.state.store.engine, request_id, code)
+    except (ValueError, SQLAlchemyError):
+      raise HTTPException(503, "INSTRUMENT_SNAPSHOT_UNAVAILABLE") from None
+    if result is None:
+      raise HTTPException(404, "INSTRUMENT_SNAPSHOT_NOT_VERIFIED")
+    return result
 
   @app.get(
     "/market-data/internal/v1/requests/{request_id}", dependencies=[Depends(authorize)]
