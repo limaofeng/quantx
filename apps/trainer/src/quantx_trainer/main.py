@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
       "serve",
       "status",
       "logs",
+      "up",
     ],
   )
   parser.add_argument("--config", type=Path, required=True)
@@ -45,6 +46,17 @@ def main(argv: list[str] | None = None) -> int:
   except TrainerConfigurationError as exc:
     print(f"Trainer configuration rejected: {exc}", file=sys.stderr)
     return 2
+
+  if args.command == "up":
+    from quantx_trainer.launcher import start_service
+
+    try:
+      result = start_service(config, args.config)
+    except Exception:
+      print("Trainer launch pending: SERVICE_LAUNCH_UNCONFIRMED", file=sys.stderr)
+      return 3
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["service"] == "ALIVE" else 3
 
   if args.command == "logs":
     from quantx_infrastructure.training_bundle_store import BundleTransferError
