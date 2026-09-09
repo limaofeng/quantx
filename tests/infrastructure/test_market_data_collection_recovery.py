@@ -40,8 +40,6 @@ def migration(sync):
 @pytest.fixture
 async def recoverable(receipts):  # noqa: F811
   first, _, store, grant = receipts
-  async with first.engine.begin() as connection:
-    await connection.run_sync(lambda sync: migration(sync).upgrade())
   await execute(first, "CREATE TEMP TABLE market_data_transfer(request_id varchar(36))")
   return first, store, grant
 
@@ -344,3 +342,92 @@ async def test_requeue_failure_rolls_back_recovery_audit(recoverable):
       {"id": str(grant.unit.request_id)},
     )
   ).scalar_one() == "FAILED"
+
+
+@pytest.mark.parametrize("reason", ["XTDATA_UNAVAILABLE", "COLLECTION_RESULT_INVALID"])
+async def test_dependency_pause_survives_owner_change_and_requires_explicit_resume(
+  recoverable, receipts, reason  # noqa: F811
+):
+  from uuid import uuid4
+
+  from quantx_contracts.collection_permit import CollectionUnit
+  from quantx_contracts.collection_receipt import CollectionAbort
+
+  first, store, grant = recoverable
+  second = receipts[1]
+  await accept(store, grant, "START")
+  await store.consume(first)
+  await store.accept(
+    permit_id=str(grant.permit_id),
+    device_id=str(grant.device_id),
+    receipt=CollectionReceipt(
+      event="ABORT",
+      abort=CollectionAbort(
+        unit=grant.unit, native_exit="CONFIRMED_STOPPED", reason_code=reason
+      ),
+    ),
+  )
+  await store.consume(first)
+  other = str(uuid4())
+  app = create_app(store=first, token="internal", reader=object())
+  async with (
+    app.router.lifespan_context(app),
+    AsyncClient(
+      transport=ASGITransport(app),
+      base_url="http://test",
+      headers={"Authorization": "Bearer internal"},
+    ) as client,
+  ):
+    response = await client.get(
+      f"/market-data/internal/v1/requests/{grant.unit.request_id}"
+    )
+    assert response.status_code == 200
+    assert response.json()["reason_code"] == reason
+    assert "processing_error" not in response.json()
+  await execute(
+    first,
+    """INSERT INTO market_data_request(request_id,device_id,request_payload,status)
+    SELECT :id,device_id,request_payload,'QUEUED' FROM market_data_request WHERE request_id=:original""",
+    {"id": other, "original": str(grant.unit.request_id)},
+  )
+  await first.release()
+  assert await second.acquire()
+  permit_store = CollectionPermitStore(second)
+  await permit_store.register(other)
+  unit = CollectionUnit.from_payload(
+    other,
+    0,
+    {
+      "operation": "bars",
+      "stock_list": ["000001.SZ"],
+      "periods": ["1m"],
+      "start_time": "20260901",
+      "end_time": "20260901",
+    },
+  )
+  if reason == "XTDATA_UNAVAILABLE":
+    assert await permit_store.issue(device_id=str(grant.device_id), unit=unit) is None
+    assert (
+      await permit_store.issue_next(
+        device_id=str(grant.device_id),
+        collection_allowed=True,
+        development_allowed=True,
+      )
+      is None
+    )
+    assert (
+      await execute(
+        second,
+        "SELECT status FROM market_data_request WHERE request_id=:id",
+        {"id": other},
+      )
+    ).scalar_one() == "QUEUED"
+    # Recovery submission is explicit and works even though the original owner has stopped.
+    await first.resume_market_data_request(
+      str(grant.unit.request_id), reason="XTData connection repaired"
+    )
+  successor = await permit_store.issue_next(
+    device_id=str(grant.device_id), collection_allowed=True, development_allowed=True
+  )
+  assert successor is not None
+  assert await state(second, grant) == "ABORTED"

@@ -75,6 +75,9 @@ class CollectionPermitStore:
     )
 
   async def _issue(self, connection, *, device_id, unit):
+    if await self._native_dependency_blocked(connection):
+      await self.worker._guard_ingestion_owner(connection)
+      return None
     request = (
       (
         await connection.execute(
@@ -296,6 +299,19 @@ class CollectionPermitStore:
       )
       await self.worker._guard_ingestion_owner(connection)
 
+  async def _native_dependency_blocked(self, connection):
+    return await connection.scalar(
+      text("""
+      SELECT EXISTS (
+        SELECT 1 FROM market_data_collection_permit p
+        JOIN market_data_collection_receipt r ON r.permit_id=p.permit_id AND r.event='ABORT'
+        WHERE p.state='ABORTED' AND p.resumed_at IS NULL
+          AND r.processed_at IS NOT NULL AND r.reason_code IS NULL
+          AND r.payload->'abort'->>'reason_code'='XTDATA_UNAVAILABLE'
+      )
+    """)
+    )
+
   async def issue_next(
     self,
     *,
@@ -340,7 +356,7 @@ class CollectionPermitStore:
       """)
         )
       ).scalar_one()
-      if blocked:
+      if blocked or await self._native_dependency_blocked(connection):
         await self.worker._guard_ingestion_owner(connection)
         return None
       admitted = await self._admitted(connection)

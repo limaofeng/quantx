@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -163,11 +164,24 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     if value is None:
       raise HTTPException(404, "HISTORY_REQUEST_NOT_FOUND")
     progress = value.get("ingestion_progress") or {}
+    reason_code = progress.get("reason_code")
+    if value["status"] == "FAILED" and not progress:
+      try:
+        failure = json.loads(value.get("processing_error") or "null")
+        code = failure["reason_code"]
+        if isinstance(code, str) and code in {
+          "XTDATA_UNAVAILABLE",
+          "COLLECTION_RESULT_INVALID",
+          "COLLECTION_NATIVE_FAILED",
+        }:
+          reason_code = code
+      except (ValueError, TypeError, KeyError):
+        pass
     return {
       "request_id": request_id,
       "status": value["status"],
       "phase": progress.get("phase"),
-      "reason_code": progress.get("reason_code"),
+      "reason_code": reason_code,
       "attempt": progress.get("attempt", 0),
       "executions": progress.get("executions", 0),
       "next_retry_at": progress.get("next_retry_at"),

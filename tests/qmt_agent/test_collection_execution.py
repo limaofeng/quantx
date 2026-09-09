@@ -912,3 +912,26 @@ async def test_retirement_preserves_pending_failure_and_compacts_confirmed_attem
     assert not runner.journal.history_upload_retired(
       runner.device_id, str(permit.unit.request_id)
     )
+
+
+@pytest.mark.parametrize("reason", ["XTDATA_UNAVAILABLE", "COLLECTION_RESULT_INVALID"])
+async def test_native_failure_classification_survives_journal_and_abort(
+  execution, reason
+):
+  from quantx_qmt_agent.native_unit_ipc import NativeUnitFailure
+
+  runner, permit = execution
+  with pytest.raises(CollectionFailed) as caught:
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=Mock(side_effect=NativeUnitFailure(reason)),
+    )
+  assert caught.value.reason_code == reason
+  failure = runner.journal.load_collection_abort(permit)
+  assert failure.reason_code == reason
+  runner.stop_native.assert_called_once()
+  runner.abort.assert_awaited_once_with(permit, failure)

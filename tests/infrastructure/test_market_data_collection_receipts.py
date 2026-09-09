@@ -29,11 +29,13 @@ from tests.infrastructure.test_market_data_collection_permits import (  # noqa: 
 from tests.infrastructure.test_market_gateway_auth import gateway_auth  # noqa: F401
 
 
-def abort_migration(sync):
+def abort_migration(sync, recovery=False):
   path = (
     Path(__file__).resolve().parents[2]
     / "packages/infrastructure/alembic/versions/20260910_0075_market_data_collection_abort.py"
   )
+  if recovery:
+    path = path.with_name("20260910_0076_market_data_collection_recovery.py")
   spec = importlib.util.spec_from_file_location("abort_migration", path)
   migration = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(migration)
@@ -44,27 +46,6 @@ def abort_migration(sync):
 @pytest.fixture
 async def receipts(permits):  # noqa: F811
   first, second, grants, device, units = permits
-  path = (
-    Path(__file__).resolve().parents[2]
-    / "packages/infrastructure/alembic/versions/20260910_0071_market_data_collection_receipt.py"
-  )
-  spec = importlib.util.spec_from_file_location("receipt_migration", path)
-  migration = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(migration)
-
-  def upgrade(sync):
-    operations = Operations(MigrationContext.configure(sync))
-    migration.op = SimpleNamespace(
-      create_table=lambda *args, **kwargs: operations.create_table(
-        *args, prefixes=["TEMPORARY"], **kwargs
-      ),
-      create_index=operations.create_index,
-    )
-    migration.upgrade()
-    abort_migration(sync).upgrade()
-
-  async with first.engine.begin() as connection:
-    await connection.run_sync(upgrade)
   grant = await grants.issue(device_id=device, unit=units[0])
   return first, second, CollectionReceiptStore(first.engine), grant
 
@@ -193,6 +174,9 @@ async def test_migration_preserves_existing_receipt_idempotency(receipts):
   first, _, store, grant = receipts
   await accept(store, grant, "START")
   async with first.engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync: abort_migration(sync, recovery=True).downgrade()
+    )
     await connection.run_sync(lambda sync: abort_migration(sync).downgrade())
   old = (
     await execute(first, "SELECT payload FROM market_data_collection_receipt")
@@ -200,6 +184,9 @@ async def test_migration_preserves_existing_receipt_idempotency(receipts):
   assert "abort" not in old
   async with first.engine.begin() as connection:
     await connection.run_sync(lambda sync: abort_migration(sync).upgrade())
+    await connection.run_sync(
+      lambda sync: abort_migration(sync, recovery=True).upgrade()
+    )
   assert (await accept(store, grant, "START")).status == "PENDING"
   assert await store.consume(first) == 1
   assert await state(first, grant) == "STARTED"

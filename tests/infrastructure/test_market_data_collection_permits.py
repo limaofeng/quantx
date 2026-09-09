@@ -66,6 +66,25 @@ async def permits(workers, tmp_path, monkeypatch):  # noqa: F811
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     await connection.run_sync(upgrade)
+    for name in [
+      "20260910_0071_market_data_collection_receipt.py",
+      "20260910_0075_market_data_collection_abort.py",
+      "20260910_0076_market_data_collection_recovery.py",
+    ]:
+      spec = importlib.util.spec_from_file_location(
+        "collection_migration", path.with_name(name)
+      )
+      migration = importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(migration)
+      if "0071" in name:
+        await connection.run_sync(upgrade)
+      else:
+
+        def apply(sync):
+          migration.op = Operations(MigrationContext.configure(sync))
+          migration.upgrade()
+
+        await connection.run_sync(apply)
     await connection.execute(
       text(
         "ALTER TABLE market_data_request ADD COLUMN development_only boolean NOT NULL DEFAULT false"

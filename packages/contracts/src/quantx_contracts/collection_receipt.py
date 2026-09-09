@@ -20,7 +20,9 @@ class CollectionAbort(BaseModel):
   model_config = ConfigDict(extra="forbid", frozen=True)
   unit: CollectionUnit
   native_exit: Literal["CONFIRMED_STOPPED"]
-  reason_code: Literal["COLLECTION_NATIVE_FAILED", "COLLECTION_RESULT_INVALID"]
+  reason_code: Literal[
+    "COLLECTION_NATIVE_FAILED", "COLLECTION_RESULT_INVALID", "XTDATA_UNAVAILABLE"
+  ]
 
 
 class CollectionReceipt(BaseModel):

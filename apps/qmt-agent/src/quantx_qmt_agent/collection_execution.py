@@ -17,6 +17,7 @@ from quantx_contracts.collection_receipt import CollectionAbort
 
 from .journal import LocalJournal
 from .native_unit_artifact import NativeUnitArtifact, NativeUnitArtifacts
+from .native_unit_ipc import NativeUnitFailure
 
 
 class CollectionOutcomeUnknown(RuntimeError):
@@ -153,7 +154,9 @@ class CollectionExecution:
         failure = CollectionAbort(
           unit=permit.unit,
           native_exit="CONFIRMED_STOPPED",
-          reason_code="COLLECTION_NATIVE_FAILED",
+          reason_code=exc.reason_code
+          if isinstance(exc, NativeUnitFailure)
+          else "COLLECTION_NATIVE_FAILED",
         )
         self.journal.record_collection_abort(permit, failure)
         return failure
