@@ -4055,9 +4055,10 @@ async def _project_trade_intent_event(
       # can close the original intent after every attempt's fills converge.
       if not (projection and int(projection["expected"]) > int(projection["received"])):
         intent.status = (
-          previous_intent_status
+          "PARTIAL_FILLED" if int(intent.executed_volume or 0)
+          else previous_intent_status
           if previous_intent_status in {"PENDING", "APPROVED", "EXECUTION_READY", "EXECUTION_PENDING"}
-          else "PARTIAL_FILLED" if int(intent.executed_volume or 0) else "QUEUED"
+          else "QUEUED"
         )
       if projection is not None:
         projection["lifecycle_open"] = True
@@ -4117,9 +4118,10 @@ async def _project_trade_intent_event(
     projection and int(projection["expected"]) > int(projection["received"])
   ):
     intent.status = (
-      previous_intent_status
+      "PARTIAL_FILLED" if total_volume
+      else previous_intent_status
       if previous_intent_status in {"PENDING", "APPROVED", "EXECUTION_READY", "EXECUTION_PENDING"}
-      else "PARTIAL_FILLED" if total_volume else "QUEUED"
+      else "QUEUED"
     )
   return projection
 

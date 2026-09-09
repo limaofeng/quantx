@@ -24,7 +24,11 @@ from quantx_infrastructure.models.agent_runtime import (
   StrategyRuntimeEvent,
   TradeCommandOutbox,
 )
-from quantx_infrastructure.models.auth import AuthDeviceSession, AuthUser
+from quantx_infrastructure.models.auth import (
+  AuthDeviceSession,
+  AuthUser,
+  AuthUserAccountAccess,
+)
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.t_assistant_execution import (
@@ -112,6 +116,7 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
             TradeCommandOutbox,
             AuthUser,
             AuthDeviceSession,
+            AuthUserAccountAccess,
             TradeConfirmationChallenge,
             Order,
             Position,
@@ -313,7 +318,9 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       return confirmed.astimezone(tz) if tz else confirmed.replace(tzinfo=None)
 
   monkeypatch.setattr(command_module, "datetime", FixedDateTime)
-  monkeypatch.setattr(command_module.time_utils, "now", lambda: confirmed)
+  monkeypatch.setattr(
+    command_module.time_utils, "now", lambda: confirmation.to_shanghai(confirmed)
+  )
   for module in (command_module, admission_module):
     monkeypatch.setattr(module, "utcnow", lambda: confirmed.replace(tzinfo=None))
   monkeypatch.setattr(
@@ -378,7 +385,13 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   from quantx_contracts.agent import PROTOCOL_VERSION
   from quantx_engine import report_processor
   from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
+  from quantx_infrastructure.services import (
+    exit_plan_authorization_service as exit_authorization,
+  )
 
+  monkeypatch.setattr(
+    exit_authorization, "utcnow", lambda: confirmed.replace(tzinfo=None)
+  )
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
   monkeypatch.setattr(
     report_processor, "utcnow", lambda: confirmed.replace(tzinfo=None)
@@ -407,7 +420,34 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     assert event is not None
     intent = await db.get(TradeIntentRecord, "intent-0")
     assert intent.executed_volume == 100
+    assert intent.status in {"PARTIAL_FILLED", "FILLED"}, (intent.status, intent.notes)
     source = await db.get(TAssistantExecutionRecord, "live-fixture")
+    user = await db.get(AuthUser, "user-1")
+    user.permissions = ["liquidation:control", "trade:approve"]
+    device_session = await db.get(AuthDeviceSession, "session-1")
+    device_session.granted_permissions = list(user.permissions)
+    db.add(
+      AuthUserAccountAccess(user_id="user-1", account_id="account-1", is_default=True)
+    )
+    # Explicit synthetic post-fill account projection: today's 100 new shares
+    # remain unsellable, while the 1000-share old inventory is available.
+    db.add(
+      Position(
+        id="post-fill-position",
+        account_id="account-1",
+        account_type="STOCK",
+        stock_code="600000.SH",
+        instrument_name="fixture",
+        volume=1100,
+        can_use_volume=1000,
+        frozen_volume=0,
+        yesterday_volume=1000,
+        avg_price=9.9,
+        market_value=10890,
+        created_at=confirmed,
+        updated_at=confirmed,
+      )
+    )
     source.status = "STOPPED"
     source.completed_at = confirmed
     source.entry_readiness = "BLOCKED"
@@ -419,6 +459,13 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     assert len(plans) == 1
     assert plans[0].plan_state["entry_filled_volume"] == 100
     assert plans[0].source_execution_owner_id == "live-fixture"
+    from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanEvent
+
+    audit = list(await db.scalars(select(AutoExitPlanEvent)))
+    assert plans[0].auto_exit_authorized, [
+      (e.event_type, e.payload.get("reason_code")) for e in audit
+    ]
+    assert plans[0].auto_exit_authorization_challenge_id == "challenge-1"
 
   event.payload = {
     **event.payload,

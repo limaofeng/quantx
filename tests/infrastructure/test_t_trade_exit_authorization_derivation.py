@@ -803,3 +803,24 @@ async def test_independent_t_confirmation_rejects_bound_material_drift(authoriza
     assert not result.valid
     assert not plan.auto_exit_authorized
     assert result.code in {"T_TRADE_ENTRY_INTENT_SCOPE_CHANGED", "T_TRADE_EXIT_AUTHORIZATION_BINDING_INVALID"}
+
+
+@pytest.mark.parametrize("authorization_database", ["T_ASSISTANT_EXECUTION"], indirect=True)
+@pytest.mark.parametrize("damage", [None, "owner", "environment"])
+async def test_live_t_public_template_projection_preserves_signed_exit_scope(authorization_database, damage):
+  from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+
+  async with authorization_database() as db:
+    plan = await db.get(AutoExitPlanRecord, PLAN_ID)
+    template = AutoExitPlanService._execution_plan_template(
+      ExitPlanTemplate.from_dict(plan.plan_state["template"]),
+      ExecutionOwnerRef("T_ASSISTANT_EXECUTION", RUN_ID), ExecutionEnvironment.LIVE,
+    ).to_dict()
+    if damage:
+      template["metadata"]["source_execution_owner_id" if damage == "owner" else "source_execution_environment"] = "wrong"
+    plan.plan_state = {**plan.plan_state, "template": template}
+    result = await derive_exact_auto_exit_authorization_from_t_trade_entry(
+      db, plan, entry_intent_id=INTENT_ID, challenge_id=CHALLENGE_ID, cumulative_filled_volume=100,
+    )
+    assert result.valid == (damage is None), result
+    assert result.code == ("T_TRADE_EXIT_AUTHORIZATION_DERIVED" if damage is None else "T_TRADE_EXIT_PLAN_SCOPE_CHANGED")

@@ -142,7 +142,8 @@ async def test_old_attempt_terminal_keeps_original_intent_active(monkeypatch, pr
     SimpleNamespace(intent_id="intent-1", client_order_id="client-0", strategy_order_id="strategy-order", risk_decision_id=None),
     event_type="ORDER", item=item,
   )
-  assert intent.status == prior_status
+  # An open lifecycle is nonterminal, but its already-received fills must remain visible.
+  assert intent.status == "PARTIAL_FILLED"
   assert item == {"status": "CANCELLED", "traded_volume": 100}
 
 

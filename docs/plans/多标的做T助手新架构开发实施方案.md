@@ -858,8 +858,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   可处理已有成交，两次应用数量仍为 100，错误标的回报拒绝。40 项相关回归通过，证据
   `.codex_screenshots/p6-live-receipt-regression.log`。仍使用合成回报直接调用 staging，
   未覆盖 ingress/inbox drain、成交表入账及后续新快照；不据此宣称自动退出授权已生效。
+- 退出授权组合缺口已修复：公共模板追加的来源投影仅在与签名来源完全一致、且原签名
+  模板未包含该字段时从比较视图移除；冲突与原签名字段继续拒绝，挑战和持久化模板不
+  改写。生命周期仍开放但已有成交时保留 PARTIAL_FILLED，避免回退 EXECUTION_PENDING
+  导致已成交退出授权一直等待；最终 FILLED 仍由生命周期收敛决定。
+  隔离组合加入真实用户/设备权限检查与显式合成持仓（新增 100 当日不可卖、旧仓 1000
+  可卖），公共服务成功派生绑定 challenge-1 的自动退出授权。35 项授权/生命周期/组合
+  测试、40 项增量回报/owner 回归通过，证据 `.codex_screenshots/p6-live-exit-grant-*.log`。
+  仍需用实际报告入账替换该合成持仓投影，未完成 ingress/inbox drain 或真实券商验收。
 - 剩余开发顺序：
-  补齐 LIVE 回报入账/退出授权与命令重试→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 实际报告入账与命令重试→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

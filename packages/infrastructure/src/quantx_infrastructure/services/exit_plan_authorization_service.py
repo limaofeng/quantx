@@ -1018,6 +1018,26 @@ async def derive_exact_auto_exit_authorization_from_t_trade_entry(
   if intent.owner_type == "T_ASSISTANT_EXECUTION":
     expected_plan_binding["source_execution_ref"] = bound_subject["source_execution_ref"]
     expected_plan_binding["source_execution_environment"] = bound_subject["environment"]
+    # The public plan writer projects this already-signed source identity into
+    # template metadata. Compare the signed template view without ignoring any
+    # contradictory projection or any field originally present in the challenge.
+    actual_template = dict(plan_binding["template"])
+    actual_metadata = dict(actual_template.get("metadata") or {})
+    signed_metadata = dict(expected_plan_binding["template"].get("metadata") or {})
+    source_projection = {
+      "source_execution_owner_type": bound_subject["source_execution_ref"]["owner_type"],
+      "source_execution_owner_id": bound_subject["source_execution_ref"]["owner_id"],
+      "source_execution_environment": bound_subject["environment"],
+    }
+    if any(key in actual_metadata and actual_metadata[key] != value for key, value in source_projection.items()):
+      return _t_trade_derivation_failure(
+        record, "T_TRADE_EXIT_PLAN_SCOPE_CHANGED", "退出计划来源投影与买入确认不一致",
+      )
+    for key, value in source_projection.items():
+      if key not in signed_metadata and actual_metadata.get(key) == value:
+        actual_metadata.pop(key)
+    actual_template["metadata"] = actual_metadata
+    plan_binding["template"] = actual_template
   if any(
     plan_binding.get(key) != value
     for key, value in expected_plan_binding.items()
