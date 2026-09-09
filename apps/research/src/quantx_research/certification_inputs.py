@@ -169,7 +169,7 @@ def load_certification_inputs(directory, *, dataset_version, manifest_sha256, ca
     or config.data.verified_panel_path is not None
   ):
     raise ValueError("Frozen certification cannot use external paths")
-  frozen = FrozenResearchDataSource(directory / "source", cancel=cancel)
+  frozen = FrozenResearchDataSource(directory / "source", cancel=cancel, input_manifest_sha256=manifest_sha256)
   allowed = {"config.json", *history_names, "source/manifest.json"}
   allowed.update(f"source/{name}" for name in frozen.manifest["files"])
   if set(expected) != allowed:

@@ -129,7 +129,8 @@ async def export_frozen_source(
 class FrozenResearchDataSource:
   """Strictly bounded source and SH calendar, without infrastructure imports."""
 
-  def __init__(self, directory, *, cancel=None):
+  def __init__(self, directory, *, cancel=None, input_manifest_sha256=None):
+    self.input_manifest_sha256 = input_manifest_sha256
     self.cancel = cancel
     self.directory = Path(directory).absolute()
     _no_links(self.directory)
@@ -189,6 +190,8 @@ class FrozenResearchDataSource:
       "manifest_sha256": self.manifest_sha256,
       "start": self.start.date().isoformat(),
       "end": self.end.date().isoformat(),
+      **({"input_manifest_sha256": self.input_manifest_sha256}
+         if self.input_manifest_sha256 is not None else {}),
     }
 
   def _file(self, name):

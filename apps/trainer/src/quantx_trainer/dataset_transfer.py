@@ -47,7 +47,7 @@ def dataset_bundle(dataset, *, root, cancel=None):
   return directory, bundle
 
 
-async def publish_dataset(config, repository, *, dataset_version):
+async def publish_dataset(config, repository, *, dataset_version, check=None):
   dataset = await repository.get_dataset(dataset_version)
   if dataset is None:
     raise ValueError("DATASET_NOT_FOUND")
@@ -66,21 +66,26 @@ async def publish_dataset(config, repository, *, dataset_version):
         raise ValueError("DATASET_REMOTE_IDENTITY_MISMATCH")
     return bundle
 
-  task = asyncio.create_task(asyncio.to_thread(upload))
-  try:
-    bundle = await asyncio.shield(task)
-  except BaseException:
-    cancel.set()
-    while not task.done():
-      try:
-        await asyncio.shield(task)
-      except asyncio.CancelledError:
-        continue
-      except Exception:
-        break
-    with suppress(Exception, asyncio.CancelledError):
-      task.result()
-    raise
+  if check is not None:
+    bundle = await _supervised_io(
+      upload, repository, dataset_version, dataset_version, cancel, check=check
+    )
+  else:
+    task = asyncio.create_task(asyncio.to_thread(upload))
+    try:
+      bundle = await asyncio.shield(task)
+    except BaseException:
+      cancel.set()
+      while not task.done():
+        try:
+          await asyncio.shield(task)
+        except asyncio.CancelledError:
+          continue
+        except Exception:
+          break
+      with suppress(Exception, asyncio.CancelledError):
+        task.result()
+      raise
   await repository.record_dataset_bundle(dataset_version, bundle=bundle)
   return {
     "status": "PUBLISHED",

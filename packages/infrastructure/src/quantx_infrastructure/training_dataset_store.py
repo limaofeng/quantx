@@ -20,6 +20,7 @@ def certification_values(
   dataset_version: str,
   manifest_sha256: str,
   root: Path | None = None,
+  cancel=None,
 ) -> dict[str, Any]:
   """Project only a complete verified directory for supervisor registration."""
   if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", dataset_version):
@@ -57,7 +58,7 @@ def certification_values(
     {key: quality[key] for key in ("sample_count", "stock_count", "trading_day_count")}
   )
   values["quality_summary"] = quality
-  resolve_dataset_directory(values, root=base)
+  resolve_dataset_directory(values, root=base, cancel=cancel)
   return values
 
 
