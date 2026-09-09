@@ -966,6 +966,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `.codex_screenshots/p6-legacy-inventory.log`。当前仅冻结复核材料，永久 ENTRY 阻断、
   真实旧 run 身份校验、排空命令及重启恢复仍需接线；未执行真实维护切换。
 - 剩余开发顺序：
+  legacy 排空标记消费端已接入：LIVE 旧运行启动/入场 authority 失效时读取持久化 rollout
+  标记，标的池重新发布也保留 `LEGACY_T_ENTRY_DRAINING`；读取冲突先清除旧发射资格。
+  公共下单在原幂等结果恢复之后、创建新 BUY 之前锁定同一配置头并复核标记，省略 ENTRY
+  role 也不能绕过。公共 EXIT_PLAN 不命中此门。69 项隔离 guard、标的池和下单/退出回归
+  通过，证据 `.codex_screenshots/p6-legacy-drain-dispatch-regression.log`；启动验证为实际
+  数据库读取加新内存对象的组件测试，未启动券商。标记目前使用合成夹具，原子写入/旧 run
+  身份验证/命令调度仍待接入，尚不代表旧源排空已完成。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

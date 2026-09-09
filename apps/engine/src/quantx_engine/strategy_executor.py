@@ -1519,6 +1519,8 @@ class StrategyRuntime:
   context: StrategyContext
   #: 策略实例
   strategy: Optional[StrategyBase] = None
+  #: Permanent cutover fence; restored from the rollout audit, never strategy parameters.
+  legacy_t_draining: bool = False
   #: Broker 实例
   broker: Optional[BrokerBase] = None
   #: 数据适配器
@@ -3462,6 +3464,8 @@ class StrategyExecutor:
       return False
 
     runtime = self.runs[run_id]
+
+    await self._refresh_legacy_t_drain(runtime)
 
     if runtime.status == ExecutionStatus.RUNNING:
       self.logger.warning(f"策略运行已在运行: {run_id}")
@@ -10773,6 +10777,8 @@ class StrategyExecutor:
 
     runtime_run_id, context_run_id, account_id = self._t_trade_runtime_scope(runtime)
     scope_blockers: list[str] = []
+    if getattr(runtime, "legacy_t_draining", False):
+      scope_blockers.append("LEGACY_T_ENTRY_DRAINING")
     if not runtime_run_id or not context_run_id:
       scope_blockers.extend(
         [
@@ -10970,6 +10976,17 @@ class StrategyExecutor:
       max_total_exposure_pct=parameters.get("max_total_t_exposure_pct"),
     )
 
+  async def _refresh_legacy_t_drain(self, runtime: StrategyRuntime) -> None:
+    if runtime.context.mode != StrategyRunMode.LIVE or not self._uses_t_trade_opportunity_runtime(runtime):
+      return
+    self._clear_t_trade_intent_emission_snapshot(runtime)
+    from quantx_infrastructure.services.t_legacy_drain_guard import legacy_t_entry_is_draining
+
+    account_id = str(dict(runtime.context.parameters or {}).get("account_id") or "").strip()
+    async with AsyncSessionLocal() as db, db.begin():
+      draining = await legacy_t_entry_is_draining(db, account_id=account_id, run_id=runtime.run_id)
+    runtime.legacy_t_draining = bool(getattr(runtime, "legacy_t_draining", False) or draining)
+
   async def invalidate_t_trade_entry_authority(
     self,
     run_id: str,
@@ -10993,6 +11010,7 @@ class StrategyExecutor:
     # transition after this invalidation becomes visible.
     await runtime.approval_lock.acquire()
     try:
+      await self._refresh_legacy_t_drain(runtime)
       self._clear_t_trade_intent_emission_snapshot(runtime)
       self._runtime_log(
         runtime,
