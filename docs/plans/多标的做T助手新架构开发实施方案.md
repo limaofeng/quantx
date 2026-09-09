@@ -602,10 +602,22 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   修复同一 identity-map 对象自比漏过快照变更的问题。容量 LIVE/PAPER **39 项通过**；
   确认、跨域准入与 runtime 相关 **48 项通过**（PAPER 夹具切换当前撮合协议 v2 后，
   其文件 20 项重跑通过）。未修改生产门禁或撮合约束。
-- LIVE 完整组合读取仍缺少持久化三桶归因与日内做 T 估值证据适配；当前容量 API 的
-  `bucket_inventory` 来自调用方，不能凭券商总持仓自行构造 locked_core/core/swing，
-  也不能将缺失日内盈亏置零后放行。此缺口须补齐事实生产与一致性验证后接线。
-- 剩余开发顺序：LIVE 组合事实读取、确认界面/GraphQL 入口、
+- P6 账户级归因和组合读取已实现：显式分层基线写入现有 append-only execution event，
+  后续重确认必须绑定上一版，保留完整哈希链；启动时禁止未知/未完成订单和冻结量。
+  重启后按原 correlation、APPLIED TRADE 与券商成交重放共享 BucketLedger，不自动填补差额，
+  不迁 owner。新 execution 可读取旧源停止后仍存在的账户归因与成交义务。
+- `LiveTValuationReader` 复核全账户 T 批次、原 owner、实际成交和数量守恒；日内盈亏以
+  明确前交易日收盘窗口重估隔夜头寸，使用批次冻结费用，按每个券商订单收最低佣金，
+  部分成交不重复收费，撤换单独立计费。费用标记 `RULE_ESTIMATE`，不冒充实际交割费用。
+- `LivePortfolioSnapshotReader` 已串联归因、估值、公共容量及未提交分配义务；冻结配置、
+  周期、快照（严格小于 90 秒）、账户控制、时间和行业证据缺失均阻断，保护底仓与已接受
+  订单现金不重复扣减。市场适配器仍需提供明确 current/prior-close marks；尚未接入 LIVE
+  supervisor、公开基线审批或人工确认界面，不据此开放真实 ENTRY。
+- 上述新组件初轮 **43 项通过**；联合 PAPER、容量、确认、估值及 envelope 回归
+  **154 项通过、3 项显式 PostgreSQL 门跳过**，JUnit
+  `.codex_screenshots/p6-live-portfolio-regression.xml`。时间门补强及新增负测另作受影响复验。
+  未新增数据库表/迁移，复用已有 append-only 事件；当前迁移冲突仍须单独解决。
+- 剩余开发顺序：确认界面/GraphQL 入口、LIVE 组合事实供应端与 supervisor 接线、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
