@@ -397,6 +397,8 @@ async def certify_next_day_selection_dataset(
   dataset_version: str,
   market_data_archive: str | Path | None = None,
   output_root: str | Path | None = None,
+  source: Any | None = None,
+  calendar: Any | None = None,
 ) -> Path:
   """Build and certify one immutable ready-to-train panel."""
 
@@ -426,8 +428,10 @@ async def certify_next_day_selection_dataset(
 
     source_staging = staging / "source"
     source_staging.mkdir()
-    raw_panel, calendar, source_quality = await _source_panel(config, source_staging)
-    panel, universe_quality = prepare_training_panel(raw_panel, calendar, config)
+    raw_panel, sessions, source_quality = await _source_panel(
+      config, source_staging, source=source, calendar=calendar
+    )
+    panel, universe_quality = prepare_training_panel(raw_panel, sessions, config)
     _safe_remove_tree(source_staging)
     if config.data.universe_kind == "CERTIFIED_INDEX" and not universe_quality.get(
       "complete"

@@ -366,8 +366,10 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
   ready = _dataset(ready_root)
   panel = pd.read_parquet(ready / "training-panel.parquet")
   captured: dict[str, object] = {}
+  frozen_source, frozen_calendar = object(), object()
 
-  async def source_panel(config, staging):
+  async def source_panel(config, staging, **kwargs):
+    assert kwargs == {"source": frozen_source, "calendar": frozen_calendar}
     (staging / "features").mkdir()
     (staging / "features" / "part.parquet").write_bytes(b"temporary")
     return panel, pd.DatetimeIndex(panel["event_date"].unique()), {"kind": "test"}
@@ -392,6 +394,8 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
       config_path,
       dataset_version="certified-v1",
       output_root=tmp_path / "datasets",
+      source=frozen_source,
+      calendar=frozen_calendar,
     )
   )
   manifest = dataset_module.load_certified_dataset_manifest(output)
@@ -416,6 +420,8 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
       config_path,
       dataset_version="certified-v1",
       output_root=tmp_path / "datasets",
+      source=frozen_source,
+      calendar=frozen_calendar,
     )
   )
   assert retried == output
@@ -427,7 +433,9 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
         config_path,
         dataset_version="certified-v1",
         output_root=tmp_path / "datasets",
-        )
+        source=frozen_source,
+        calendar=frozen_calendar,
+      )
     )
   assert (output / "manifest.json").read_bytes() == first_bytes
 
@@ -457,7 +465,7 @@ def test_dataset_file_certification_never_imports_database_registration(
   ready = _dataset(ready_root)
   panel = pd.read_parquet(ready / "training-panel.parquet")
 
-  async def source_panel(config, staging):
+  async def source_panel(config, staging, **kwargs):
     return panel, pd.DatetimeIndex(panel["event_date"].unique()), {"kind": "test"}
 
   import builtins

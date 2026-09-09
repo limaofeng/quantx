@@ -596,8 +596,18 @@ def prepare_training_panel(
 async def _source_panel(
   config: NextDaySelectionConfig,
   staging: Path,
+  *,
+  source: Any | None = None,
+  calendar: Any | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, dict[str, Any]]:
   _reject_links(staging)
+  if (source is None) != (calendar is None):
+    raise ValueError("外部认证数据源必须同时提供冻结交易日历")
+  if source is not None and (
+    config.data.verified_panel_path is not None
+    or config.data.market_data_archive is not None
+  ):
+    raise ValueError("外部认证数据源不能同时指定其他面板或行情归档")
   if config.data.verified_panel_path is not None:
     source_path = Path(config.data.verified_panel_path)
     _reject_links(source_path)
@@ -628,9 +638,11 @@ async def _source_panel(
     _reject_links(archive_path)
     if _is_link_like(archive_path):
       raise ValueError("market_data_archive 不允许符号链接或联接点")
-  from quantx_infrastructure.services.trading_time_service import TradingDateHelper
+  if calendar is None:
+    from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
-  source_end = await TradingDateHelper().get_next_trading_date(
+    calendar = TradingDateHelper()
+  source_end = await calendar.get_next_trading_date(
     "SH", config.data.date_range[1]
   )
   study_config = IndicatorStudyConfig.model_validate(
@@ -656,10 +668,10 @@ async def _source_panel(
     sample_interval_seconds=config.runtime.memory_sample_interval_seconds,
   )
   async with _research_source(
-    None, market_data_archive=config.data.market_data_archive
-  ) as source:
+    source, market_data_archive=config.data.market_data_archive
+  ) as active_source:
     with monitor:
-      stage = await stage_indicator_features(source, study_config, staging, monitor)
+      stage = await stage_indicator_features(active_source, study_config, staging, monitor)
   panel = pd.concat((pd.read_parquet(path) for path in stage.paths), ignore_index=True)
   return panel, stage.calendar, stage.quality
 
