@@ -1,6 +1,6 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程已验证、策略准入待确认；P6 隔离开发进行中；P7/P8 待接续）<br>
+> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程已验证、策略准入待确认；P6 隔离开发进行中；P7/P8 隔离开发进行中）<br>
 > 版本：2.5<br>
 > 日期：2026-09-09<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
@@ -180,8 +180,8 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P4 | 分配、PAPER 与跨域准入 | `DONE` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 六项实现、隔离 PG 闭环/故障门及实际 Caddy/Web 契约检查完成，业务库 0056；证据见 §10 |
 | P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A/B 通过；P5-C 工程准备通过，正式样本与准入门待确认 |
 | P6 | LIVE 人工确认灰度 | `IN_PROGRESS` | LIVE 运行依赖 P5；隔离开发已授权 | 唯一 producer、规定闭环、无安全违规 | 源执行排空与订单身份约束基础；见 §10 连续开发检查点 |
-| P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
-| P8 | 模型 SHADOW/ACTIVE | `NOT_STARTED` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
+| P7 | AUTO 与稳定性 | `IN_PROGRESS` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
+| P8 | 模型 SHADOW/ACTIVE | `IN_PROGRESS` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
 
 ### 4.1 P6–P8 连续开发顺序
 
@@ -585,8 +585,21 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   API 预览→消费→真实消息箱→Engine→重新分配的 SQLite 集成、终态重试、审计失败回滚。
   **4 项 PostgreSQL 完整迁移链测试通过**：重新分配/SQL 绕过拒绝、旧 cut 回滚、并发重复
   确认、确认与排空竞争；仅专用测试库随机 schema，业务库未应用 0062。
+- P8 隔离基础已实现 COMPLETE 分钟特征、逐路径含成本三分类标签、purged walk-forward
+  与完整主 horizon 的 embargo；安全 JSON CPU 制品、Logistic/数值 LightGBM 导出与原库
+  概率一致性、路径/哈希/大小/树拓扑检查；完整 TModelScore 与批量原子缓存。
+  RULE_ONLY 无模型调用，SHADOW 保持规则顺序，ACTIVE 缺失/过期/OOD/超时/异常阻断 ENTRY。
+  微型合成拟合仅为数值一致性单测，不是冻结草案中的正式实验；尚无研究结果或发布资格。
+- P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
+  与同事务审计；重试及末尾异常整体回滚已有隔离验证。旧 pending/outbox 不迁移 owner。
+  服务未注册公开命令；审批事件使用合成夹具，真实 P6 准入审计及人工发布入口仍待接入。
+- P7/P8 基础与 LIVE 排空联合 **69 项通过**，Conda `quantx`、聚焦 Ruff 通过；
+  JUnit `.codex_screenshots/p7-p8-foundation.xml`。测试全部为隔离工程证据，无 QMT 实盘，
+  不代表 P6/P7/P8 阶段退出门通过。P8 基础提交 `8eece5a6`。
+- 当前合并含两个同名 `20260909_0060` 迁移（历史下载配置、做 T 身份）；已询问业务库
+  应用情况，待确认后修复编号链。此前 PostgreSQL 证据对应合并前迁移图，不能替代当前图验收。
 - 剩余开发顺序：LIVE 组合事实读取、确认界面/GraphQL 入口、
-  分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor→P7 新故障/性能→P8。
+  分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、服务启停、E2E 或真实订单。
