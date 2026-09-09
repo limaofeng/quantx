@@ -54,6 +54,7 @@ from quantx_trainer.publication import (
   publish_generated_result,
   publish_result,
 )
+from quantx_trainer.run_log import redact_text as _redact_sensitive_text
 from quantx_trainer.runtime import current_config, training_session
 
 RESEARCH_DATASETS_ENV = "QUANTX_RESEARCH_DATASETS_ROOT"
@@ -600,22 +601,6 @@ async def _stop_research_process(process: Any, *, grace_seconds: float = 5) -> N
     process, grace_seconds=grace_seconds, kill_seconds=grace_seconds,
   ):
     raise ResearchStopUnconfirmed("TRAINER_PROCESS_STOP_UNCONFIRMED")
-
-
-def _redact_sensitive_text(value: Any) -> str:
-  """Remove credentials and complete absolute paths from worker text."""
-
-  text = str(value or "")
-  text = re.sub(r"(?i)(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\r\n]*", "[PATH]", text)
-  text = re.sub(r"(?<![A-Za-z0-9])\\\\[^\r\n]*", "[PATH]", text)
-  text = re.sub(r"(?<![A-Za-z0-9])/(?!/)[^\r\n]*", "[PATH]", text)
-  text = re.sub(
-    r"(?i)(password|secret|token|credential|api[_ -]?key)\s*[:=]\s*[^\s,;]+",
-    r"\1=[REDACTED]",
-    text,
-  )
-  text = re.sub(r"[\r\n\t]+", " ", text)
-  return text.strip()
 
 
 def _tail_logs(control_directory: Path, limit: int = 512) -> str:

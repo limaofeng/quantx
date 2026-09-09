@@ -33,8 +33,8 @@ def main(argv: list[str] | None = None) -> int:
   parser.add_argument("--dataset-version")
   parser.add_argument("--lines", type=int, default=100)
   args = parser.parse_args(argv)
-  if args.command == "logs" and (args.run_id or not 1 <= args.lines <= 1000):
-    parser.error("logs reads service lifecycle events; --lines must be 1..1000")
+  if args.command == "logs" and not 1 <= args.lines <= 1000:
+    parser.error("logs --lines must be 1..1000 (per stream with --run-id)")
   if args.command == "publish-result" and (not args.run_id or not args.owner):
     parser.error("publish-result requires --run-id and --owner")
   if args.command == "publish-dataset" and not args.dataset_version:
@@ -72,10 +72,16 @@ def main(argv: list[str] | None = None) -> int:
   if args.command == "logs":
     from quantx_infrastructure.training_bundle_store import BundleTransferError
 
+    from quantx_trainer.run_log import read_run_logs
     from quantx_trainer.service_log import read_events
 
     try:
-      for event in read_events(config.state_root, lines=args.lines):
+      events = (
+        read_run_logs(config.state_root, args.run_id, lines=args.lines)
+        if args.run_id
+        else read_events(config.state_root, lines=args.lines)
+      )
+      for event in events:
         print(json.dumps(event, sort_keys=True))
     except (OSError, ValueError, BundleTransferError):
       print("Trainer logs unavailable: SERVICE_LOG_READ_FAILED", file=sys.stderr)
