@@ -39,6 +39,7 @@ quantx-engine = { workspace = true }
 quantx-market-data = { workspace = true }
 quantx-monitor = { workspace = true }
 quantx-research = { workspace = true }
+quantx-trainer = { workspace = true }
 quantx-worker = { workspace = true }
 quantx-qmt-agent = { workspace = true }
 quantx-application = { workspace = true }
@@ -55,6 +56,7 @@ members = [
   "apps/monitor",
   "apps/qmt-agent",
   "apps/research",
+  "apps/trainer",
   "apps/worker",
   "packages/*",
 ]
@@ -74,6 +76,7 @@ pythonpath = [
   "apps/worker/src",
   "apps/qmt-agent/src",
   "apps/research/src",
+  "apps/trainer/src",
   "packages/contracts/src",
   "packages/domain/src",
   "packages/application/src",
