@@ -360,7 +360,10 @@ class LivePortfolioSnapshotReader:
     }
     for order in orders:
       quantity = max(0, order.volume - filled.get(order.broker_order_id, 0))
-      if order.status in TERMINAL_ORDER_STATUSES - {"FILLED"} and (
+      terminal_without_remainder = order.status in TERMINAL_ORDER_STATUSES - {"FILLED"}
+      if order.status == "RECONCILED_ZERO_FILL" and not filled.get(order.broker_order_id, 0):
+        terminal_without_remainder = True
+      if terminal_without_remainder and (
         not order.broker_order_id or order.broker_order_id in observed_orders
       ):
         quantity = 0

@@ -3260,7 +3260,7 @@ async def _full_snapshot_zero_fill_items(
   db,
   report: AgentReportInbox,
 ) -> list[tuple[str, dict[str, Any]]]:
-  """Prove exact managed BUY or EXIT_PLAN SELL orders had no execution.
+  """Prove exact managed/T ENTRY BUY or EXIT_PLAN SELL orders had no execution.
 
   A terminal order report alone is deliberately insufficient: QMT execution
   reports may arrive after it.  The proof is emitted only after a verified
@@ -3445,6 +3445,32 @@ async def _full_snapshot_zero_fill_items(
       and str(intent_metadata.get("entry_plan_id") or "") == entry_plan_id
     )
 
+    independent_entry_owner = False
+    if owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value:
+      batch_id = str(pending.batch_id or "")
+      batch = await db.get(TTradeBatch, batch_id) if batch_id else None
+      independent_entry_owner = bool(
+        owner_triple[2] == "LIVE"
+        and batch is not None
+        and _durable_owner_triple(batch) == owner_triple
+        and batch.environment == "LIVE"
+        and batch.account_id == account_id
+        and batch.instrument_code == instrument_code
+        and batch.entry_intent_id == intent_id
+        and batch.entry_filled_volume == 0
+        and batch.exit_filled_volume == 0
+        and not any(row.strategy_run_id for row in (pending, correlation, intent, batch))
+        and pending.side == intent.direction == "BUY"
+        and pending.t_trade_role == correlation.t_trade_role == "ENTRY"
+        and str(intent_metadata.get("t_trade_role") or "").upper() == "ENTRY"
+        and pending.bucket == correlation.bucket == intent.bucket
+        and batch_id == correlation.batch_id == intent_metadata.get("t_batch_id")
+        and str(order.get("order_type") or "").upper() in {"23", "BUY", "ORDER_BUY"}
+        and type(order.get("order_volume")) is int
+        and order["order_volume"] == pending.volume
+        and pending.volume > 0
+      )
+
     exit_plan_record = None
     exit_owner_kind = ""
     # EXIT_PLAN ownership is selected only from the durable pending/
@@ -3502,7 +3528,7 @@ async def _full_snapshot_zero_fill_items(
         if plan_binding_exact:
           exit_owner_kind = "EXIT_PLAN"
 
-    if not managed_entry_owner and not exit_owner_kind:
+    if not managed_entry_owner and not independent_entry_owner and not exit_owner_kind:
       continue
     if _snapshot_has_order_execution_detail(
       payload,
@@ -4032,7 +4058,12 @@ async def _project_trade_intent_event(
       projection = historical_projection
     if order_status == "RECONCILED_ZERO_FILL":
       reconciliation = item.get("zero_fill_reconciliation")
-      if isinstance(reconciliation, dict):
+      # Independent entry metadata is signed confirmation material. The
+      # derived proof is already durable in the runtime event audit.
+      if (
+        isinstance(reconciliation, dict)
+        and intent.owner_type != ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
+      ):
         intent.intent_metadata = {
           **dict(intent.intent_metadata or {}),
           "qmt_zero_fill_reconciliation": dict(reconciliation),
@@ -4654,7 +4685,9 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           if checkpoint_by_account[account_id]:
             filtered_runtime_items.append((event_type, item))
         runtime_items = filtered_runtime_items
-      runtime_items.extend(await _full_snapshot_zero_fill_items(db, report))
+      zero_fill_items = await _full_snapshot_zero_fill_items(db, report)
+      proven_zero_fill_item_ids = {id(item) for _, item in zero_fill_items}
+      runtime_items.extend(zero_fill_items)
       last_staged_at: Optional[datetime] = None
       for event_type, raw_item in runtime_items:
         item = dict(raw_item)
@@ -4849,6 +4882,14 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           event_type=event_type,
           item=item,
         )
+        if (
+          id(raw_item) in proven_zero_fill_item_ids
+          and owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
+        ):
+          # Only the local verified snapshot producer can promote an attempt
+          # to proven zero fill, atomically with its uniquely inserted audit.
+          pending = await db.get(PendingTradeOrder, correlation.client_order_id)
+          pending.status = "RECONCILED_ZERO_FILL"
         if correlation.batch_id:
           batch = await db.get(TTradeBatch, correlation.batch_id)
           if batch is not None and _durable_owner_triple(batch) == owner_triple:

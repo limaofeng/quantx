@@ -928,9 +928,18 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   按实际新数量重新派生。实际配置版本变化明确拒绝，PAPER 比较语义不变。
   30 项组合/退出计划持久化/生命周期回归通过，证据
   `.codex_screenshots/p6-live-replacement-final-reports.log`。持仓行和完整账户快照仍为合成边界，
-  未覆盖设备网络 ingress/inbox worker 或真实券商执行；零成交撤单续单尚待实际整链验证。
+  未覆盖设备网络 ingress/inbox worker 或真实券商执行；零成交撤单续单的后续证据见下项。
+- LIVE 零成交撤单续单隔离整链已通过：完整快照按独立 ENTRY 的 owner/batch/intent、方向、
+  数量及无成交证据生成唯一审计事件，并原子收敛原委托为 RECONCILED_ZERO_FILL；单独撤单
+  回报不能提供该证明。原确认元数据保持不变，证明存于 runtime event。修复组合读取仍把
+  已证明零成交且被账户快照覆盖的委托计为待成交占用的问题；已有成交矛盾时仍保留占用。
+  实际确认/分配→首单撤销且零成交→完整快照 staging/drain→Engine 续单复核/共享准入→
+  替单成交 100→唯一退出保护与原意图 FILLED/100 已验证，重复快照和成交均不重复计量。
+  129 项回报、生命周期、确认预审、风险复核、组合与隔离整链验证通过，Ruff 通过；证据
+  `.codex_screenshots/p6-live-zero-replacement-regression.log`。仍采用合成券商/行情/持仓边界
+  与隔离 SQLite，未验证 Windows 实盘或 PostgreSQL 并发锁序。
 - 剩余开发顺序：
-  补齐 LIVE 零成交续单与实际持仓快照收敛与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  实际持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

@@ -100,13 +100,16 @@ signing_key = _signing_key
     "approval",
     "device_lost",
     "replacement",
+    "zero_replacement",
     "replacement_device_lost",
   ],
 )
 async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   sessions, review_evidence, monkeypatch, fault
 ):
-  replacing = fault in {"replacement", "replacement_device_lost"}
+  zero_replacement = fault == "zero_replacement"
+  replacing = zero_replacement or fault in {"replacement", "replacement_device_lost"}
+  first_filled = 0 if zero_replacement else 100
   at = allocation.NOW
   confirmed = at + timedelta(seconds=1)
   # Give SQL defaults and bulk UPDATEs the same synthetic wall clock as Python.
@@ -158,8 +161,8 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
         opening={},
       )
 
-  initial_volume = 200 if replacing else 100
-  if replacing:
+  initial_volume = 200 if replacing and not zero_replacement else 100
+  if replacing and not zero_replacement:
     original_seed = confirmation._seed
 
     async def larger_seed(*args, **kwargs):
@@ -498,23 +501,28 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   report.raw_payload_hash = hashlib.sha256(
     json.dumps(report.payload, sort_keys=True, separators=(",", ":")).encode()
   ).hexdigest()
-  async with sessions() as db, db.begin():
-    db.add(report)
-  await report_processor._process(report)
-  await report_processor._process(report)
-  assert open_service_sessions == 0
+  if not zero_replacement:
+    async with sessions() as db, db.begin():
+      db.add(report)
+    await report_processor._process(report)
+    await report_processor._process(report)
+    assert open_service_sessions == 0
+    async with sessions() as db:
+      assert await db.scalar(select(func.count()).select_from(Order)) == 1
+      assert await db.scalar(select(func.count()).select_from(Trade)) == 1
+      recorded_trade = await db.get(Trade, "fill-1")
+      assert recorded_trade.volume == 100 and recorded_trade.order_id == 101
+    await report_processor._stage_runtime_events(report)
   async with sessions() as db:
-    assert await db.scalar(select(func.count()).select_from(Order)) == 1
-    assert await db.scalar(select(func.count()).select_from(Trade)) == 1
-    recorded_trade = await db.get(Trade, "fill-1")
-    assert recorded_trade.volume == 100 and recorded_trade.order_id == 101
-  await report_processor._stage_runtime_events(report)
-  async with sessions() as db:
-    event = await db.scalar(select(StrategyRuntimeEvent))
-    assert event is not None
-    intent = await db.get(TradeIntentRecord, "intent-0")
-    assert intent.executed_volume == 100
-    assert intent.status in {"PARTIAL_FILLED", "FILLED"}, (intent.status, intent.notes)
+    if not zero_replacement:
+      event = await db.scalar(select(StrategyRuntimeEvent))
+      assert event is not None
+      intent = await db.get(TradeIntentRecord, "intent-0")
+      assert intent.executed_volume == 100
+      assert intent.status in {"PARTIAL_FILLED", "FILLED"}, (
+        intent.status,
+        intent.notes,
+      )
     source = await db.get(TAssistantExecutionRecord, "live-fixture")
     user = await db.get(AuthUser, "user-1")
     user.permissions = ["liquidation:control", "trade:approve"]
@@ -532,12 +540,12 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
         account_type="STOCK",
         stock_code="600000.SH",
         instrument_name="fixture",
-        volume=1100,
+        volume=1000 + first_filled,
         can_use_volume=1000,
         frozen_volume=0,
         yesterday_volume=1000,
         avg_price=9.9,
-        market_value=10890,
+        market_value=(1000 + first_filled) * 9.9,
         created_at=confirmed,
         updated_at=confirmed,
       )
@@ -547,30 +555,33 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       source.completed_at = confirmed
       source.entry_readiness = "BLOCKED"
     await db.commit()
-  await report_processor._drain_runtime_events()
-  await report_processor._stage_runtime_events(report)
-  await report_processor._drain_runtime_events()
-  async with sessions() as db:
-    applied = await db.get(StrategyRuntimeEvent, event.event_id)
-    assert applied.application_status == "APPLIED"
-    assert await db.scalar(select(func.count()).select_from(StrategyRuntimeEvent)) == 1
-    plans = list(await db.scalars(select(AutoExitPlanRecord)))
-    assert len(plans) == 1
-    assert plans[0].plan_state["entry_filled_volume"] == 100
-    assert plans[0].source_execution_owner_id == "live-fixture"
-    from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanEvent
+  if not zero_replacement:
+    await report_processor._drain_runtime_events()
+    await report_processor._stage_runtime_events(report)
+    await report_processor._drain_runtime_events()
+    async with sessions() as db:
+      applied = await db.get(StrategyRuntimeEvent, event.event_id)
+      assert applied.application_status == "APPLIED"
+      assert (
+        await db.scalar(select(func.count()).select_from(StrategyRuntimeEvent)) == 1
+      )
+      plans = list(await db.scalars(select(AutoExitPlanRecord)))
+      assert len(plans) == 1
+      assert plans[0].plan_state["entry_filled_volume"] == 100
+      assert plans[0].source_execution_owner_id == "live-fixture"
+      from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanEvent
 
-    audit = list(await db.scalars(select(AutoExitPlanEvent)))
-    assert plans[0].auto_exit_authorized, [
-      (e.event_type, e.payload.get("reason_code")) for e in audit
-    ]
-    assert plans[0].auto_exit_authorization_challenge_id == "challenge-1"
+      audit = list(await db.scalars(select(AutoExitPlanEvent)))
+      assert plans[0].auto_exit_authorized, [
+        (e.event_type, e.payload.get("reason_code")) for e in audit
+      ]
+      assert plans[0].auto_exit_authorization_challenge_id == "challenge-1"
 
   terminal_payload = {
     **order_payload,
     "order_status": 54 if replacing else 56,
-    "traded_volume": 100,
-    "traded_price": 9.9,
+    "traded_volume": first_filled,
+    "traded_price": 9.9 if first_filled else 0,
     "source_sequence": 3,
   }
   terminal_report = AgentReportInbox(
@@ -612,12 +623,22 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     fresh_payload.update(
       snapshot_id="replacement-account",
       source_event_at=confirmed.isoformat(),
-      accounts=[dict(account_id="account-1", cash=9005, total_asset=19995)],
+      source_sequence=3,
+      unavailable_accounts=[],
+      accounts=[
+        dict(
+          account_id="account-1",
+          cash=10000 if zero_replacement else 9005,
+          total_asset=20000 if zero_replacement else 19995,
+        )
+      ],
       positions_by_account={
-        "account-1": [dict(stock_code="600000.SH", volume=1100, can_use_volume=1000)]
+        "account-1": [
+          dict(stock_code="600000.SH", volume=1000 + first_filled, can_use_volume=1000)
+        ]
       },
       orders=[terminal_payload],
-      trades=[report.payload],
+      trades=[] if zero_replacement else [report.payload],
     )
     fresh_hash = hashlib.sha256(
       json.dumps(fresh_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -627,6 +648,7 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       db.add(
         AgentReportInbox(
           message_id="replacement-account",
+          protocol_version=PROTOCOL_VERSION,
           device_id="synthetic",
           message_type="delta_report",
           raw_payload_hash=fresh_hash,
@@ -643,6 +665,32 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       control.last_snapshot_at = confirmed.replace(tzinfo=None)
       control.updated_at = confirmed.replace(tzinfo=None)
       flag_modified(control, "updated_at")
+    if zero_replacement:
+      async with sessions() as db:
+        proof_snapshot = await db.get(AgentReportInbox, "replacement-account")
+        intent = await db.get(TradeIntentRecord, "intent-0")
+        confirmed_metadata = deepcopy(intent.intent_metadata)
+        assert (
+          await db.get(PendingTradeOrder, pending.client_order_id)
+        ).status == "CANCELLED"
+      await report_processor._stage_runtime_events(proof_snapshot)
+      await report_processor._drain_runtime_events()
+      await report_processor._stage_runtime_events(proof_snapshot)
+      async with sessions() as db:
+        intent = await db.get(TradeIntentRecord, "intent-0")
+        assert intent.intent_metadata == confirmed_metadata
+        assert (
+          int(intent.executed_volume or 0) == 0 and intent.status == "EXECUTION_PENDING"
+        )
+        assert (
+          await db.get(PendingTradeOrder, pending.client_order_id)
+        ).status == "RECONCILED_ZERO_FILL"
+        proofs = [
+          e
+          for e in await db.scalars(select(StrategyRuntimeEvent))
+          if e.payload["report"].get("effective_order_status") == "RECONCILED_ZERO_FILL"
+        ]
+        assert len(proofs) == 1 and proofs[0].application_status == "APPLIED"
     monkeypatch.setattr(
       t_trade_runtime.t_assistant_live_supervisor, "entry_review_adapter", adapter
     )
@@ -744,19 +792,25 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     async with sessions() as db, db.begin():
       db.add(second_fill)
       holding = await db.get(Position, "post-fill-position")
-      holding.volume = 1200
-      holding.market_value = 1200 * float(second.limit_price)
+      holding.volume = 1000 + initial_volume
+      holding.market_value = holding.volume * float(second.limit_price)
     for _ in range(2):
       await report_processor._process(second_fill)
       await report_processor._stage_runtime_events(second_fill)
       await report_processor._drain_runtime_events()
     async with sessions() as db:
       intent = await db.get(TradeIntentRecord, "intent-0")
+      if zero_replacement:
+        event = await db.scalar(
+          select(StrategyRuntimeEvent).where(StrategyRuntimeEvent.event_type == "TRADE")
+        )
       plan = await db.scalar(select(AutoExitPlanRecord))
-      assert intent.executed_volume == 200
-      assert plan.plan_state["entry_filled_volume"] == 200
+      assert intent.executed_volume == initial_volume
+      assert plan.plan_state["entry_filled_volume"] == initial_volume
       assert plan.auto_exit_authorized
-      assert await db.scalar(select(func.count()).select_from(Trade)) == 2
+      assert await db.scalar(select(func.count()).select_from(Trade)) == (
+        1 if zero_replacement else 2
+      )
       assert await db.scalar(select(func.count()).select_from(AutoExitPlanRecord)) == 1
       # A derived authorization flag may change; producer configuration may not.
       from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
@@ -780,7 +834,7 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
             commit=False,
           )
         )
-      assert plan.plan_state["entry_filled_volume"] == 200
+      assert plan.plan_state["entry_filled_volume"] == initial_volume
     second_terminal = AgentReportInbox(
       message_id="synthetic-order-terminal-2",
       device_id="synthetic",

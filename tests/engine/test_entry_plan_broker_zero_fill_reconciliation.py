@@ -40,6 +40,7 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
+  TTradeBatch,
 )
 from quantx_infrastructure.models.auth import AuthUser
 from quantx_infrastructure.models.auto_exit_plan import (
@@ -237,6 +238,7 @@ async def _database(monkeypatch: pytest.MonkeyPatch):
     ConditionalLiquidationOrder.__table__,
     Order.__table__,
     Trade.__table__,
+    TTradeBatch.__table__,
   ]
   async with engine.begin() as connection:
     await connection.run_sync(
@@ -256,6 +258,7 @@ async def _seed_managed_order(
   *,
   terminal_status: str,
   snapshot: AgentReportInbox,
+  independent: bool = False,
 ) -> None:
   snapshot_at = to_naive_utc(
     datetime.fromisoformat(snapshot.payload["source_event_at"])
@@ -269,7 +272,19 @@ async def _seed_managed_order(
     "entry_stage_id": "stage-1",
     "side": "BUY",
   }
+  if independent:
+    entry_metadata = {"t_trade_role": "entry", "t_batch_id": "batch-1"}
+  owner_type = "T_ASSISTANT_EXECUTION" if independent else "STRATEGY_RUN"
+  run_id = None if independent else "plan-1"
+  scope = ({"batch_id": "batch-1", "t_trade_role": "ENTRY"} if independent else {})
   async with sessions() as db:
+    if independent:
+      db.add(TTradeBatch(
+        batch_id="batch-1", account_id="account-1", instrument_code="605499.SH",
+        environment="LIVE", source_execution_owner_type=owner_type,
+        source_execution_owner_id="plan-1", source_execution_environment="LIVE",
+        entry_intent_id="intent-1",
+      ))
     db.add(
       AuthUser(
         id="user-1",
@@ -283,8 +298,8 @@ async def _seed_managed_order(
       TradeIntentRecord(
         id="intent-1",
         idempotency_key="intent-1-key",
-        strategy_run_id="plan-1",
-        owner_type="STRATEGY_RUN",
+        strategy_run_id=run_id,
+        owner_type=owner_type,
         owner_id="plan-1",
         environment="LIVE",
         account_id="account-1",
@@ -293,7 +308,7 @@ async def _seed_managed_order(
         bucket="core",
         reason="MANAGED_ENTRY",
         target_volume=100,
-        status=terminal_status,
+        status="EXECUTION_PENDING" if independent else terminal_status,
         executed_volume=0,
         executed_price=None,
         executed_time=None,
@@ -303,6 +318,7 @@ async def _seed_managed_order(
     db.add(
       PendingTradeOrder(
         client_order_id="client-1",
+        **scope,
         user_id="user-1",
         account_id="account-1",
         instrument_code="605499.SH",
@@ -312,14 +328,15 @@ async def _seed_managed_order(
         volume=100,
         status=terminal_status,
         broker_order_id="9001",
-        owner_type="STRATEGY_RUN",
+        owner_type=owner_type,
         owner_id="plan-1",
         environment="LIVE",
-        strategy_run_id="plan-1",
-        strategy_order_id="strategy-order-1",
+        strategy_run_id=run_id,
+        strategy_order_id=None if independent else "strategy-order-1",
         intent_id="intent-1",
         bucket="core",
         request_metadata=dict(entry_metadata),
+        t_order_original_created_at=snapshot_at - timedelta(seconds=31) if independent else None,
         last_source_sequence=10,
         last_source_event_at=snapshot_at,
       )
@@ -328,13 +345,14 @@ async def _seed_managed_order(
     OrderCorrelation(
         id="correlation-1",
         client_order_id="client-1",
+        **scope,
         broker_order_id="9001",
         account_id="account-1",
-        strategy_run_id="plan-1",
-        strategy_order_id="strategy-order-1",
+        strategy_run_id=run_id,
+        strategy_order_id=None if independent else "strategy-order-1",
         intent_id="intent-1",
         bucket="core",
-        owner_type="STRATEGY_RUN",
+        owner_type=owner_type,
         owner_id="plan-1",
         environment="LIVE",
         trace_id="trace-1",
