@@ -398,21 +398,28 @@ async def _persist_reference_records(records, payload, db):
     saved = int(replacement_audit["inserted_count"])
   elif operation == "financial_data":
     frames, financial_audit = _normalize_financial_records(records, payload)
-    persistence_audit = (
-      await FinancialService(
-        **({"db_session": db} if db is not None else {})
-      ).save_batch_financial_data_with_audit(frames)
-      if frames
-      else {
-        "rows_received": 0,
-        "rows_upserted": 0,
-        "rows_rejected": 0,
-        "metric_codes_rebuilt": 0,
-        "metric_rows_rebuilt": 0,
-        "statement_rows_by_code": {},
-        "metric_rows_by_code": {},
-      }
-    )
+    persistence_audit = await FinancialService(
+      **({"db_session": db} if db is not None else {})
+    ).save_batch_financial_data_with_audit(frames)
+    verification = persistence_audit.get("statement_verification")
+    if not isinstance(verification, dict) or set(verification) != set(
+      _FINANCIAL_TABLES
+    ):
+      raise RuntimeError("financial_data statement verification missing")
+    for table in _FINANCIAL_TABLES:
+      proof = verification[table]
+      expected = sum(len(tables.get(table, ())) for tables in frames.values())
+      if (
+        not isinstance(proof, dict)
+        or type(proof.get("schema_version")) is not int
+        or proof["schema_version"] != 1
+        or type(proof.get("rows_verified")) is not int
+        or proof["rows_verified"] != expected
+        or not isinstance(proof.get("mapped_content_sha256"), str)
+        or len(proof["mapped_content_sha256"]) != 64
+        or any(c not in "0123456789abcdef" for c in proof["mapped_content_sha256"])
+      ):
+        raise RuntimeError("financial_data statement verification mismatch")
     source_rows = int(financial_audit["source_rows"])
     saved = int(persistence_audit["rows_upserted"])
     if saved != source_rows:

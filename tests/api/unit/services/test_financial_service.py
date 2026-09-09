@@ -9,6 +9,10 @@ from quantx_infrastructure.services.financial_service import FinancialService
 from sqlalchemy.dialects import postgresql
 
 
+async def _verified_stub(db, model, rows, *, upsert, chunk_size):
+  return {"rows_verified": await upsert(db, model, rows)}
+
+
 def test_financial_date_parser_accepts_wire_and_legacy_dates() -> None:
   assert FinancialService._parse_date("20260422") == date(2026, 4, 22)
   assert FinancialService._parse_date("2026-04-22T00:00:00") == date(2026, 4, 22)
@@ -66,6 +70,8 @@ async def test_financial_batch_returns_audit_and_commits_metric_rebuild(
 ) -> None:
   import quantx_infrastructure.services.financial_service as financial_module
 
+  monkeypatch.setattr(financial_module, "verified_statement_upsert", _verified_stub)
+
   db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
   service = FinancialService(db_session=db)
   service._bulk_upsert = AsyncMock(side_effect=lambda _db, _model, rows: len(rows))
@@ -107,6 +113,12 @@ async def test_financial_batch_returns_audit_and_commits_metric_rebuild(
   assert result == {
     "rows_received": 2,
     "rows_upserted": 2,
+    "statement_verification": {
+      "Balance": {"rows_verified": 1},
+      "Income": {"rows_verified": 1},
+      "CashFlow": {"rows_verified": 0},
+      "Capital": {"rows_verified": 0},
+    },
     "rows_rejected": 0,
     "metric_codes_rebuilt": 1,
     "metric_rows_rebuilt": 2,
@@ -126,6 +138,8 @@ async def test_financial_batch_rolls_back_when_metric_rebuild_fails(
   monkeypatch,
 ) -> None:
   import quantx_infrastructure.services.financial_service as financial_module
+
+  monkeypatch.setattr(financial_module, "verified_statement_upsert", _verified_stub)
 
   db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
   service = FinancialService(db_session=db)

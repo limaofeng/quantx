@@ -462,9 +462,11 @@ async def test_uploaded_bars_outside_request_scope_are_not_saved(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("proof_error", [None, "missing", "count", "digest"])
 async def test_uploaded_financial_rows_are_validated_saved_and_rebuilt(
   tmp_path,
   monkeypatch,
+  proof_error,
 ):
   records = [
     {
@@ -512,13 +514,28 @@ async def test_uploaded_financial_rows_are_validated_saved_and_rebuilt(
 
     async def save_batch_financial_data_with_audit(self, frames):
       captured.update(frames)
-      return {
+      audit = {
         "rows_received": 1,
         "rows_upserted": 1,
+        "statement_verification": {
+          table: {
+            "schema_version": 1,
+            "rows_verified": int(table == "Income"),
+            "mapped_content_sha256": "a" * 64,
+          }
+          for table in ("Balance", "Income", "CashFlow", "Capital")
+        },
         "rows_rejected": 0,
         "metric_codes_rebuilt": 1,
         "metric_rows_rebuilt": 6,
       }
+      if proof_error == "missing":
+        audit.pop("statement_verification")
+      elif proof_error == "count":
+        audit["statement_verification"]["Income"]["rows_verified"] = 0
+      elif proof_error == "digest":
+        audit["statement_verification"]["Income"]["mapped_content_sha256"] = "bad"
+      return audit
 
   monkeypatch.setattr(
     reference,
@@ -526,6 +543,10 @@ async def test_uploaded_financial_rows_are_validated_saved_and_rebuilt(
     FakeFinancialService,
   )
 
+  if proof_error:
+    with pytest.raises(RuntimeError, match="statement verification"):
+      await ingestion.ingest_uploaded_market_data_request(store, "request-1")
+    return
   result = await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
   assert captured["688552.SH"]["Income"].iloc[0]["m_timetag"] == "20260331"

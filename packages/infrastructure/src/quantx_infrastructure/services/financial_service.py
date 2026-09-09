@@ -22,6 +22,10 @@ from quantx_infrastructure.services.financial_metric_snapshot_service import (
 from quantx_infrastructure.services.financial_report_date import (
   normalize_financial_report_date,
 )
+from quantx_infrastructure.services.financial_statement_verification import (
+  verified_statement_upsert,
+)
+from quantx_infrastructure.services.market_data_ingestion_progress import evidence_hash
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +232,14 @@ class FinancialService:
       return {
         "rows_received": 0,
         "rows_upserted": 0,
+        "statement_verification": {
+          table: {
+            "schema_version": 1,
+            "rows_verified": 0,
+            "mapped_content_sha256": evidence_hash([]),
+          }
+          for table in self.SUPPORTED_TABLES
+        },
         "rows_rejected": 0,
         "metric_codes_rebuilt": 0,
         "metric_rows_rebuilt": 0,
@@ -286,13 +298,18 @@ class FinancialService:
         code = str(row["stock_code"])
         statement_rows_by_code[code] = statement_rows_by_code.get(code, 0) + 1
     rows_upserted = 0
+    statement_verification = {}
     try:
       for table in self.SUPPORTED_TABLES:
-        rows_upserted += await self._bulk_upsert(
+        audit = await verified_statement_upsert(
           db,
           models[table],
           records_by_table[table],
+          upsert=self._bulk_upsert,
+          chunk_size=self.UPSERT_CHUNK_SIZE,
         )
+        statement_verification[table] = audit
+        rows_upserted += audit["rows_verified"]
       metric_result = await FinancialMetricSnapshotService(
         db_session=db
       ).rebuild_for_codes(
@@ -307,6 +324,7 @@ class FinancialService:
     return {
       "rows_received": rows_received,
       "rows_upserted": rows_upserted,
+      "statement_verification": statement_verification,
       "rows_rejected": 0,
       "metric_codes_rebuilt": int(metric_result.get("codes", 0)),
       "metric_rows_rebuilt": int(metric_result.get("records", 0)),
