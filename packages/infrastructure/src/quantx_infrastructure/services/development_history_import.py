@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -23,11 +24,15 @@ from quantx_infrastructure.services.data_exchange import (
   export_root,
   get_export,
   submit,
+  submit_in_transaction,
 )
 from quantx_infrastructure.services.data_exchange_reference import (
   import_reference,
   import_reference_in_transaction,
   verify_imported_reference,
+)
+from quantx_infrastructure.services.development_delivery_execution import (
+  run_delivery_execution,
 )
 from quantx_infrastructure.services.development_delivery_manifest import (
   MAX_DELIVERY_METADATA_BYTES,
@@ -77,19 +82,24 @@ class ImportedTransfer:
     ]
 
 
-async def import_partition(request: HistoryPartitionRequest) -> dict:
+@asynccontextmanager
+async def _delivery_transaction(owner):
+  async with AsyncSessionLocal() as db:
+    if owner is not None:
+      await owner._guard_ingestion_owner(db, lock=False)
+    yield db
+    if owner is not None:
+      await owner._guard_ingestion_owner(db)
+    await db.commit()
+
+
+async def import_partition(request: HistoryPartitionRequest, *, owner=None) -> dict:
   if os.environ.get("ENV") != "development":
     raise ValueError("History import is development-only")
-  identity = hashlib.sha256(request.model_dump_json().encode()).digest()
-  lock_key = int.from_bytes(identity[:8], "big", signed=True)
-  async with AsyncSessionLocal() as db:
-    locked = await db.scalar(
-      text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}
-    )
-    if not locked:
-      return {"status": "IMPORT_IN_PROGRESS"}
+
+  async def execute(execution_owner):
     try:
-      return await _import_partition_owned(request)
+      return await _import_partition_owned(request, owner=execution_owner)
     except DeliveryDownloadBudgetExhausted as exc:
       return {
         "id": exc.delivery_id,
@@ -102,18 +112,26 @@ async def import_partition(request: HistoryPartitionRequest) -> dict:
         "status": "WAITING_SOURCE",
         "reason": "DELIVERY_REMOTE_UNAVAILABLE",
       }
-    finally:
-      await db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
+
+  return await run_delivery_execution(
+    request, AsyncSessionLocal, execute, worker_owner=owner
+  )
 
 
-async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
+async def _import_partition_owned(
+  request: HistoryPartitionRequest, *, owner=None
+) -> dict:
   if os.environ.get("ENV") != "development":
     raise ValueError("History import is development-only")
-  identity = await submit(request)
+  if owner is None:
+    identity = await submit(request)
+  else:
+    async with _delivery_transaction(owner) as db:
+      identity = await submit_in_transaction(request, db)
   local = await get_export(identity)
   if local["state"] == "BLOCKED":
     return {"id": identity, "status": "BLOCKED", "reason": local["error"]}
-  budget = DevelopmentDownloadBudget(AsyncSessionLocal, identity)
+  budget = DevelopmentDownloadBudget(AsyncSessionLocal, identity, owner=owner)
   schedule = await budget.schedule()
   if schedule["reason_code"]:
     return {"id": identity, "status": "BLOCKED", "reason": schedule["reason_code"]}
@@ -126,7 +144,7 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
     return {"id": identity, "status": waiting, "reason": schedule["wait_reason"]}
   if local["state"] in {"LOCAL_VERIFIED", "WAITING_LOCAL_PROOF"}:
     return await _recheck_local_partition(identity, request, local["manifest"], budget)
-  ingestion_store = DevelopmentIngestionStore(AsyncSessionLocal, identity)
+  ingestion_store = DevelopmentIngestionStore(AsyncSessionLocal, identity, owner=owner)
   resumed = await ingestion_store.status()
   if resumed is not None:
     state = resumed["progress"]
@@ -166,21 +184,19 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
       return {"id": identity, "status": "BLOCKED", "reason": "DELIVERY_REMOTE_EXPIRED"}
     if remote["state"] != "READY":
       if remote["state"] == "INCOMPLETE":
-        async with AsyncSessionLocal() as db:
+        async with _delivery_transaction(owner) as db:
           await db.execute(
             text(
               "UPDATE development_data_export SET state='INCOMPLETE',error='SOURCE_INCOMPLETE' WHERE id=:id"
             ),
             {"id": identity},
           )
-          await db.commit()
       elif remote["state"] in {"QUEUED", "WAITING_SOURCE"}:
         await budget.schedule("pending")
       return {"status": remote["state"], "id": identity, "reason": remote.get("error")}
     manifest = remote["manifest"]
-    async with AsyncSessionLocal() as db:
+    async with _delivery_transaction(owner) as db:
       await pin_delivery_manifest(db, identity, request, manifest)
-      await db.commit()
     await budget.schedule("ready")
     export_root().mkdir(parents=True, exist_ok=True)
     for item in manifest["chunks"]:
@@ -229,7 +245,7 @@ async def _ingest_local_partition(identity, request, manifest, ingestion_store):
     audit = await ingest_uploaded_bar_request(
       ImportedTransfer(manifest), identity, progress=progress
     )
-    async with AsyncSessionLocal() as db:
+    async with _delivery_transaction(ingestion_store.owner) as db:
       reference_audit = await import_reference_in_transaction(
         await db.connection(),
         manifest["reference"],
@@ -254,7 +270,6 @@ async def _ingest_local_partition(identity, request, manifest, ingestion_store):
       """),
         {"id": identity, "manifest": json.dumps(receipt, default=str)},
       )
-      await db.commit()
     return receipt
 
   except Exception as exc:
@@ -297,7 +312,7 @@ async def _recheck_local_partition(identity, request, receipt, budget):
     manifest = {k: v for k, v in receipt.items() if k != "local_verification"}
     validate_delivery_manifest(manifest, request)
     current = await verify_uploaded_bar_request(ImportedTransfer(manifest), identity)
-    async with AsyncSessionLocal() as db:
+    async with _delivery_transaction(budget.owner) as db:
       await verify_imported_reference(
         await db.connection(),
         manifest["reference"],
@@ -322,7 +337,6 @@ async def _recheck_local_partition(identity, request, receipt, budget):
       """),
         {"id": identity},
       )
-      await db.commit()
     return result
   except MarketDataPersistenceBlockedError as exc:
     state, reason = "BLOCKED", exc.reason_code
@@ -336,7 +350,7 @@ async def _recheck_local_partition(identity, request, receipt, budget):
     FileNotFoundError,
   ):
     state, reason = "BLOCKED", "LOCAL_DELIVERY_PROOF_INVALID"
-  async with AsyncSessionLocal() as db:
+  async with _delivery_transaction(budget.owner) as db:
     await db.execute(
       text("""
       UPDATE development_data_export SET state=:state,error=:reason,
@@ -344,7 +358,6 @@ async def _recheck_local_partition(identity, request, receipt, budget):
     """),
       {"id": identity, "state": state, "reason": reason},
     )
-    await db.commit()
   if state == "WAITING_LOCAL_PROOF":
     await budget.schedule("local_failed")
   return {"id": identity, "status": state, "reason": reason}

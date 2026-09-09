@@ -262,7 +262,10 @@ async def test_permanent_readback_capacity_keeps_its_reason(references, monkeypa
     ),
   )
   result = await importer._recheck_local_partition(
-    "delivery", REQUEST, manifest(), None
+    "delivery",
+    REQUEST,
+    manifest(),
+    importer.DevelopmentDownloadBudget(async_sessionmaker(store.engine), "delivery"),
   )
   assert result == {
     "id": "delivery",
@@ -433,3 +436,23 @@ async def test_importer_publishes_reference_and_local_receipt_in_one_transaction
     assert importer.ingest_uploaded_bar_request.await_count == 1
     async with store.engine.connect() as connection:
       assert await connection.scalar(text("SELECT count(*) FROM divid_factors")) == 1
+
+
+async def test_delivery_transaction_rolls_back_if_owner_is_lost_before_commit(
+  references, monkeypatch
+):
+  from quantx_infrastructure.services import development_history_import as importer
+
+  store = references
+  monkeypatch.setattr(importer, "AsyncSessionLocal", async_sessionmaker(store.engine))
+  with pytest.raises(RuntimeError, match="lease was lost"):
+    async with importer._delivery_transaction(store) as db:
+      await db.execute(text("DELETE FROM divid_factors"))
+      await db.execute(
+        text(
+          "UPDATE market_data_worker_lease SET expires_at=clock_timestamp()-INTERVAL '1 second'"
+        )
+      )
+  async with store.engine.connect() as connection:
+    assert await connection.scalar(text("SELECT count(*) FROM divid_factors")) == 1
+    await store._guard_ingestion_owner(connection)
