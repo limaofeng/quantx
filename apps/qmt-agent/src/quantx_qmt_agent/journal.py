@@ -77,8 +77,9 @@ class LocalJournal:
           record_count INTEGER NOT NULL CHECK(record_count >= 0)
         );
         CREATE TABLE IF NOT EXISTS history_collection_executions (
-          unit_id TEXT PRIMARY KEY,
-          permit_id TEXT NOT NULL UNIQUE,
+          unit_id TEXT NOT NULL,
+          permit_id TEXT PRIMARY KEY,
+          attempt_index INTEGER NOT NULL CHECK(attempt_index >= 0),
           started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS history_upload_retirements (
@@ -91,7 +92,7 @@ class LocalJournal:
         );
         CREATE TABLE IF NOT EXISTS history_collection_aborts (
           permit_id TEXT PRIMARY KEY,
-          unit_id TEXT NOT NULL UNIQUE,
+          unit_id TEXT NOT NULL,
           permit_json TEXT NOT NULL,
           failure_json TEXT NOT NULL,
           accepted_at TEXT,
@@ -103,6 +104,7 @@ class LocalJournal:
         );
         """
       )
+      self._migrate_collection_attempts()
       command_columns = {
         str(row["name"])
         for row in self.connection.execute("PRAGMA table_info(commands)")
@@ -219,8 +221,18 @@ class LocalJournal:
         (device_id, str(snapshot.request_id), request_sha256, encoded),
       )
       scope = (device_id, str(snapshot.request_id))
+      if self.connection.execute(
+        "SELECT 1 FROM history_collection_aborts a JOIN history_collection_receipts r "
+        "ON r.permit_id=a.permit_id WHERE r.device_id=? AND r.request_id=? "
+        "AND a.accepted_at IS NULL LIMIT 1", scope,
+      ).fetchone() is not None:
+        raise ValueError("history retirement has an unconfirmed collection failure")
       # Keep one compact retirement proof instead of an unbounded set of native
       # receipts in the trading journal. The tombstone still forbids recollection.
+      self.connection.execute(
+        "DELETE FROM history_collection_aborts WHERE permit_id IN "
+        "(SELECT permit_id FROM history_collection_receipts WHERE device_id=? AND request_id=?)", scope,
+      )
       self.connection.execute(
         "DELETE FROM history_collection_executions WHERE permit_id IN "
         "(SELECT permit_id FROM history_collection_receipts WHERE device_id=? AND request_id=?)", scope,
@@ -311,23 +323,46 @@ class LocalJournal:
       raise ValueError("collection receipt conflicts with original authorization")
     return True
 
+  def _migrate_collection_attempts(self) -> None:
+    """Retain every original execution when changing from one slot to attempts."""
+    self.connection.execute("BEGIN IMMEDIATE")
+    columns = self.connection.execute("PRAGMA table_info(history_collection_executions)").fetchall()
+    if any(row["name"] == "unit_id" and row["pk"] for row in columns):
+      for statement in (
+        "CREATE TABLE history_collection_executions_v2 (unit_id TEXT NOT NULL,permit_id TEXT PRIMARY KEY,attempt_index INTEGER NOT NULL CHECK(attempt_index>=0),started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        "INSERT INTO history_collection_executions_v2 SELECT unit_id,permit_id,0,started_at FROM history_collection_executions",
+        "CREATE TABLE history_collection_aborts_v2 (permit_id TEXT PRIMARY KEY,unit_id TEXT NOT NULL,permit_json TEXT NOT NULL,failure_json TEXT NOT NULL,accepted_at TEXT,recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        "INSERT INTO history_collection_aborts_v2 SELECT permit_id,unit_id,permit_json,failure_json,accepted_at,recorded_at FROM history_collection_aborts",
+        "DROP TABLE history_collection_executions",
+        "ALTER TABLE history_collection_executions_v2 RENAME TO history_collection_executions",
+        "DROP TABLE history_collection_aborts",
+        "ALTER TABLE history_collection_aborts_v2 RENAME TO history_collection_aborts",
+      ):
+        self.connection.execute(statement)
+    self.connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_history_execution_attempt ON history_collection_executions(unit_id,attempt_index)")
+
   def collection_execution_started(self, permit: CollectionPermit) -> bool:
     """Read original execution identity without renewing its start authorization."""
     with self.lock:
-      row = self.connection.execute(
+      own = self.connection.execute(
         "SELECT e.permit_id,r.permit_sha256 FROM history_collection_executions e "
         "JOIN history_collection_receipts r ON r.permit_id=e.permit_id "
-        "WHERE e.unit_id=?",
+        "WHERE e.unit_id=? AND e.permit_id=?",
+        (permit.unit.unit_id, str(permit.permit_id)),
+      ).fetchone()
+      if own is not None:
+        if own["permit_sha256"] != payload_hash(permit.model_dump(mode="json")):
+          raise ValueError("collection execution belongs to another authorization")
+        return True
+      unresolved = self.connection.execute(
+        "SELECT 1 FROM history_collection_executions e WHERE e.unit_id=? "
+        "AND NOT EXISTS (SELECT 1 FROM history_collection_aborts a "
+        "WHERE a.permit_id=e.permit_id AND a.accepted_at IS NOT NULL) LIMIT 1",
         (permit.unit.unit_id,),
       ).fetchone()
-    if row is None:
+      if unresolved is not None:
+        raise ValueError("collection execution belongs to another authorization")
       return False
-    if (
-      row["permit_id"] != str(permit.permit_id)
-      or row["permit_sha256"] != payload_hash(permit.model_dump(mode="json"))
-    ):
-      raise ValueError("collection execution belongs to another authorization")
-    return True
 
   def begin_collection_execution(
     self, permit: CollectionPermit, *, device_id: str, now: datetime | None = None
@@ -359,15 +394,12 @@ class LocalJournal:
         now=now,
         minimum_epoch=int(epoch["value"]) if epoch is not None else 0,
       )
-      existing = self.connection.execute(
-        "SELECT permit_id FROM history_collection_executions WHERE unit_id=?",
-        (permit.unit.unit_id,),
-      ).fetchone()
-      if existing is not None:
+      if self.collection_execution_started(permit):
         raise ValueError("collection execution has already entered native work")
       self.connection.execute(
-        "INSERT INTO history_collection_executions(unit_id,permit_id) VALUES (?,?)",
-        (permit.unit.unit_id, str(permit.permit_id)),
+        "INSERT INTO history_collection_executions(unit_id,permit_id,attempt_index) "
+        "SELECT ?,?,COALESCE(MAX(attempt_index)+1,0) FROM history_collection_executions WHERE unit_id=?",
+        (permit.unit.unit_id, str(permit.permit_id), permit.unit.unit_id),
       )
     with self.lock:
       self._refresh_size_cache()
@@ -426,7 +458,11 @@ class LocalJournal:
       rows = self.connection.execute(
         "SELECT a.permit_json,a.accepted_at FROM history_collection_aborts a "
         "JOIN history_collection_receipts r ON r.permit_id=a.permit_id "
-        "WHERE r.device_id=? AND r.request_id=? ORDER BY r.unit_index LIMIT 2049",
+        "JOIN history_collection_executions e ON e.permit_id=a.permit_id "
+        "WHERE r.device_id=? AND r.request_id=? "
+        "AND NOT EXISTS (SELECT 1 FROM history_collection_executions newer "
+        "WHERE newer.unit_id=a.unit_id AND newer.attempt_index>e.attempt_index) "
+        "ORDER BY r.unit_index LIMIT 2049",
         (device_id, request_id),
       ).fetchall()
       if len(rows) > 2048:
@@ -447,7 +483,7 @@ class LocalJournal:
     with self.lock, self.connection:
       self.connection.execute("BEGIN IMMEDIATE")
       if self.connection.execute(
-        "SELECT 1 FROM history_collection_aborts WHERE unit_id=?", (artifact.unit.unit_id,)
+        "SELECT 1 FROM history_collection_aborts WHERE permit_id=?", (permit_id,)
       ).fetchone() is not None:
         raise ValueError("collection artifact cannot replace a recorded failure")
       receipt = self.connection.execute(

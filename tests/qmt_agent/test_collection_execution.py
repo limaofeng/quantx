@@ -697,3 +697,218 @@ async def test_recorded_failure_is_immutable_and_excludes_success(execution):
       permit_id=str(permit.permit_id), artifacts=runner.artifacts, artifact=artifact
     )
   assert runner.journal.load_collection_abort(permit) == failure
+
+
+async def test_new_permits_retry_confirmed_failures_without_erasing_attempts(execution):
+  runner, original = execution
+  permits = [original] + [
+    original.model_copy(update={"permit_id": uuid4()}) for _ in range(2)
+  ]
+  for permit in permits[:2]:
+    with pytest.raises(CollectionFailed):
+      await runner.execute(
+        permit,
+        server_state="ISSUED",
+        unit_payload=PAYLOAD,
+        start=AsyncMock(),
+        finish=AsyncMock(),
+        collect=Mock(side_effect=RuntimeError),
+      )
+  finish = AsyncMock()
+  artifact = await runner.execute(
+    permits[2],
+    server_state="ISSUED",
+    unit_payload=PAYLOAD,
+    start=AsyncMock(),
+    finish=finish,
+    collect=lambda: iter([{"value": 7}]),
+  )
+  assert list(runner.artifacts.replay(artifact)) == [{"value": 7}]
+  finish.assert_awaited_once()
+  rows = runner.journal.connection.execute(
+    "SELECT permit_id,attempt_index FROM history_collection_executions ORDER BY attempt_index"
+  ).fetchall()
+  assert [(row["permit_id"], row["attempt_index"]) for row in rows] == [
+    (str(p.permit_id), i) for i, p in enumerate(permits)
+  ]
+  assert all(runner.journal.load_collection_abort(p) is not None for p in permits[:2])
+  assert (
+    runner.journal.request_collection_aborts(
+      runner.device_id, str(original.unit.request_id)
+    )
+    == []
+  )
+  assert runner.journal.collection_execution_started(permits[2])
+
+
+async def test_unconfirmed_abort_does_not_allow_replacement(execution):
+  runner, permit = execution
+  runner.abort = AsyncMock(side_effect=ConnectionError)
+  with pytest.raises(ConnectionError):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=Mock(side_effect=RuntimeError),
+    )
+  next_permit = permit.model_copy(update={"permit_id": uuid4()})
+  collect, start = Mock(), AsyncMock()
+  with pytest.raises(ValueError, match="another authorization"):
+    await runner.execute(
+      next_permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=start,
+      finish=AsyncMock(),
+      collect=collect,
+    )
+  start.assert_not_awaited()
+  collect.assert_not_called()
+  assert (
+    runner.journal.connection.execute(
+      "SELECT COUNT(*) FROM history_collection_executions"
+    ).fetchone()[0]
+    == 1
+  )
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_original_journal_migration_preserves_execution_and_exit(
+  execution, confirmed
+):
+  runner, permit = execution
+  if not confirmed:
+    runner.abort = AsyncMock(side_effect=ConnectionError)
+  with pytest.raises(CollectionFailed if confirmed else ConnectionError):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=Mock(side_effect=RuntimeError),
+    )
+  before = dict(
+    runner.journal.connection.execute(
+      "SELECT * FROM history_collection_executions"
+    ).fetchone()
+  )
+  failure_before = dict(
+    runner.journal.connection.execute(
+      "SELECT * FROM history_collection_aborts"
+    ).fetchone()
+  )
+  # Recreate precisely the previous committed table constraints in this temp journal.
+  runner.journal.connection.executescript("""
+    ALTER TABLE history_collection_executions RENAME TO executions_new;
+    CREATE TABLE history_collection_executions(unit_id TEXT PRIMARY KEY,permit_id TEXT NOT NULL UNIQUE,started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    INSERT INTO history_collection_executions SELECT unit_id,permit_id,started_at FROM executions_new;
+    DROP TABLE executions_new;
+    ALTER TABLE history_collection_aborts RENAME TO aborts_new;
+    CREATE TABLE history_collection_aborts(permit_id TEXT PRIMARY KEY,unit_id TEXT NOT NULL UNIQUE,permit_json TEXT NOT NULL,failure_json TEXT NOT NULL,accepted_at TEXT,recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    INSERT INTO history_collection_aborts SELECT * FROM aborts_new;
+    DROP TABLE aborts_new;
+  """)
+  runner.journal.connection.close()
+  runner.journal = LocalJournal(runner.journal.path)
+  try:
+    assert (
+      dict(
+        runner.journal.connection.execute(
+          "SELECT * FROM history_collection_executions"
+        ).fetchone()
+      )
+      == before
+    )
+    assert (
+      dict(
+        runner.journal.connection.execute(
+          "SELECT * FROM history_collection_aborts"
+        ).fetchone()
+      )
+      == failure_before
+    )
+    replacement = permit.model_copy(update={"permit_id": uuid4()})
+    if confirmed:
+      assert runner.journal.collection_execution_started(replacement) is False
+    else:
+      with pytest.raises(ValueError, match="another authorization"):
+        runner.journal.collection_execution_started(replacement)
+    # Reopening the migrated journal is idempotent and retains the original fact.
+    other = LocalJournal(runner.journal.path)
+    try:
+      assert other.load_collection_abort(
+        permit
+      ) == runner.journal.load_collection_abort(permit)
+    finally:
+      other.connection.close()
+  finally:
+    runner.journal.connection.close()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_retirement_preserves_pending_failure_and_compacts_confirmed_attempts(
+  execution, confirmed
+):
+  from quantx_contracts.history_upload import HistoryUploadChunk, HistoryUploadSnapshot
+
+  runner, permit = execution
+  if not confirmed:
+    runner.abort = AsyncMock(side_effect=ConnectionError)
+  with pytest.raises(CollectionFailed if confirmed else ConnectionError):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=Mock(side_effect=RuntimeError),
+    )
+  if confirmed:
+    replacement = permit.model_copy(update={"permit_id": uuid4()})
+    await runner.execute(
+      replacement,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=lambda: iter([]),
+    )
+  snapshot = HistoryUploadSnapshot(
+    request_id=permit.unit.request_id,
+    status="COMPLETED",
+    verified_at=NOW - timedelta(hours=25),
+    total_chunks=1,
+    chunks=[
+      HistoryUploadChunk(index=0, sha256="a" * 64, record_count=0, byte_count=100)
+    ],
+  )
+
+  def retire():
+    runner.journal.retire_history_upload(
+      device_id=runner.device_id, request_sha256="b" * 64, snapshot=snapshot, now=NOW
+    )
+
+  if confirmed:
+    retire()
+    for table in [
+      "history_collection_aborts",
+      "history_collection_executions",
+      "history_collection_receipts",
+    ]:
+      assert (
+        runner.journal.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        == 0
+      )
+    assert runner.journal.history_upload_retired(
+      runner.device_id, str(permit.unit.request_id)
+    )
+  else:
+    with pytest.raises(ValueError, match="unconfirmed"):
+      retire()
+    assert runner.journal.load_collection_abort(permit) is not None
+    assert not runner.journal.history_upload_retired(
+      runner.device_id, str(permit.unit.request_id)
+    )
