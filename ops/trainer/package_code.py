@@ -264,6 +264,95 @@ def unpack_code(bundle: Path, manifest_sha256: str, output: Path) -> dict:
     lock.unlink()
 
 
+def export_dependencies(
+  bundle: Path, manifest_sha256: str, output: Path, uv: Path, python: Path
+) -> dict:
+  for executable in (uv, python):
+    if not executable.is_absolute() or not executable.is_file():
+      raise ValueError("EXPLICIT_EXECUTABLE_REQUIRED")
+  output = output.absolute()
+  output.parent.mkdir(parents=True, exist_ok=True)
+  lock = output.with_name(output.name + ".package-lock")
+  with lock.open("x"):
+    pass
+  try:
+    if output.exists() or output.is_symlink():
+      raise FileExistsError(output)
+    with tempfile.TemporaryDirectory(
+      prefix=".trainer-dependencies-", dir=output.parent
+    ) as tmp:
+      root = Path(tmp)
+      code = root / "code"
+      manifest = unpack_code(bundle, manifest_sha256, code)
+      staging = root / "dependencies"
+      staging.mkdir()
+      requirements = staging / "requirements.txt"
+      subprocess.run(
+        [
+          str(uv),
+          "export",
+          "--project",
+          str(code),
+          "--locked",
+          "--offline",
+          "--no-config",
+          "--no-python-downloads",
+          "--python",
+          str(python),
+          "--package",
+          "quantx-trainer",
+          "--no-dev",
+          "--no-emit-workspace",
+          "--no-header",
+          "--no-annotate",
+          "--output-file",
+          str(requirements),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env={
+          key: value for key, value in os.environ.items() if not key.startswith("UV_")
+        },
+      )
+      raw = requirements.read_bytes()
+      records = (
+        raw.decode("utf-8").replace("\r\n", "\n").replace("\\\n", " ").splitlines()
+      )
+      records = [line.strip() for line in records if line.strip()]
+      if not records or any(
+        not re.match(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*==[^\s;]+", line)
+        or line.lower().startswith(("quantx-", "xtquant=="))
+        or not re.search(r"--hash=sha256:[0-9a-f]{64}(?:\s|$)", line)
+        for line in records
+      ):
+        raise ValueError("INVALID_HASHED_DEPENDENCIES")
+      if (
+        hashlib.sha256((code / "uv.lock").read_bytes()).hexdigest()
+        != manifest["lock_sha256"]
+      ):
+        raise ValueError("EXPORTED_LOCK_CHANGED")
+      evidence = {
+        "schema_version": 1,
+        "kind": "trainer-external-dependencies",
+        "git_commit": manifest["git_commit"],
+        "code_manifest_sha256": manifest_sha256,
+        "lock_sha256": manifest["lock_sha256"],
+        "requirements_sha256": hashlib.sha256(raw).hexdigest(),
+        "package_count": len(records),
+        "workspace_packages_included": False,
+      }
+      (staging / "dependencies.json").write_text(
+        json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+      )
+      if output.exists() or output.is_symlink():
+        raise FileExistsError(output)
+      os.rename(staging, output)
+    return evidence
+  finally:
+    lock.unlink()
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
@@ -273,8 +362,26 @@ def main() -> int:
   action.add_argument("--revision")
   action.add_argument("--bundle", type=Path)
   parser.add_argument("--manifest-sha256")
+  parser.add_argument("--export-dependencies", action="store_true")
+  parser.add_argument("--uv", type=Path)
+  parser.add_argument("--python", type=Path)
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
+  if args.export_dependencies:
+    if not all((args.bundle, args.manifest_sha256, args.uv, args.python)):
+      parser.error(
+        "--export-dependencies requires --bundle, --manifest-sha256, --uv and --python"
+      )
+    print(
+      json.dumps(
+        export_dependencies(
+          args.bundle, args.manifest_sha256, args.output, args.uv, args.python
+        )
+      )
+    )
+    return 0
+  if args.uv or args.python:
+    parser.error("--uv and --python require --export-dependencies")
   if args.bundle:
     if not args.manifest_sha256:
       parser.error("--bundle requires --manifest-sha256 from the packaging host")

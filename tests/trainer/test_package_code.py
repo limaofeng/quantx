@@ -129,6 +129,70 @@ def manifest_digest(bundle):
   return hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize(
+  "fault", [None, "missing_hash", "workspace", "lock_changed", "export_failed"]
+)
+def test_dependency_export_is_bound_to_verified_bundle(tmp_path, monkeypatch, fault):
+  bundle = make_bundle(tmp_path)
+  executable = tmp_path / "explicit-executable"
+  executable.touch()
+  monkeypatch.setenv("UV_PROJECT", "untrusted-project")
+  calls = []
+
+  def run(command, **kwargs):
+    calls.append(command)
+    code = Path(command[command.index("--project") + 1])
+    assert (code / "uv.lock").read_bytes() == b"committed content"
+    assert kwargs["check"] is True
+    assert "UV_PROJECT" not in kwargs["env"]
+    for flag in (
+      "--locked",
+      "--offline",
+      "--no-config",
+      "--no-python-downloads",
+      "--no-emit-workspace",
+    ):
+      assert flag in command
+    assert command[command.index("--python") + 1] == str(executable)
+    if fault == "export_failed":
+      raise RuntimeError("export failed")
+    requirement = "paramiko==4.0.0 \\\r\n    --hash=sha256:" + "a" * 64 + "\r\n"
+    if fault == "missing_hash":
+      requirement = "paramiko==4.0.0\n"
+    if fault == "workspace":
+      requirement = requirement.replace("paramiko", "quantx-trainer")
+    if fault == "lock_changed":
+      (code / "uv.lock").write_text("changed")
+    Path(command[command.index("--output-file") + 1]).write_bytes(requirement.encode())
+
+  monkeypatch.setattr(package.subprocess, "run", run)
+  output = tmp_path / "dependencies"
+  if fault:
+    with pytest.raises((ValueError, RuntimeError)):
+      package.export_dependencies(
+        bundle, manifest_digest(bundle), output, executable, executable
+      )
+    assert not output.exists()
+  else:
+    evidence = package.export_dependencies(
+      bundle, manifest_digest(bundle), output, executable, executable
+    )
+    assert evidence["package_count"] == 1
+    assert evidence["code_manifest_sha256"] == manifest_digest(bundle)
+    assert (
+      evidence["requirements_sha256"]
+      == hashlib.sha256((output / "requirements.txt").read_bytes()).hexdigest()
+    )
+    assert json.loads((output / "dependencies.json").read_text()) == evidence
+    with pytest.raises(FileExistsError):
+      package.export_dependencies(
+        bundle, manifest_digest(bundle), output, executable, executable
+      )
+  assert len(calls) == 1
+  assert not list(tmp_path.glob(".trainer-dependencies-*"))
+  assert not list(tmp_path.glob("*.package-lock"))
+
+
 def test_unpack_verified_tree_and_refuse_replacement(tmp_path):
   bundle = make_bundle(tmp_path)
   output = tmp_path / "code"
