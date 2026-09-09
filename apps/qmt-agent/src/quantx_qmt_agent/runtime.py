@@ -63,6 +63,7 @@ from .historical_worker import (
   XTDATA_HISTORICAL_WORKER_KIND,
   run_historical_market_data_worker,
 )
+from .history_jobs import retained_history_bytes
 from .history_timing import record_history_timing
 from .journal import LocalJournal
 from .whole_market_capture import (
@@ -1286,7 +1287,7 @@ def _initialize_market_data_spool_root(
 
 
 def _managed_market_data_spool_bytes(root: Path) -> int:
-  total = 0
+  total = retained_history_bytes(root, max_bytes=MAX_MARKET_DATA_UPLOAD_CACHE_BYTES)
   for child in root.iterdir():
     if not child.name.startswith(MARKET_DATA_SPOOL_REQUEST_PREFIX):
       continue
