@@ -33,10 +33,20 @@ class LocalHistoryReader:
     self._slot = asyncio.Lock()
 
   async def read(self, request: HistoryRead) -> HistoryPage:
+    return await self._run_read(self._read, request)
+
+  async def read_latest_daily(self, request):
+    from .local_daily_snapshot_reader import read_latest_daily
+
+    return await self._run_read(
+      lambda value: read_latest_daily(self.connection, value), request
+    )
+
+  async def _run_read(self, read, request):
     if self._slot.locked():
       raise HistoryReadBusy("local history query capacity exhausted")
     async with self._slot:
-      task = asyncio.create_task(asyncio.to_thread(self._read, request))
+      task = asyncio.create_task(asyncio.to_thread(read, request))
       try:
         return await asyncio.shield(task)
       except asyncio.CancelledError:

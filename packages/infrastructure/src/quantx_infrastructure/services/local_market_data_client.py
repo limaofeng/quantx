@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 
 import httpx
+from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
 from quantx_contracts.divid_factor_read import DividFactorRead, DividFactorWindow
 from quantx_contracts.history_collection_api import (
   MAX_HISTORY_RESULT_BYTES,
@@ -111,3 +112,14 @@ class LocalMarketDataClient:
     if window.request != request:
       raise ValueError("local factor response scope mismatch")
     return window
+
+  async def read_latest_daily(self, request: DailySnapshotRead) -> DailySnapshotResult:
+    value = await self._json(
+      "POST",
+      "/market-data/internal/v1/history/latest-daily",
+      json=request.model_dump(mode="json"),
+    )
+    result = DailySnapshotResult.model_validate(value)
+    if result.request != request:
+      raise ValueError("local daily snapshot response scope mismatch")
+    return result

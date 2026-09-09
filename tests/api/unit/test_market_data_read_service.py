@@ -1,10 +1,9 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 from quantx_api import market_data_read_service as module
+from quantx_contracts.daily_snapshot_read import DailySnapshotResult
 from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.tick import Tick
 
@@ -365,34 +364,40 @@ async def test_market_index_snapshots_batch_cache_and_daily_reads_once(
     cache_calls.append(tuple(codes))
     return [tick]
 
-  class FakeKlineRepository:
-    def __init__(self) -> None:
+  class FakeDailyClient:
+    def __init__(self):
       self.calls = []
+      self.closed = False
 
-    def find_daily_batch(self, stock_codes, start, end, *, use_cache):
-      self.calls.append((tuple(stock_codes), start, end, use_cache))
-      return {
-        "000001.SH": pd.DataFrame(
-          [
-            {
-              "stock_code": "000001.SH",
-              "period": "1d",
-              "time": datetime(2026, 8, 25, tzinfo=timezone.utc),
-              "open": 3800.0,
-              "high": 3900.0,
-              "low": 3790.0,
-              "close": 3880.0,
-              "pre_close": 3810.0,
-              "volume": 100.0,
-              "amount": 1_000.0,
-            }
-          ]
-        )
-      }
+    async def read_latest_daily(self, request):
+      self.calls.append(request)
+      return DailySnapshotResult(
+        request=request,
+        records=[
+          {
+            "stock_code": "000001.SH",
+            "period": "1d",
+            "time": datetime(2026, 8, 25, tzinfo=timezone.utc),
+            "open": 3800.0,
+            "high": 3900.0,
+            "low": 3790.0,
+            "close": 3880.0,
+            "pre_close": 3810.0,
+            "volume": 100.0,
+            "amount": 1000.0,
+          }
+        ],
+      )
 
-  repository = FakeKlineRepository()
+    async def close(self):
+      self.closed = True
+
+  client = FakeDailyClient()
   service = module.ApiMarketDataReadService()
-  service.historical = SimpleNamespace(kline_repo=repository)
+  monkeypatch.setattr(module, "LocalMarketDataClient", lambda: client)
+  monkeypatch.setattr(
+    module.time_utils, "now", lambda: datetime(2026, 8, 26, tzinfo=timezone.utc)
+  )
   monkeypatch.setattr(module.latest_market_quote_cache, "get_ticks", get_ticks)
 
   rows = await service.get_market_index_snapshots(
@@ -400,9 +405,9 @@ async def test_market_index_snapshots_batch_cache_and_daily_reads_once(
   )
 
   assert cache_calls == [("000001.SH", "399001.SZ")]
-  assert len(repository.calls) == 1
-  assert repository.calls[0][0] == ("000001.SH", "399001.SZ")
-  assert repository.calls[0][3] is False
+  assert len(client.calls) == 1 and client.closed
+  assert client.calls[0].instruments == ["000001.SH", "399001.SZ"]
+  assert client.calls[0].end - client.calls[0].start == timedelta(days=45)
   assert rows[0][0] == "000001.SH"
   assert rows[0][1] is tick
   assert rows[0][2] is not None and rows[0][2].close == 3880.0

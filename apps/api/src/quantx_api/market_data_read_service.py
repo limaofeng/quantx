@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from quantx_contracts.daily_snapshot_read import DailySnapshotRead
 from quantx_infrastructure.core.data.tick_identity import merge_ticks_losslessly
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
@@ -16,6 +17,9 @@ from quantx_infrastructure.services.historical_market_data_service import (
 )
 from quantx_infrastructure.services.latest_market_quote_cache import (
   latest_market_quote_cache,
+)
+from quantx_infrastructure.services.local_market_data_client import (
+  LocalMarketDataClient,
 )
 from quantx_infrastructure.services.position_service import PositionService
 from quantx_infrastructure.services.runtime_market_query_bridge import (
@@ -164,35 +168,33 @@ class ApiMarketDataReadService:
   ) -> list[tuple[str, Tick | None, KLine | None]]:
     """Read all dashboard index fallbacks with two backend round trips."""
     symbols = list(
-      dict.fromkeys(
-        str(code or "").strip().upper() for code in stock_codes if code
-      )
+      dict.fromkeys(str(code or "").strip().upper() for code in stock_codes if code)
     )
     if not symbols:
       return []
     end = time_utils.now()
     start = end - timedelta(days=45)
-    ticks, daily_frames = await asyncio.gather(
+    ticks, daily = await asyncio.gather(
       latest_market_quote_cache.get_ticks(symbols),
-      asyncio.to_thread(
-        self.historical.kline_repo.find_daily_batch,
-        symbols,
-        start,
-        end,
-        use_cache=False,
-      ),
+      self._latest_daily_snapshots(symbols, start, end),
     )
     tick_by_symbol = {str(tick.stock_code).upper(): tick for tick in ticks}
-    daily_by_symbol: dict[str, KLine] = {}
-    for symbol, frame in daily_frames.items():
-      if frame.empty:
-        continue
-      latest = frame.sort_values("time").iloc[-1].to_dict()
-      daily_by_symbol[str(symbol).upper()] = _model(KLine, latest)
+    daily_by_symbol = {
+      row.stock_code: _model(KLine, row.model_dump()) for row in daily.records
+    }
     return [
       (symbol, tick_by_symbol.get(symbol), daily_by_symbol.get(symbol))
       for symbol in symbols
     ]
+
+  async def _latest_daily_snapshots(self, symbols, start, end):
+    client = LocalMarketDataClient()
+    try:
+      return await client.read_latest_daily(
+        DailySnapshotRead(instruments=symbols, start=start, end=end)
+      )
+    finally:
+      await client.close()
 
   async def get_latest_price(self, stock_code: str) -> Tick | None:
     return (await self.get_latest_prices([stock_code])).get(stock_code)

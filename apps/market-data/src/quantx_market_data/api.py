@@ -11,6 +11,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import Response
+from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
 from quantx_contracts.divid_factor_read import DividFactorRead, DividFactorWindow
 from quantx_contracts.history_collection_api import (
   MAX_HISTORY_RESULT_BYTES,
@@ -171,6 +172,21 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     if value is None:
       raise HTTPException(404, "HISTORY_DEMAND_NOT_FOUND")
     return value
+
+  @app.post(
+    "/market-data/internal/v1/history/latest-daily",
+    response_model=DailySnapshotResult,
+    dependencies=[Depends(authorize)],
+  )
+  async def latest_daily(request: DailySnapshotRead):
+    try:
+      return await app.state.reader.read_latest_daily(request)
+    except HistoryReadBusy:
+      raise HTTPException(
+        429, "HISTORY_READ_CAPACITY", headers={"Retry-After": "1"}
+      ) from None
+    except Exception:
+      raise HTTPException(503, "HISTORY_READ_UNAVAILABLE") from None
 
   @app.get(
     "/market-data/internal/v1/history",
