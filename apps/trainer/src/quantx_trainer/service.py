@@ -87,8 +87,11 @@ def serve(config, config_path: Path) -> None:
       os.chdir(config.code_root)
       if sys.platform == "win32":
         from quantx_trainer import contained_process
+        from quantx_trainer.windows_service_job import service_job_name
 
-        contained_process._JOB_HANDLE = contained_process._enter_job()
+        contained_process._JOB_HANDLE = contained_process._enter_job(
+          name=service_job_name(reporter.identity["instance_id"])
+        )
 
       async def run():
         async def heartbeat():

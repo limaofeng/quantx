@@ -247,9 +247,9 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 ### 协作停止
 
-执行 `python -m quantx_trainer.main down --config <配置绝对路径>`，先持久化关闭新领取，再向已验证的服务实例写入停止请求。服务每秒检查请求，进入 STOPPING，取消并等待 Worker 清理；旧实例请求不会影响新实例。`down` 最多等待 30 秒，确认服务锁释放返回 OFFLINE，否则返回 STOP_PENDING 和退出码 3。配置不匹配、陈旧或未知身份不会用于发送停止请求，也不会按猜测的 PID 终止进程。
+执行 `python -m quantx_trainer.main down --config <配置绝对路径>`，先持久化关闭新领取，再向已验证的服务实例写入停止请求。服务每秒检查请求，进入 STOPPING，取消并等待 Worker 清理；旧实例请求不会影响新实例。`down` 先等待最多 30 秒协作退出；macOS 确认服务锁释放返回 OFFLINE，Windows 按下述 Job 核验继续确认。无法确认时返回 STOP_PENDING 和退出码 3。配置不匹配、陈旧或未知身份不会用于发送停止请求，也不会按猜测的 PID 终止进程。
 
-此命令保留排空标记，后续启动仍需显式 resume 才恢复领取。返回结果的 `execution_state=NOT_INSPECTED` 表示尚未证明所有计算后代退出和数据库状态收敛；不能直接作为升级许可。超时强制终止和 Windows 完整后代退出确认仍待完成。
+此命令保留排空标记，后续启动仍需显式 resume 才恢复领取。返回结果的 `execution_state=NOT_INSPECTED` 表示尚未证明所有计算后代退出和数据库状态收敛；不能直接作为升级许可。Windows 超时强制终止与 Job 计数确认已接入，运行端实测和数据库状态收敛仍待完成。
 
 
 ### 根运维入口
@@ -263,3 +263,8 @@ Windows 使用独立解释器与配置；`up` 可替换为 `down`、`status`、`
 路径须替换为本机实际独立环境与配置的绝对路径。`logs` 可指定 `-Tail 1..1000`。bootstrap 仍使用原来的 `-CondaExecutable`；运行命令不创建或安装环境。Trainer 不接受生产环境、交易模式或账户参数，普通生产 up/down 不代管 Trainer。
 
 macOS 对应入口为 `./ops/quantx.sh status --component trainer --trainer-python /实际路径/quantx-train/bin/python --trainer-config /实际路径/trainer.toml`，日志行数使用 `--tail`。路由在普通服务状态目录和进程管理之前返回；两端均使用 Python `-I` 隔离搜索路径，应用再次校验真实 Conda、代码根目录和开发配置身份。
+
+
+Windows `serve` 使用绑定实例标识的全局命名 Job，命名冲突拒绝启动，不打开并修改既有 Job。Windows `down` 在发送停止请求前打开该 Job，通过同一进程句柄核对创建时间和 Job 归属。协作宽限期后终止已核验的 Job，再等待最多 5 秒；仅活动进程数归零且服务锁释放时返回 `execution_state=GROUP_EXITED`，同时保留 `database_state=NOT_RECONCILED`。Job 不存在、身份/归属不明、查询/终止失败或计数未归零都保持待确认；不会把 API 接受终止当作退出证明。
+
+命名与计数语义依据 [CreateJobObjectW](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw) 和 [Job 基本统计](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information)。真实 Windows 身份核验、组终止和计数归零测试位于 `tests/trainer/test_windows_service_job.py`，当前 macOS 未执行；不能据本地替身测试宣称运行端退出验收完成。

@@ -39,6 +39,8 @@ def stop_service(config, config_path: Path, *, stop_seconds=30.0):
     if status["service"] != "ALIVE":
       return pending
     instance = status["instance_id"]
+    if sys.platform == "win32":
+      return _stop_windows_service(config, config_path, instance, stop_seconds)
     request_stop(config.state_root / "service", instance)
     deadline = time.monotonic() + stop_seconds
     while True:
@@ -49,6 +51,35 @@ def stop_service(config, config_path: Path, *, stop_seconds=30.0):
         return pending
       if time.monotonic() >= deadline:
         return pending
+      time.sleep(0.1)
+
+
+def _stop_windows_service(config, config_path, instance, grace_seconds):
+  from quantx_trainer.service_stop import request_stop
+  from quantx_trainer.windows_service_job import open_service_job
+
+  pending = {"service": "STOP_PENDING", "execution_state": "NOT_INSPECTED"}
+  with open_service_job(config.state_root / "service", instance) as job:
+    request_stop(config.state_root / "service", instance)
+    deadline = time.monotonic() + grace_seconds
+    forced = False
+    while True:
+      active = job.active_processes()
+      status = service_status(config.state_root, config_path)
+      if active == 0 and status["service"] == "OFFLINE":
+        return {
+          "service": "OFFLINE",
+          "execution_state": "GROUP_EXITED",
+          "database_state": "NOT_RECONCILED",
+        }
+      if status.get("instance_id", instance) != instance:
+        return pending
+      if time.monotonic() >= deadline:
+        if forced:
+          return pending
+        job.terminate()
+        forced = True
+        deadline = time.monotonic() + 5
       time.sleep(0.1)
 
 

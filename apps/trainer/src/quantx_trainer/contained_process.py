@@ -52,7 +52,7 @@ class _ExtendedLimits(ctypes.Structure):
   ]
 
 
-def _enter_job(kernel=None):
+def _enter_job(kernel=None, *, name=None):
   if kernel is None:
     if sys.platform != "win32":
       raise RuntimeError("WINDOWS_CONTAINMENT_REQUIRED")
@@ -66,13 +66,17 @@ def _enter_job(kernel=None):
     "GetCurrentProcess": ([], ctypes.c_void_p),
     "AssignProcessToJobObject": ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int),
     "CloseHandle": ([ctypes.c_void_p], ctypes.c_int),
+    "GetLastError": ([], ctypes.c_uint32),
   }
-  for name, (arguments, result) in signatures.items():
-    function = getattr(kernel, name)
+  for method, (arguments, result) in signatures.items():
+    function = getattr(kernel, method)
     function.argtypes, function.restype = arguments, result
-  handle = kernel.CreateJobObjectW(None, None)
+  handle = kernel.CreateJobObjectW(None, name)
   if not handle:
     raise RuntimeError("WINDOWS_JOB_CREATE_FAILED")
+  if name is not None and kernel.GetLastError() == 183:
+    kernel.CloseHandle(handle)
+    raise RuntimeError("WINDOWS_JOB_ALREADY_EXISTS")
   limits = _ExtendedLimits()
   limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE only.
   if not kernel.SetInformationJobObject(
