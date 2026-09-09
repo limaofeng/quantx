@@ -50,6 +50,7 @@ def test_input_preparation_tracks_real_supervisor_lifetime(tmp_path):
     assert evidence.inspect_input_preparation(path, **args) == "LIVE"
     process.terminate()
     process.wait(timeout=5)
+
     assert evidence.inspect_input_preparation(path, **args) == "EXITED"
     # The same record cannot justify restarting a possibly spawned child.
     assert evidence.inspect_execution(path, **args) == "UNKNOWN"
@@ -59,6 +60,31 @@ def test_input_preparation_tracks_real_supervisor_lifetime(tmp_path):
     if process.poll() is None:
       process.terminate()
     process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("fault", [None, "owner", "request", "supervisor", "compute"])
+def test_only_own_input_attempt_can_record_completion(tmp_path, fault):
+  request = tmp_path / "request.json"
+  request.write_text("{}")
+  path = tmp_path / "input.json"
+  args = dict(run_id="run", owner="owner", request=request)
+  evidence.begin_execution(path, **args)
+  value = json.loads(path.read_text())
+  if fault == "owner":
+    args["owner"] = "other"
+  elif fault == "request":
+    request.write_text("changed")
+  elif fault == "supervisor":
+    value["supervisor"]["pid"] += 1
+  elif fault == "compute":
+    value["state"] = "RUNNING"
+  path.write_text(json.dumps(value))
+  before = path.read_bytes()
+  assert evidence.finish_input_preparation(path, **args) is (fault is None)
+  if fault:
+    assert path.read_bytes() == before
+  else:
+    assert evidence.inspect_input_preparation(path, **args) == "EXITED"
 
 
 def test_live_orphan_is_not_lost_after_supervisor_restart(execution, monkeypatch):

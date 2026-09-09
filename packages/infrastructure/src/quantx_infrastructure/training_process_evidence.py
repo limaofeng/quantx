@@ -183,11 +183,30 @@ def inspect_input_preparation(
   """Inspect a supervisor-only stage; caller must exclude any compute record."""
   try:
     value = _read(path, run_id, owner, request)
-    if value["state"] != "STARTING" or not isinstance(value.get("supervisor"), dict):
+    if not isinstance(value.get("supervisor"), dict):
+      return "UNKNOWN"
+    if value["state"] == "EXITED":
+      return "EXITED" if type(value.get("returncode")) is int and value["returncode"] == 0 else "UNKNOWN"
+    if value["state"] != "STARTING":
       return "UNKNOWN"
     return _identity_state(value["supervisor"])
   except Exception:
     return "UNKNOWN"
+
+
+def finish_input_preparation(path: Path, *, run_id: str, owner: str, request: Path) -> bool:
+  """Record that this supervisor has joined all work in its input attempt."""
+  try:
+    value = _read(path, run_id, owner, request)
+    supervisor = value.get("supervisor")
+    if (not isinstance(supervisor, dict) or supervisor.get("pid") != os.getpid()
+        or _identity_state(supervisor) != "LIVE" or value["state"] != "STARTING"):
+      return False
+    value.update(state="EXITED", returncode=0)
+    _replace(path, value)
+    return True
+  except Exception:
+    return False
 
 
 def local_success_recorded(path: Path, *, run_id: str, owner: str, request: Path) -> bool:

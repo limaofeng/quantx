@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -38,6 +39,7 @@ from quantx_infrastructure.training_host_guard import (
 )
 from quantx_infrastructure.training_process_evidence import (
   begin_execution,
+  finish_input_preparation,
   inspect_execution,
   inspect_input_preparation,
   record_exit,
@@ -686,6 +688,25 @@ def _prepare_execution(run_id: str, owner: str) -> None:
   begin_execution(preparation, run_id=run_id, owner=owner, request=request)
 
 
+@contextmanager
+def _input_attempt(logger):
+  prepared = []
+
+  def prepare(run_id, owner):
+    _prepare_execution(run_id, owner)
+    prepared.append((run_id, owner))
+
+  try:
+    yield prepare
+  finally:
+    # Input transfer helpers join their I/O threads before returning/raising.
+    # Compute evidence, if present, still excludes input-only recovery.
+    for run_id, owner in prepared:
+      record, request = _input_preparation_paths(control_root() / run_id, owner)
+      if not finish_input_preparation(record, run_id=run_id, owner=owner, request=request):
+        logger.warning("INPUT_ATTEMPT_COMPLETION_EVIDENCE_UNAVAILABLE")
+
+
 async def recover_lost_training_runs(repository: Any, *, now: datetime | None = None) -> list[str]:
   """Converge only stopped supervisor/Research identities; unknown evidence stays pending."""
 
@@ -996,47 +1017,48 @@ async def stock_selection_training_dispatch_flow(
       or os.environ.get("PREFECT_FLOW_RUN_ID", "")
       or str(uuid.uuid4())
     )
-    run = await repository.claim_next_queued(
-      flow_id, timestamp, prepare_execution=_prepare_execution,
-    )
-    if run is None:
-      return {
-        "status": "IDLE",
-        "reason": "NO_QUEUED_RUN_OR_RUNNING_LIMIT",
-        "recovered_run_ids": lost,
-        "capability": heartbeat_details,
-      }
-    spec = await repository.get_spec(str(run.spec_id))
-    dataset = (
-      await repository.get_dataset(str(spec.dataset_version))
-      if spec is not None
-      else None
-    )
-    if spec is None or dataset is None:
-      await repository.fail_run(
-        str(run.run_id),
-        expected_flow_run_id=flow_id,
-        error_code="TRAINING_EVIDENCE_MISSING",
-        error_message="immutable training spec or certified dataset is missing",
-        completed_at=timestamp,
+    with _input_attempt(logger) as prepare:
+      run = await repository.claim_next_queued(
+        flow_id, timestamp, prepare_execution=prepare,
       )
-      return {
-        "status": "FAILED",
-        "run_id": str(run.run_id),
-        "error_code": "TRAINING_EVIDENCE_MISSING",
-      }
-    logger.info("开始隔离次日上涨概率训练: run_id=%s", run.run_id)
-    result = await _run_claimed_job(
-      repository,
-      run,
-      spec,
-      dataset,
-      capability=heartbeat_details,
-      poll_interval_seconds=poll_interval_seconds,
-    )
-    result["recovered_run_ids"] = lost
-    result["capability"] = heartbeat_details
-    return result
+      if run is None:
+        return {
+          "status": "IDLE",
+          "reason": "NO_QUEUED_RUN_OR_RUNNING_LIMIT",
+          "recovered_run_ids": lost,
+          "capability": heartbeat_details,
+        }
+      spec = await repository.get_spec(str(run.spec_id))
+      dataset = (
+        await repository.get_dataset(str(spec.dataset_version))
+        if spec is not None
+        else None
+      )
+      if spec is None or dataset is None:
+        await repository.fail_run(
+          str(run.run_id),
+          expected_flow_run_id=flow_id,
+          error_code="TRAINING_EVIDENCE_MISSING",
+          error_message="immutable training spec or certified dataset is missing",
+          completed_at=timestamp,
+        )
+        return {
+          "status": "FAILED",
+          "run_id": str(run.run_id),
+          "error_code": "TRAINING_EVIDENCE_MISSING",
+        }
+      logger.info("开始隔离次日上涨概率训练: run_id=%s", run.run_id)
+      result = await _run_claimed_job(
+        repository,
+        run,
+        spec,
+        dataset,
+        capability=heartbeat_details,
+        poll_interval_seconds=poll_interval_seconds,
+      )
+      result["recovered_run_ids"] = lost
+      result["capability"] = heartbeat_details
+      return result
 
 
 @flow(name="stock-selection-training-capability", retries=0)
