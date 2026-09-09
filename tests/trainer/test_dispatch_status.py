@@ -116,13 +116,74 @@ async def test_actual_dispatch_records_resource_rejection_before_claim(
 def test_cross_dispatch_or_unrecognized_reason_is_unknown(tmp_path, monkeypatch):
   config = tmp_path / "config.toml"
   config.write_text("fixture")
-  monkeypatch.setattr(runtime, "current_config", lambda: SimpleNamespace(state_root=tmp_path))
+  monkeypatch.setattr(
+    runtime, "current_config", lambda: SimpleNamespace(state_root=tmp_path)
+  )
   monkeypatch.setattr(module.time, "time", lambda: 100)
-  module.DispatchObservation(config, "training").record({"status": "QUEUED", "reason": "TRAINER_DRAINING"})
+  module.DispatchObservation(config, "training").record(
+    {"status": "QUEUED", "reason": "TRAINER_DRAINING"}
+  )
   original = tmp_path / "observations/training-dispatch.json"
-  (tmp_path / "observations/preparation-dispatch.json").write_bytes(original.read_bytes())
-  assert module.read_dispatch_status(tmp_path, config, "preparation", now=110) == {"state": "UNKNOWN"}
+  (tmp_path / "observations/preparation-dispatch.json").write_bytes(
+    original.read_bytes()
+  )
+  assert module.read_dispatch_status(tmp_path, config, "preparation", now=110) == {
+    "state": "UNKNOWN"
+  }
   value = json.loads(original.read_bytes())
   value["decision"]["reason"] = "password=secret /private/path"
   original.write_text(json.dumps(value))
-  assert module.read_dispatch_status(tmp_path, config, "training", now=110) == {"state": "UNKNOWN"}
+  assert module.read_dispatch_status(tmp_path, config, "training", now=110) == {
+    "state": "UNKNOWN"
+  }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "reason",
+  ["RUNNING_TRAINING_EXISTS", "NO_CLAIMABLE_QUEUED_RUN", "CLAIM_INTEGRITY_CONFLICT"],
+)
+async def test_dispatch_reports_claim_transaction_outcome_without_starting_compute(
+  tmp_path, monkeypatch, reason
+):
+  from quantx_infrastructure.repositories.stock_selection_training_repository import (
+    TrainingClaimRejection,
+  )
+  from quantx_trainer import training_flow as training
+
+  config = tmp_path / "config.toml"
+  config.write_text("fixture")
+  settings = SimpleNamespace(state_root=tmp_path)
+  monkeypatch.setattr(runtime, "current_config", lambda: settings)
+  monkeypatch.setattr(training, "current_config", lambda: settings)
+
+  @asynccontextmanager
+  async def session(path):
+    yield object()
+
+  repository = SimpleNamespace(
+    get_execution_capability=AsyncMock(return_value={"cpu_available": True}),
+    claim_next_queued=AsyncMock(return_value=TrainingClaimRejection(reason)),
+  )
+  execute = AsyncMock(side_effect=AssertionError("rejected claim cannot compute"))
+  monkeypatch.setattr(training, "training_session", session)
+  monkeypatch.setattr(
+    training, "StockSelectionTrainingRepository", lambda db: repository
+  )
+  monkeypatch.setattr(training, "get_run_logger", lambda: SimpleNamespace())
+  monkeypatch.setattr(
+    training, "recover_lost_training_runs", AsyncMock(return_value=[])
+  )
+  monkeypatch.setattr(training, "_host_admission_reason", lambda: None)
+  monkeypatch.setattr(training, "_run_claimed_job", execute)
+  result = await training.stock_selection_training_dispatch_flow.fn(
+    config_path=str(config)
+  )
+  assert result["reason"] == reason
+  assert result["status"] == (
+    "IDLE" if reason == "NO_CLAIMABLE_QUEUED_RUN" else "QUEUED"
+  )
+  execute.assert_not_awaited()
+  value = module.read_dispatch_status(tmp_path, config, "training")
+  assert value["state"] == "FRESH"
+  assert value["decision"]["reason"] == reason

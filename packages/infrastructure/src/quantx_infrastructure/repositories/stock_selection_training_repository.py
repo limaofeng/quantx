@@ -12,6 +12,7 @@ import math
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
 
 from quantx_contracts.training_bundle import TrainingBundle
@@ -27,6 +28,15 @@ from quantx_infrastructure.models.stock_selection import (
   StockSelectionTrainingRun,
   StockSelectionTrainingSpec,
 )
+
+
+class TrainingClaimRejection(str, Enum):
+  """What the claim transaction actually observed; never inferred afterward."""
+
+  RUNNING_TRAINING_EXISTS = "RUNNING_TRAINING_EXISTS"
+  NO_CLAIMABLE_QUEUED_RUN = "NO_CLAIMABLE_QUEUED_RUN"
+  CLAIM_INTEGRITY_CONFLICT = "CLAIM_INTEGRITY_CONFLICT"
+
 
 COMPONENT_NAME = "stock-selection-training"
 HEARTBEAT_MAX_AGE_SECONDS = 180
@@ -1173,7 +1183,7 @@ class StockSelectionTrainingRepository:
     now: datetime | None = None,
     *,
     prepare_execution: Callable[[str, str], None] | None = None,
-  ) -> StockSelectionTrainingRun | None:
+  ) -> StockSelectionTrainingRun | TrainingClaimRejection:
     owner = str(prefect_flow_run_id or "").strip()
     if not owner or len(owner) > 128:
       raise TrainingRepositoryError("claim requires a non-empty execution identity of at most 128 characters")
@@ -1188,7 +1198,7 @@ class StockSelectionTrainingRepository:
       ).scalars().all()
     )
     if running:
-      return None
+      return TrainingClaimRejection.RUNNING_TRAINING_EXISTS
     result = await self.db.execute(
       select(StockSelectionTrainingRun)
       .where(
@@ -1204,7 +1214,7 @@ class StockSelectionTrainingRepository:
     )
     row = result.scalar_one_or_none()
     if row is None:
-      return None
+      return TrainingClaimRejection.NO_CLAIMABLE_QUEUED_RUN
     if prepare_execution is not None:
       try:
         # Persist local recovery evidence while the queued row is locked and
@@ -1225,7 +1235,7 @@ class StockSelectionTrainingRepository:
       # PostgreSQL's partial unique index is the database-level arbiter when
       # two workers race between the RUNNING read and QUEUED claim.
       await self.db.rollback()
-      return None
+      return TrainingClaimRejection.CLAIM_INTEGRITY_CONFLICT
     await self.db.refresh(row)
     return _normalize_row_timestamps(row)
 
@@ -1633,6 +1643,7 @@ __all__ = [
   "COMPONENT_NAME",
   "HEARTBEAT_MAX_AGE_SECONDS",
   "StockSelectionTrainingRepository",
+  "TrainingClaimRejection",
   "TrainingNotFound",
   "TrainingRepositoryError",
   "TrainingStateConflict",

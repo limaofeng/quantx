@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from prefect import flow, get_run_logger
 from quantx_infrastructure.repositories.stock_selection_training_repository import (
   StockSelectionTrainingRepository,
+  TrainingClaimRejection,
   TrainingStateConflict,
 )
 from quantx_infrastructure.training_dataset_store import (
@@ -1028,10 +1029,10 @@ async def stock_selection_training_dispatch_flow(
         )
       except TrainerAdmissionClosed as exc:
         return observation.record({"status": "QUEUED", "reason": str(exc)})
-      if run is None:
+      if isinstance(run, TrainingClaimRejection):
         return observation.record({
-          "status": "IDLE",
-          "reason": "NO_QUEUED_RUN_OR_RUNNING_LIMIT",
+          "status": "IDLE" if run is TrainingClaimRejection.NO_CLAIMABLE_QUEUED_RUN else "QUEUED",
+          "reason": run.value,
           "recovered_run_ids": lost,
           "capability": heartbeat_details,
         })

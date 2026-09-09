@@ -16,6 +16,7 @@ from quantx_infrastructure.models.stock_selection import (
 )
 from quantx_infrastructure.repositories.stock_selection_training_repository import (
   StockSelectionTrainingRepository,
+  TrainingClaimRejection,
   TrainingRepositoryError,
   TrainingStateConflict,
   _safe_error_message,
@@ -429,7 +430,7 @@ async def test_claim_progress_terminal_and_optimistic_lock(session_factory) -> N
     claimed = await repository.claim_next_queued("prefect-1", now)
     assert claimed is not None
     assert claimed.status == "RUNNING"
-    assert await repository.claim_next_queued("prefect-2", now) is None
+    assert await repository.claim_next_queued("prefect-2", now) is TrainingClaimRejection.RUNNING_TRAINING_EXISTS
     with pytest.raises(TrainingStateConflict):
       await repository.update_progress(
         claimed.run_id,
@@ -686,3 +687,40 @@ async def test_stopped_service_reconciliation_requeues_confirmed_input_attempt(s
     row = await repo.get_run("reconcile-run")
     assert row.status == "QUEUED"
     assert row.prefect_flow_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_claim_reports_no_claimable_rows_without_calling_prepare(session_factory):
+  from unittest.mock import Mock
+
+  prepare = Mock()
+  async with session_factory() as db:
+    repo = StockSelectionTrainingRepository(db)
+    assert await repo.claim_next_queued("owner", prepare_execution=prepare) is TrainingClaimRejection.NO_CLAIMABLE_QUEUED_RUN
+    await repo.certify_dataset(DATASET)
+    spec = await repo.create_spec(spec_values())
+    row = await repo.create_run(run_values(spec.spec_id, "cancel-pending", "cancel-pending-idem"))
+    row.cancel_requested_at = datetime.now(timezone.utc)
+    await db.commit()
+    assert await repo.claim_next_queued("owner", prepare_execution=prepare) is TrainingClaimRejection.NO_CLAIMABLE_QUEUED_RUN
+    prepare.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_claim_integrity_conflict_rolls_back_without_starting_run(session_factory, monkeypatch):
+  from unittest.mock import Mock
+
+  from sqlalchemy.exc import IntegrityError
+
+  async with session_factory() as db:
+    repo = StockSelectionTrainingRepository(db)
+    await repo.certify_dataset(DATASET)
+    spec = await repo.create_spec(spec_values())
+    await repo.create_run(run_values(spec.spec_id, "conflict-run", "conflict-idem"))
+    prepare = Mock()
+    monkeypatch.setattr(db, "commit", AsyncMock(side_effect=IntegrityError("claim", {}, Exception("conflict"))))
+    result = await repo.claim_next_queued("owner", prepare_execution=prepare)
+    assert result is TrainingClaimRejection.CLAIM_INTEGRITY_CONFLICT
+    row = await repo.get_run("conflict-run")
+    assert row.status == "QUEUED" and row.prefect_flow_run_id is None
+    prepare.assert_called_once_with("conflict-run", "owner")
