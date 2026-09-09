@@ -655,3 +655,46 @@ async def test_accepted_entry_retry_recovers_without_reserving_cash_again(capaci
   assert (
     await capacity_db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 1
   )
+
+
+@pytest.mark.parametrize(
+  "expected",
+  [
+    {"expected_snapshot_id": "previous"},
+    {"expected_snapshot_hash": "0" * 64},
+  ],
+)
+async def test_live_capacity_rejects_explicit_old_snapshot_cut(capacity_db, expected):
+  control = await snapshot(capacity_db)
+  with pytest.raises(ValueError, match="ACCOUNT_CAPACITY_SNAPSHOT_CHANGED"):
+    await AccountCapacityService(capacity_db).read(
+      control, instrument_code="600000.SH", **expected
+    )
+
+
+async def test_live_capacity_refresh_does_not_compare_identity_map_object_to_itself(
+  capacity_db,
+):
+  from sqlalchemy import update
+
+  control = await snapshot(capacity_db)
+  await capacity_db.execute(
+    update(AccountExecutionControl)
+    .where(AccountExecutionControl.account_id == "account")
+    .values(last_snapshot_id="new-cut")
+    .execution_options(synchronize_session=False)
+  )
+  assert control.last_snapshot_id == "snapshot"
+  with pytest.raises(ValueError, match="ACCOUNT_CAPACITY_SNAPSHOT_CHANGED"):
+    await AccountCapacityService(capacity_db).read(control, instrument_code="600000.SH")
+
+
+async def test_live_capacity_accepts_exact_snapshot_cut(capacity_db):
+  control = await snapshot(capacity_db)
+  capacity = await AccountCapacityService(capacity_db).read(
+    control,
+    instrument_code="600000.SH",
+    expected_snapshot_id=control.last_snapshot_id,
+    expected_snapshot_hash=control.last_snapshot_hash,
+  )
+  assert capacity.snapshot_id == "snapshot"

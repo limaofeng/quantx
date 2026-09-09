@@ -617,17 +617,29 @@ class AccountCapacityService:
     if account_id is not None and account_id != control.account_id:
       raise ValueError("ACCOUNT_CAPACITY_SCOPE_INVALID")
     account_id = str(control.account_id)
+    # Capture before refreshing: SQLAlchemy may return the caller's same object.
+    observed_snapshot_id = str(control.last_snapshot_id or "")
+    observed_snapshot_hash = str(control.last_snapshot_hash or "").lower()
     locked_control = await self.db.get(
       AccountExecutionControl,
       account_id,
       with_for_update=lock_rows,
+      populate_existing=True,
     )
     if locked_control is None:
       raise ValueError("ACCOUNT_CAPACITY_CONTROL_MISSING:账户执行控制不存在")
     if (
-      str(locked_control.last_snapshot_id or "") != str(control.last_snapshot_id or "")
-      or str(locked_control.last_snapshot_hash or "").lower()
-      != str(control.last_snapshot_hash or "").lower()
+      str(locked_control.last_snapshot_id or "") != observed_snapshot_id
+      or str(locked_control.last_snapshot_hash or "").lower() != observed_snapshot_hash
+      or (
+        expected_snapshot_id is not None
+        and str(locked_control.last_snapshot_id or "") != expected_snapshot_id
+      )
+      or (
+        expected_snapshot_hash is not None
+        and str(locked_control.last_snapshot_hash or "").lower()
+        != expected_snapshot_hash.lower()
+      )
     ):
       raise ValueError("ACCOUNT_CAPACITY_SNAPSHOT_CHANGED:账户快照水位已变化")
     payload = await load_authoritative_account_snapshot(self.db, locked_control)
