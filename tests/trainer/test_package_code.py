@@ -348,3 +348,59 @@ def test_packaged_runtime_never_reports_unknown_source_as_clean(
       git_state(output)
   else:
     assert git_state(output)["dirty"] is True
+
+
+def test_real_editable_metadata_is_not_source_but_injected_files_are(tmp_path):
+  import subprocess
+  import sys
+
+  from quantx_research.packaged_source import packaged_source_state
+
+  repository = Path(__file__).resolve().parents[2]
+  source = tmp_path / "editable.tar"
+  with tarfile.open(source, "w") as tar:
+    for name in package.REQUIRED_FILES:
+      data = (
+        (repository / name).read_bytes()
+        if name.endswith("pyproject.toml")
+        else b"pass\n"
+      )
+      info = tarfile.TarInfo(name)
+      info.size = len(data)
+      info.mode = 0o644
+      tar.addfile(info, io.BytesIO(data))
+  bundle = tmp_path / "bundle"
+  bundle.mkdir()
+  manifest = package._write_bundle(source, bundle, "a" * 40)
+  (bundle / "manifest.json").write_text(json.dumps(manifest))
+  code = tmp_path / "code"
+  package.unpack_code(bundle, manifest_digest(bundle), code)
+  metadata = tmp_path / "metadata"
+  metadata.mkdir()
+  subprocess.run(
+    [
+      sys.executable,
+      "-I",
+      "-c",
+      "import setuptools.build_meta as backend; import sys; output = sys.argv[1]; backend.get_requires_for_build_editable(); backend.build_editable(output)",
+      str(metadata),
+    ],
+    cwd=code / "apps/trainer",
+    check=True,
+    capture_output=True,
+    timeout=30,
+  )
+  info = code / "apps/trainer/src/quantx_trainer.egg-info"
+  assert (info / "PKG-INFO").is_file()
+  assert (info / "entry_points.txt").is_file()
+  assert packaged_source_state(code)["dirty"] is False
+  for relative in ("injected.py", "UNKNOWN", "nested/PKG-INFO"):
+    injected = info / relative
+    injected.parent.mkdir(exist_ok=True)
+    injected.write_text("unexpected")
+    assert packaged_source_state(code)["dirty"] is True
+    injected.unlink()
+  foreign = code / "apps/trainer/src/other.egg-info"
+  foreign.mkdir()
+  (foreign / "PKG-INFO").write_text("foreign metadata")
+  assert packaged_source_state(code)["dirty"] is True
