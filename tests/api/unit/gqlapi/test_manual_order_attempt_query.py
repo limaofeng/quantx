@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.schemas import trading_schema
 from quantx_api.gqlapi.schemas.trading_schema import TradingQuery
 from quantx_api.gqlapi.types.trading_types import (
@@ -12,6 +11,7 @@ from quantx_api.gqlapi.types.trading_types import (
   ManualOrderExecutionMode,
   ManualOrderSide,
 )
+from quantx_infrastructure.auth.tokens import utcnow
 
 
 def _info() -> SimpleNamespace:

@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
 import pytest
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.passwords import hash_password, verify_password
-from quantx_api.auth.tokens import decode_access_token, issue_access_token
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import decode_access_token, issue_access_token
 from quantx_infrastructure.config.settings import Settings
 
 

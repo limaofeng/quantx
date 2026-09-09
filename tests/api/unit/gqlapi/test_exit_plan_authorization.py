@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api import agent_api
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi import exit_plan_authorization, trade_approval
 from quantx_api.gqlapi.exit_plan_authorization import (
@@ -39,6 +38,7 @@ from quantx_domain.trading.exit_plan import (
   ExitRuleSpec,
   ExitRuleType,
 )
+from quantx_infrastructure.auth.errors import AuthError
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.account import Account

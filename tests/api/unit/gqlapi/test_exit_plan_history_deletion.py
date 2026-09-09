@@ -3,12 +3,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.operation_policy import operation_policy
 from quantx_api.gqlapi.resolvers import liquidation as resolver_module
 from quantx_api.gqlapi.resolvers.liquidation import LiquidationResolver
 from quantx_api.gqlapi.schema import schema
 from quantx_api.gqlapi.types import MessageResponse
+from quantx_infrastructure.auth.tokens import utcnow
 
 
 @pytest.mark.asyncio

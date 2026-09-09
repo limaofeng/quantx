@@ -3,11 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.resolvers.strategies import StrategyResolver
 from quantx_api.gqlapi.schemas.strategy_schema import StrategyMutation, StrategyQuery
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import utcnow
 
 
 def _info(*, native_session: bool) -> SimpleNamespace:

@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import pytest
 import strawberry
-from quantx_api.auth.errors import unauthenticated
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.app import AuthenticatedGraphQLRouter
 from quantx_api.gqlapi.operation_policy import operation_policy
@@ -13,6 +12,7 @@ from quantx_api.gqlapi.security import (
   required_permission,
   required_permissions,
 )
+from quantx_infrastructure.auth.errors import unauthenticated
 from starlette.websockets import WebSocketState
 
 

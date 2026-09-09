@@ -4,7 +4,7 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException
 from quantx_api import market_sync_api
-from quantx_api.auth.errors import forbidden
+from quantx_infrastructure.auth.errors import forbidden
 
 
 async def test_market_sync_evidence_requires_permission_and_closes_store(monkeypatch):

@@ -141,6 +141,7 @@ GraphQL 写权限按领域拆分为 `portfolio:write`、`market:write`、
 POST   /auth/agent/enrollments
 POST   /auth/agent/enrollments/exchange
 POST   /auth/agent/token
+POST   /auth/agent/history-token
 DELETE /auth/agent/devices/{device_id}
 WS     /ws/agent
 PUT    /agent/market-data/{request_id}/chunks/{chunk_index}

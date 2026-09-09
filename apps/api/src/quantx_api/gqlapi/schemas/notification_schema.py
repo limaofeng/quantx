@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Optional
 
 import strawberry
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import require_signing_key
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from sqlalchemy.exc import SQLAlchemyError
 
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.service import AuthService
-from quantx_api.auth.tokens import require_signing_key
 from quantx_api.gqlapi.security import authorized_account_id, principal_from_context
 from quantx_api.gqlapi.types.notification_types import (
   NotificationEventRoute,

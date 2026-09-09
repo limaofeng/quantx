@@ -7,6 +7,7 @@ import logging
 import uuid
 from datetime import datetime
 
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
 from quantx_infrastructure.services.agent_session_guard import (
@@ -16,8 +17,6 @@ from quantx_infrastructure.services.agent_session_guard import (
   utc_iso,
 )
 from sqlalchemy import select
-
-from quantx_api.auth.tokens import utcnow
 
 API_INSTANCE_ID = str(uuid.uuid4())
 API_STARTED_AT: datetime = utcnow()

@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi import trade_approval
 from quantx_api.gqlapi.schemas.trading_schema import _manual_command_owner_id
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.models.agent_runtime import (
   PendingTradeOrder,
   StrategyRuntimeEvent,

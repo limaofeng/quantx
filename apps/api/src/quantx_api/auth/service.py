@@ -8,6 +8,17 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable, Optional, Tuple
 
+from quantx_infrastructure.auth.errors import AuthError, unauthenticated
+from quantx_infrastructure.auth.tokens import (
+  AccessClaims,
+  decode_access_token,
+  digest_refresh_token,
+  issue_access_token,
+  issue_refresh_token,
+  refresh_expiry,
+  require_signing_key,
+  utcnow,
+)
 from quantx_infrastructure.config.settings import Settings, settings
 from quantx_infrastructure.models.auth import (
   AuthAuditEvent,
@@ -19,20 +30,9 @@ from quantx_infrastructure.models.auth import (
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .errors import AuthError, unauthenticated
 from .passwords import hash_password, verify_password
 from .principal import Principal
 from .rate_limit import login_rate_limiter
-from .tokens import (
-  AccessClaims,
-  decode_access_token,
-  digest_refresh_token,
-  issue_access_token,
-  issue_refresh_token,
-  refresh_expiry,
-  require_signing_key,
-  utcnow,
-)
 
 logger = logging.getLogger(__name__)
 _DUMMY_PASSWORD_HASH = hash_password("quantx-dummy-password-never-used")

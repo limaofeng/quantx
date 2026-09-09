@@ -8,6 +8,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import List, Optional
 
+from quantx_infrastructure.auth.errors import AuthError
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.liquidation import (
@@ -33,8 +34,6 @@ from quantx_infrastructure.services.exit_plan_replay_service import (
 )
 from quantx_infrastructure.services.liquidation_service import LiquidationService
 from sqlalchemy import desc, select
-
-from quantx_api.auth.errors import AuthError
 
 from ..types import MessageResponse
 from ..types.liquidation_types import (

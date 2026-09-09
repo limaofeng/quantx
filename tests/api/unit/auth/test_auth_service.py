@@ -1,9 +1,9 @@
 import uuid
 
 import pytest
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.service import AuthService
-from quantx_api.auth.tokens import issue_access_token
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import issue_access_token
 from quantx_infrastructure.config.settings import Settings
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.auth import (
@@ -43,7 +43,13 @@ def _settings(**overrides) -> Settings:
     "auth_login_rate_limit_attempts": 20,
   }
   values.update(overrides)
-  return Settings(_env_file=None, **values)
+  # These SQLite auth fixtures exercise environment-dependent auth policy only.
+  # Validate a testing config, then select the policy branch without configuring
+  # production connections or bypassing runtime environment checks in application code.
+  policy_environment = values.pop("ENV")
+  return Settings(_env_file=None, ENV="testing", **values).model_copy(
+    update={"environment": policy_environment}
+  )
 
 
 @pytest.fixture

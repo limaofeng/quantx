@@ -13,6 +13,7 @@ from quantx_contracts import (
   ExecutionEnvironment,
   ExecutionOwnerType,
 )
+from quantx_infrastructure.auth.errors import AuthError
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.account import Account
@@ -40,7 +41,6 @@ from quantx_infrastructure.services.trade_command_service import (
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.service import AuthService
 

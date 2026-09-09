@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import FrozenSet, Optional, Tuple
 
-from .errors import forbidden
+from quantx_infrastructure.auth.errors import forbidden
 
 
 @dataclass(frozen=True)

@@ -11,6 +11,7 @@ from quantx_contracts.market_health import (
   MARKET_GATEWAY_HTTP_TIMEOUT_SECONDS,
   MarketGatewayHealth,
 )
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.data.market_stream_transport import (
   market_stream_store,
@@ -41,7 +42,6 @@ from quantx_infrastructure.services.trading_time_service import TradingTimeServi
 from sqlalchemy import select, text
 
 from quantx_api.agent_hub import agent_connection_hub
-from quantx_api.auth.tokens import utcnow
 
 HEARTBEAT_TTL = timedelta(seconds=90)
 RECONCILING_AGENT_STATUSES = frozenset({"RECONCILING", "RECONCILE_REQUIRED"})

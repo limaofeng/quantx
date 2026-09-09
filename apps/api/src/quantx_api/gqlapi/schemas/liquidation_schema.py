@@ -8,6 +8,7 @@ from typing import AsyncIterator, List, Optional
 
 import strawberry
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
+from quantx_infrastructure.auth.errors import AuthError, forbidden
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 from quantx_infrastructure.services.exit_plan_notifications import (
   EXIT_PLAN_UPDATE_CHANNEL,
@@ -15,8 +16,6 @@ from quantx_infrastructure.services.exit_plan_notifications import (
 from quantx_infrastructure.services.exit_plan_replay_projection_service import (
   exit_plan_replay_projection_service,
 )
-
-from quantx_api.auth.errors import AuthError, forbidden
 
 from ..exit_plan_authorization import (
   ExitPlanAuthorizationChallengeService,

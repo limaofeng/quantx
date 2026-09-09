@@ -8,6 +8,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
+from quantx_infrastructure.auth.agent_access import (
+  HISTORY_AGENT_SCOPE,
+  AuthenticatedAgentSession,
+  authenticate_agent_session,
+)
+from quantx_infrastructure.auth.errors import unauthenticated
+from quantx_infrastructure.auth.tokens import (
+  digest_refresh_token,
+  issue_access_token,
+  utcnow,
+)
 from quantx_infrastructure.config.settings import Settings, settings
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
@@ -23,14 +34,6 @@ from quantx_infrastructure.services.agent_session_guard import (
 )
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from quantx_api.auth.errors import unauthenticated
-from quantx_api.auth.tokens import (
-  decode_access_token,
-  digest_refresh_token,
-  issue_access_token,
-  utcnow,
-)
 
 
 @dataclass(frozen=True)
@@ -56,12 +59,6 @@ class AgentAccessGrant:
 class AgentHandoverCancellation:
   deleted_enrollment_count: int
   revoked_device_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class AuthenticatedAgentSession:
-  device: AgentDevice
-  expires_at: object
 
 
 class AgentAuthService:
@@ -268,9 +265,12 @@ class AgentAuthService:
     *,
     device_id: str,
     device_secret: str,
+    history: bool = False,
   ) -> AgentAccessGrant:
     result = await self.db.execute(
-      select(AgentDevice).where(AgentDevice.id == device_id)
+      select(AgentDevice)
+      .where(AgentDevice.id == device_id)
+      .execution_options(populate_existing=True)
     )
     device = result.scalar_one_or_none()
     if (
@@ -286,6 +286,7 @@ class AgentAuthService:
       device.user_id,
       device.id,
       self.settings,
+      scopes={HISTORY_AGENT_SCOPE} if history else None,
     )
     return AgentAccessGrant(
       access_token=token,
@@ -311,22 +312,11 @@ class AgentAuthService:
     token: str,
     expected_device_id: Optional[str] = None,
   ) -> AuthenticatedAgentSession:
-    claims = decode_access_token(token, self.settings)
-    if expected_device_id and claims.device_session_id != expected_device_id:
-      raise unauthenticated("Agent Token 与设备不匹配")
-    result = await self.db.execute(
-      select(AgentDevice).where(AgentDevice.id == claims.device_session_id)
-    )
-    device = result.scalar_one_or_none()
-    if (
-      device is None
-      or device.user_id != claims.user_id
-      or device.revoked_at is not None
-    ):
-      raise unauthenticated("Agent 设备已撤销或不存在")
-    return AuthenticatedAgentSession(
-      device=device,
-      expires_at=claims.expires_at,
+    return await authenticate_agent_session(
+      self.db,
+      self.settings,
+      token=token,
+      expected_device_id=expected_device_id,
     )
 
   async def revoke(self, *, device_id: str, user_id: str) -> bool:

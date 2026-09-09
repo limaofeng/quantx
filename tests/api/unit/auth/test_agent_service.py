@@ -1,7 +1,7 @@
 import pytest
 from quantx_api.auth.agent_service import AgentAuthService
-from quantx_api.auth.errors import AuthError
-from quantx_api.auth.tokens import utcnow
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.config.settings import Settings
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
@@ -191,3 +191,141 @@ async def test_cancel_handover_revokes_candidate_when_api_generation_changed(db)
   assert cancelled.revoked_device_ids == (replacement_credential.device_id,)
   assert current.revoked_at is None
   assert replacement.revoked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_history_token_is_separate_from_control_and_rechecks_revocation(db):
+  from quantx_infrastructure.auth.agent_access import authenticate_agent_session
+  from quantx_infrastructure.auth.tokens import decode_access_token
+  from sqlalchemy import update
+
+  settings = _settings()
+  service = AgentAuthService(db, settings)
+  enrollment = await service.create_enrollment(
+    user_id="user-1",
+    name="history",
+    authorized_account_ids=["account-1"],
+  )
+  credential = await service.exchange_enrollment(enrollment.code)
+  history = await service.issue_agent_token(
+    device_id=credential.device_id,
+    device_secret=credential.device_secret,
+    history=True,
+  )
+  control = await service.issue_agent_token(
+    device_id=credential.device_id,
+    device_secret=credential.device_secret,
+  )
+  assert decode_access_token(history.access_token, settings).scopes == frozenset(
+    {"agent:history"}
+  )
+  session = await authenticate_agent_session(
+    db, settings, token=history.access_token, history=True
+  )
+  assert session.device.id == credential.device_id
+  with pytest.raises(AuthError, match="用途"):
+    await service.authenticate_agent(token=history.access_token)
+  with pytest.raises(AuthError, match="用途"):
+    await authenticate_agent_session(
+      db, settings, token=control.access_token, history=True
+    )
+  with pytest.raises(AuthError, match="不匹配"):
+    await authenticate_agent_session(
+      db,
+      settings,
+      token=history.access_token,
+      expected_device_id="another-device",
+      history=True,
+    )
+  # Bypass identity-map synchronization, reproducing revocation by another process.
+  await db.execute(
+    update(AgentDevice)
+    .where(AgentDevice.id == credential.device_id)
+    .values(revoked_at=utcnow())
+    .execution_options(synchronize_session=False)
+  )
+  await db.commit()
+  with pytest.raises(AuthError, match="凭证"):
+    await service.issue_agent_token(
+      device_id=credential.device_id,
+      device_secret=credential.device_secret,
+      history=True,
+    )
+  with pytest.raises(AuthError, match="撤销"):
+    await authenticate_agent_session(
+      db, settings, token=history.access_token, history=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_history_auth_rejects_extra_scope_expiry_and_database_failure(
+  db, monkeypatch
+):
+  from unittest.mock import AsyncMock
+
+  from quantx_infrastructure.auth import tokens
+  from quantx_infrastructure.auth.agent_access import authenticate_agent_session
+  from sqlalchemy.exc import OperationalError
+
+  settings = _settings()
+  token, _ = tokens.issue_access_token(
+    "user-1", "device-1", settings, scopes={"agent:history", "orders:write"}
+  )
+  with pytest.raises(AuthError, match="用途"):
+    await authenticate_agent_session(db, settings, token=token, history=True)
+  token, _ = tokens.issue_access_token(
+    "user-1", "device-1", settings, scopes={"agent:history"}
+  )
+  original_time = tokens.time.time()
+  with monkeypatch.context() as patch:
+    patch.setattr(tokens.time, "time", lambda: original_time + 3600)
+    with pytest.raises(AuthError):
+      await authenticate_agent_session(db, settings, token=token, history=True)
+  monkeypatch.setattr(
+    db, "execute", AsyncMock(side_effect=OperationalError("", {}, Exception()))
+  )
+  with pytest.raises(OperationalError):
+    await authenticate_agent_session(db, settings, token=token, history=True)
+
+
+@pytest.mark.asyncio
+async def test_history_token_rest_endpoint_uses_device_credentials(db, monkeypatch):
+  import quantx_api.auth.router as router
+  from fastapi import FastAPI
+  from httpx import ASGITransport, AsyncClient
+  from quantx_infrastructure.auth.tokens import decode_access_token
+
+  settings = _settings()
+  service = AgentAuthService(db, settings)
+  enrollment = await service.create_enrollment(
+    user_id="user-1",
+    name="history",
+    authorized_account_ids=["account-1"],
+  )
+  credential = await service.exchange_enrollment(enrollment.code)
+  app = FastAPI()
+  app.include_router(router.auth_router)
+
+  async def database():
+    yield db
+
+  app.dependency_overrides[router._database] = database
+  monkeypatch.setattr(
+    router, "AgentAuthService", lambda session: AgentAuthService(session, settings)
+  )
+  async with AsyncClient(
+    transport=ASGITransport(app), base_url="http://test"
+  ) as client:
+    body = {"deviceId": credential.device_id, "deviceSecret": credential.device_secret}
+    response = await client.post("/auth/agent/history-token", json=body)
+    assert response.status_code == 200
+    assert decode_access_token(
+      response.json()["accessToken"], settings
+    ).scopes == frozenset({"agent:history"})
+    assert (
+      credential.device_secret not in response.text and "account-1" not in response.text
+    )
+    body["deviceSecret"] = "invalid" * 8
+    assert (
+      await client.post("/auth/agent/history-token", json=body)
+    ).status_code == 401

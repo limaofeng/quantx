@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.resolvers.strategies import StrategyResolver
 from quantx_api.gqlapi.schemas.strategy_schema import StrategyMutation
 from quantx_api.gqlapi.strategy_control import (
@@ -21,6 +20,7 @@ from quantx_api.gqlapi.types.strategy_types import (
   StrategyControlPreviewInput,
 )
 from quantx_contracts import PROTOCOL_VERSION
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.enums import StrategyRunMode, StrategyRunStatus
 

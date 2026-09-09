@@ -6,6 +6,8 @@ from typing import AsyncGenerator, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import get_async_db
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,10 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from quantx_api.agent_hub import agent_connection_hub
 
 from .agent_service import AgentAuthService
-from .errors import AuthError
 from .principal import Principal
 from .service import AuthService, SessionGrant
-from .tokens import utcnow
 
 _WEB_COOKIE_PATH = "/auth/web/session"
 
@@ -528,6 +528,26 @@ async def create_agent_token(
   try:
     grant = await AgentAuthService(db).issue_agent_token(
       device_id=payload.device_id,
+      device_secret=payload.device_secret.get_secret_value(),
+    )
+    return AgentTokenResponse(
+      access_token=grant.access_token,
+      access_token_expires_at=grant.expires_at.isoformat() + "Z",
+      device_id=grant.device.id,
+    )
+  except AuthError as exc:
+    raise _http_error(exc) from None
+
+
+@auth_router.post("/agent/history-token", response_model=AgentTokenResponse)
+async def create_agent_history_token(
+  payload: AgentTokenRequest,
+  db: AsyncSession = Depends(_database),
+) -> AgentTokenResponse:
+  try:
+    grant = await AgentAuthService(db).issue_agent_token(
+      device_id=payload.device_id,
+      history=True,
       device_secret=payload.device_secret.get_secret_value(),
     )
     return AgentTokenResponse(

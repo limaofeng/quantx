@@ -3,9 +3,9 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from quantx_infrastructure.auth.errors import AuthError
 from quantx_infrastructure.services.market_data_sync_audit import MarketDataSyncAudit
 
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.router import _principal
 

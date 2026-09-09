@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.resolvers.watchlist import WatchlistResolver
 from quantx_api.gqlapi.schemas.watchlist_schema import WatchlistMutation
@@ -14,6 +13,7 @@ from quantx_api.gqlapi.types.watchlist_types import (
   SaveWatchlistItemInput,
   WatchlistMutationResult,
 )
+from quantx_infrastructure.auth.errors import AuthError
 from quantx_infrastructure.services.watchlist_service import WatchlistService
 
 

@@ -4,9 +4,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.schemas import notification_schema
 from quantx_api.gqlapi.schemas.notification_schema import (
   NotificationMutation,
@@ -24,6 +22,8 @@ from quantx_api.notifications.service import (
   PushNotificationService,
   build_minimal_apns_payload,
 )
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.auth import (
   AuthDeviceSession,

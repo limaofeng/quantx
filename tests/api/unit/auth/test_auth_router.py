@@ -44,10 +44,15 @@ def _settings(**overrides) -> Settings:
     "auth_development_username": "ios-router-user",
   }
   values.update(overrides)
+  # These SQLite auth fixtures exercise environment-dependent auth policy only.
+  # Validate a testing config, then select the policy branch without configuring
+  # production connections or bypassing runtime environment checks in application code.
+  policy_environment = values.pop("ENV")
   return Settings(
     _env_file=None,
+    ENV="testing",
     **values,
-  )
+  ).model_copy(update={"environment": policy_environment})
 
 
 @pytest.mark.asyncio

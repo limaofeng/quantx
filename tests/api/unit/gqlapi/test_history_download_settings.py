@@ -3,9 +3,9 @@ from datetime import timedelta
 import pytest
 import strawberry
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.schemas import history_download_settings_schema as module
 from quantx_api.gqlapi.security import AuthorizationExtension
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.history_download_settings import (
   HistoryDownloadSettingsRecord,

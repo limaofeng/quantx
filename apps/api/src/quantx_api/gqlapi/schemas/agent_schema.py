@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import strawberry
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.core.data.market_stream_transport import (
   market_stream_store,
 )
@@ -26,7 +27,6 @@ from sqlalchemy import select
 
 from quantx_api.agent_hub import agent_connection_hub
 from quantx_api.auth.agent_service import AgentAuthService
-from quantx_api.auth.tokens import utcnow
 
 from ..security import principal_from_context
 from ..types.agent_types import (

@@ -17,6 +17,7 @@ from quantx_contracts import (
   ExecutionOwnerType,
 )
 from quantx_domain.clock import utcnow
+from quantx_infrastructure.auth.tokens import require_signing_key
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
@@ -41,7 +42,6 @@ from quantx_infrastructure.services.trade_confirmation_material import (
 from sqlalchemy import select
 
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import require_signing_key
 
 _CHALLENGE_METADATA_KEY = "mobile_trade_approval_challenge_v1"
 _MAX_CHALLENGE_LIFETIME = timedelta(seconds=60)

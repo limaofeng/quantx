@@ -9,6 +9,8 @@ import uuid
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import get_async_db
 from starlette.requests import HTTPConnection
@@ -17,10 +19,8 @@ from strawberry.dataloader import DataLoader
 from strawberry.exceptions import ConnectionRejectionError
 from strawberry.fastapi import GraphQLRouter
 
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.service import AuthService
-from quantx_api.auth.tokens import utcnow
 
 from .dataloaders.quote_loader import load_quotes
 from .performance import (

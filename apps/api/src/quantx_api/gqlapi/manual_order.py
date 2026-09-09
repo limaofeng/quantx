@@ -36,6 +36,7 @@ from quantx_domain.strategies.base import (
 from quantx_domain.trading.market_rules import AShareMarketRules, MarketDataSnapshot
 from quantx_domain.trading.order_sizer import OrderSizer
 from quantx_domain.trading.risk_checker import RiskAction, TradingRiskChecker
+from quantx_infrastructure.auth.errors import AuthError
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import (
@@ -57,7 +58,6 @@ from quantx_infrastructure.services.trading_time_service import TradingTimeServi
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.service import AuthService
 from quantx_api.manual_order_runtime import configured_manual_order_execution_mode

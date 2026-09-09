@@ -3,12 +3,12 @@ from datetime import timedelta
 import pytest
 import strawberry
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.security import (
   AuthorizationExtension,
   required_permission,
   required_permissions,
 )
+from quantx_infrastructure.auth.tokens import utcnow
 
 
 @strawberry.type

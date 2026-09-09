@@ -8,11 +8,11 @@ import uuid
 from typing import Any, Dict, Optional
 
 from graphql import GraphQLError
+from quantx_infrastructure.auth.errors import AuthError, unauthenticated
+from quantx_infrastructure.auth.tokens import utcnow
 from strawberry.extensions import SchemaExtension
 
-from quantx_api.auth.errors import AuthError, unauthenticated
 from quantx_api.auth.principal import Principal
-from quantx_api.auth.tokens import utcnow
 
 from .operation_policy import operation_policy
 

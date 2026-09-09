@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from typing import Iterable, Mapping, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.models.ios_notifications import (
   NOTIFICATION_ROUTE_TYPES,
   PUSH_CATEGORIES,
@@ -26,9 +28,6 @@ from quantx_infrastructure.services.ios_notification_enqueue_service import (
 )
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from quantx_api.auth.errors import AuthError
-from quantx_api.auth.tokens import utcnow
 
 DEFAULT_PUSH_PREFERENCES: Mapping[str, bool] = {
   "ACTION_REQUIRED": True,

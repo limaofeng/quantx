@@ -10,6 +10,8 @@ from quantx_contracts import (
   ExecutionEnvironment,
   ExecutionOwnerRef,
 )
+from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import (
   Instrument,
@@ -25,9 +27,7 @@ from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from sqlalchemy import and_, case, func, not_, or_, select
 
-from quantx_api.auth.errors import AuthError
 from quantx_api.auth.service import AuthService
-from quantx_api.auth.tokens import utcnow
 from quantx_api.manual_order_runtime import configured_manual_order_execution_mode
 
 from ..account_execution_control import (
