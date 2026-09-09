@@ -206,3 +206,96 @@ def test_upload_snapshot_cannot_skip_different_local_bytes():
   )
   with pytest.raises(ValueError, match="differs from local bytes"):
     HistoryPipeline._matching_chunks(snapshot, prepared)
+
+
+@pytest.mark.parametrize("lose_abort", [False, True])
+async def test_failed_native_is_confirmed_or_recovered_without_history_delivery(
+  tmp_path, lose_abort
+):
+  from unittest.mock import Mock
+
+  from quantx_qmt_agent.history_pipeline import HistoryPipeline
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.configuration = SimpleNamespace(
+    device_id=str(uuid4()), api_url="https://history.test"
+  )
+  runtime.journal = LocalJournal(tmp_path / "journal.sqlite")
+  runtime._market_spool_root = tmp_path / "spool"
+  runtime._market_spool_root.mkdir()
+  runtime._history_access_token = AsyncMock(return_value="history-only-token")
+  runtime._ensure_market_upload_state()
+  request = HistoryRequest(
+    request_id=uuid4(), payload=PAYLOAD, unit_count=1, completed_units=0
+  )
+  now = datetime.now(timezone.utc)
+  unit_payload = historical_work_units(PAYLOAD)[0]
+  permit = CollectionPermit(
+    permit_id=uuid4(),
+    device_id=runtime.configuration.device_id,
+    owner_epoch=1,
+    unit=CollectionUnit.from_payload(str(request.request_id), 0, unit_payload),
+    issued_at=now,
+    expires_at=now + timedelta(seconds=15),
+  )
+  events = []
+  lost = False
+
+  def stop(*, graceful):
+    assert not graceful and runtime._historical_worker_lock.locked()
+    events.append("STOPPED")
+
+  runtime._shutdown_historical_worker_sync = Mock(side_effect=stop)
+  runtime._collect_history_unit_sync = Mock(
+    side_effect=RuntimeError("native task failed")
+  )
+
+  def http(message):
+    nonlocal lost
+    assert message.method == "POST" and message.url.path.endswith("/receipts")
+    fact = json.loads(message.content)
+    events.append(fact["event"])
+    if fact["event"] == "ABORT":
+      assert (
+        runtime.journal.load_collection_abort(permit).model_dump(mode="json")
+        == fact["abort"]
+      )
+      if lose_abort and not lost:
+        lost = True
+        raise httpx.ReadError("Worker accepted but response lost")
+    return httpx.Response(
+      202,
+      json={
+        "permit_id": str(permit.permit_id),
+        "event": fact["event"],
+        "status": "ACCEPTED",
+      },
+    )
+
+  async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+    runtime._market_data_http_client = client
+    try:
+      await runtime._handle_history_work(request)
+      grant = HistoryGrant(permit=permit, state="ISSUED", unit_payload=unit_payload)
+      if lose_abort:
+        with pytest.raises(httpx.ReadError):
+          await runtime._handle_history_work(grant)
+      else:
+        await runtime._handle_history_work(grant)
+        assert request.request_id not in runtime._history_pipeline.active
+      assert events == ["START", "STOPPED", "ABORT"]
+      runtime.journal.connection.close()
+      runtime.journal = LocalJournal(runtime.journal.path)
+      runtime._history_pipeline = HistoryPipeline(runtime)
+      assert await runtime._history_pipeline.recover_retained_uploads() == {
+        str(request.request_id): "COLLECTION_FAILED"
+      }
+      assert events == ["START", "STOPPED", "ABORT"] + (["ABORT"] if lose_abort else [])
+      runtime._collect_history_unit_sync.assert_called_once()
+      runtime._shutdown_historical_worker_sync.assert_called_once()
+      assert await runtime._history_pipeline.recover_retained_uploads() == {
+        str(request.request_id): "COLLECTION_FAILED"
+      }
+      assert events.count("ABORT") == (2 if lose_abort else 1)
+    finally:
+      runtime.journal.connection.close()

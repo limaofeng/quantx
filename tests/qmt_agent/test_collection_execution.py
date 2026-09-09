@@ -10,6 +10,7 @@ import pytest
 from quantx_contracts.collection_permit import CollectionPermit, CollectionUnit
 from quantx_qmt_agent.collection_execution import (
   CollectionExecution,
+  CollectionFailed,
   CollectionOutcomeUnknown,
 )
 from quantx_qmt_agent.journal import LocalJournal
@@ -42,6 +43,8 @@ def execution(tmp_path):
     native_lock=asyncio.Lock(),
     reserve=Mock(),
     release=Mock(),
+    stop_native=Mock(),
+    abort=AsyncMock(),
     clock=lambda: NOW,
   )
   yield runner, permit
@@ -184,7 +187,7 @@ async def test_native_failure_is_not_automatically_repeated(execution):
   runner, permit = execution
   collect = Mock(side_effect=RuntimeError("native failed"))
   start, finish = AsyncMock(), AsyncMock()
-  with pytest.raises(RuntimeError, match="native failed"):
+  with pytest.raises(CollectionFailed):
     await runner.execute(
       permit,
       server_state="ISSUED",
@@ -193,7 +196,7 @@ async def test_native_failure_is_not_automatically_repeated(execution):
       finish=finish,
       collect=collect,
     )
-  with pytest.raises(CollectionOutcomeUnknown):
+  with pytest.raises(CollectionFailed):
     await runner.execute(
       permit,
       server_state="ISSUED",
@@ -451,7 +454,7 @@ async def test_artifact_failure_closes_native_iterator_under_lock(execution):
       assert runner.native_lock.locked()
       closed.append(True)
 
-  with pytest.raises(ValueError, match="oversized"):
+  with pytest.raises(CollectionFailed):
     await runner.execute(
       permit,
       server_state="ISSUED",
@@ -461,3 +464,236 @@ async def test_artifact_failure_closes_native_iterator_under_lock(execution):
       collect=records,
     )
   assert closed == [True]
+
+
+async def test_failure_is_durable_before_abort_and_replayed_after_restart(execution):
+  runner, permit = execution
+  order = []
+
+  def stop(error):
+    assert runner.native_lock.locked()
+    assert isinstance(error, RuntimeError)
+    assert runner.journal.load_collection_abort(permit) is None
+    order.append("stopped")
+
+  async def abort(value, failure):
+    assert value == permit
+    assert runner.journal.load_collection_abort(permit) == failure
+    order.append("abort")
+    raise ConnectionError("confirmation lost")
+
+  runner.stop_native, runner.abort = (
+    Mock(side_effect=stop),
+    AsyncMock(side_effect=abort),
+  )
+  collect = Mock(side_effect=RuntimeError("native failed"))
+  with pytest.raises(ConnectionError):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=collect,
+    )
+  assert order == ["stopped", "abort"]
+  runner.journal.connection.close()
+  runner.journal = LocalJournal(runner.journal.path)
+  runner.clock = lambda: NOW + timedelta(hours=1)
+  runner.abort = AsyncMock()
+  try:
+    with pytest.raises(CollectionFailed):
+      await runner.execute(
+        permit,
+        server_state="STARTED",
+        unit_payload=PAYLOAD,
+        start=AsyncMock(side_effect=AssertionError),
+        finish=AsyncMock(side_effect=AssertionError),
+        collect=collect,
+      )
+    collect.assert_called_once()
+    runner.stop_native.assert_called_once()
+    runner.abort.assert_awaited_once()
+    facts = runner.journal.request_collection_aborts(
+      runner.device_id, str(permit.unit.request_id)
+    )
+    assert len(facts) == 1 and facts[0][2] is True
+  finally:
+    runner.journal.connection.close()
+
+
+async def test_unproven_stop_preserves_unknown_execution(execution):
+  runner, permit = execution
+  runner.stop_native = Mock(side_effect=RuntimeError("cannot prove exit"))
+  collect = Mock(side_effect=ValueError("bad native output"))
+  with pytest.raises(RuntimeError, match="cannot prove exit"):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=collect,
+    )
+  assert runner.journal.load_collection_abort(permit) is None
+  with pytest.raises(CollectionOutcomeUnknown):
+    await runner.execute(
+      permit,
+      server_state="STARTED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=collect,
+    )
+  runner.stop_native.assert_called_once()
+  runner.abort.assert_not_awaited()
+  collect.assert_called_once()
+
+
+async def test_failure_journal_error_never_sends_abort(execution, monkeypatch):
+  runner, permit = execution
+  monkeypatch.setattr(
+    runner.journal, "record_collection_abort", Mock(side_effect=OSError("disk full"))
+  )
+  with pytest.raises(OSError, match="disk full"):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=Mock(side_effect=RuntimeError),
+    )
+  runner.stop_native.assert_called_once()
+  runner.abort.assert_not_awaited()
+  assert runner.journal.load_collection_abort(permit) is None
+
+
+async def test_published_file_survives_post_publication_failure(execution, monkeypatch):
+  runner, permit = execution
+  original = runner.artifacts.seal
+
+  def seal(*args, **kwargs):
+    original(*args, **kwargs)
+    raise OSError("directory fsync failed")
+
+  monkeypatch.setattr(runner.artifacts, "seal", seal)
+  finish = AsyncMock()
+  with pytest.raises(OSError, match="directory fsync failed"):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=finish,
+      collect=lambda: iter([{"value": 1}]),
+    )
+  finish.assert_not_awaited()
+  artifact = await runner.execute(
+    permit,
+    server_state="STARTED",
+    unit_payload=PAYLOAD,
+    start=AsyncMock(side_effect=AssertionError),
+    finish=finish,
+    collect=Mock(side_effect=AssertionError),
+  )
+  assert list(runner.artifacts.replay(artifact)) == [{"value": 1}]
+  runner.abort.assert_not_awaited()
+  finish.assert_awaited_once()
+  assert runner.journal.load_collection_abort(permit) is None
+
+
+async def test_abort_journal_rejects_conflicting_or_successful_evidence(execution):
+  from quantx_contracts.collection_receipt import CollectionAbort
+
+  runner, permit = execution
+  failure = CollectionAbort(
+    unit=permit.unit,
+    native_exit="CONFIRMED_STOPPED",
+    reason_code="COLLECTION_NATIVE_FAILED",
+  )
+  with pytest.raises(ValueError, match="original execution"):
+    runner.journal.record_collection_abort(permit, failure)
+  await runner.execute(
+    permit,
+    server_state="ISSUED",
+    unit_payload=PAYLOAD,
+    start=AsyncMock(),
+    finish=AsyncMock(),
+    collect=lambda: iter([]),
+  )
+  with pytest.raises(ValueError, match="completed artifact"):
+    runner.journal.record_collection_abort(permit, failure)
+
+
+async def test_cancel_during_stop_waits_for_durable_failure(execution):
+  runner, permit = execution
+  entered, released = threading.Event(), threading.Event()
+
+  def stop(_):
+    entered.set()
+    if not released.wait(3):
+      raise RuntimeError("test did not release stop")
+
+  runner.stop_native = Mock(side_effect=stop)
+  collect = Mock(side_effect=RuntimeError("failed"))
+  task = asyncio.create_task(
+    runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=collect,
+    )
+  )
+  try:
+    assert await asyncio.to_thread(entered.wait, 2)
+    for _ in range(2):
+      task.cancel()
+      await asyncio.sleep(0)
+      assert runner.native_lock.locked() and not task.done()
+  finally:
+    released.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+  assert runner.journal.load_collection_abort(permit) is not None
+  runner.abort.assert_not_awaited()
+  with pytest.raises(CollectionFailed):
+    await runner.execute(
+      permit,
+      server_state="STARTED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=collect,
+    )
+  collect.assert_called_once()
+  runner.stop_native.assert_called_once()
+  runner.abort.assert_awaited_once()
+
+
+async def test_recorded_failure_is_immutable_and_excludes_success(execution):
+  runner, permit = execution
+  with pytest.raises(CollectionFailed):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=Mock(side_effect=RuntimeError),
+    )
+  failure = runner.journal.load_collection_abort(permit)
+  with pytest.raises(ValueError, match="conflicts with recorded exit"):
+    runner.journal.record_collection_abort(
+      permit, failure.model_copy(update={"reason_code": "COLLECTION_RESULT_INVALID"})
+    )
+  with pytest.raises(ValueError, match="original authorization"):
+    runner.journal.load_collection_abort(permit.model_copy(update={"owner_epoch": 2}))
+  artifact = runner.artifacts.seal(permit.unit, [], reserve=Mock(), release=Mock())
+  with pytest.raises(ValueError, match="recorded failure"):
+    runner.journal.record_collection_artifact(
+      permit_id=str(permit.permit_id), artifacts=runner.artifacts, artifact=artifact
+    )
+  assert runner.journal.load_collection_abort(permit) == failure

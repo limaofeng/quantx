@@ -6105,7 +6105,14 @@ class AgentRuntime:
     kind_reader = getattr(self.broker, "historical_market_data_worker_kind", None)
     if not callable(kind_reader) or kind_reader() != XTDATA_HISTORICAL_WORKER_KIND:
       raise ValueError("history unit requires the isolated XTData adapter")
-    self._ensure_historical_worker_sync(XTDATA_HISTORICAL_WORKER_KIND)
+    try:
+      self._ensure_historical_worker_sync(XTDATA_HISTORICAL_WORKER_KIND)
+    except Exception as exc:
+      # A failed spawn/handle installation may leave a child without a usable
+      # local handle. Absence of that handle cannot authorize an ABORT.
+      raise _FatalMarketDataPreparationError(
+        "historical worker startup outcome could not be confirmed"
+      ) from exc
     complete = False
     try:
       yield from iter_native_unit(

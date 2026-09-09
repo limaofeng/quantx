@@ -83,6 +83,16 @@ class NativeUnitArtifacts:
       raise ValueError("native unit artifact does not match journal digest")
     return artifact
 
+  def confirm_publication(self) -> None:
+    """Retry directory durability before binding a recovered publication."""
+    _ordinary(self.root, directory=True)
+    if os.name != "nt":
+      directory = os.open(self.root, os.O_RDONLY)
+      try:
+        os.fsync(directory)
+      finally:
+        os.close(directory)
+
   def _inspect_source(self, source, path, unit):
     digest, records_digest = hashlib.sha256(), hashlib.sha256()
     total = count = 0
@@ -217,12 +227,7 @@ class NativeUnitArtifacts:
         published = True
       except FileExistsError:
         return self.inspect(unit, expected_sha256=digest.hexdigest())
-      if os.name != "nt":
-        directory = os.open(self.root, os.O_RDONLY)
-        try:
-          os.fsync(directory)
-        finally:
-          os.close(directory)
+      self.confirm_publication()
       return NativeUnitArtifact(unit, destination, digest.hexdigest(), total, count)
     finally:
       temporary.unlink(missing_ok=True)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from quantx_contracts.collection_permit import CollectionPermit, CollectionUnit
+from quantx_contracts.collection_receipt import CollectionAbort
 from quantx_contracts.history_upload import HistoryUploadSnapshot
 
 
@@ -87,6 +88,14 @@ class LocalJournal:
           evidence_json TEXT NOT NULL,
           retired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(device_id,request_id)
+        );
+        CREATE TABLE IF NOT EXISTS history_collection_aborts (
+          permit_id TEXT PRIMARY KEY,
+          unit_id TEXT NOT NULL UNIQUE,
+          permit_json TEXT NOT NULL,
+          failure_json TEXT NOT NULL,
+          accepted_at TEXT,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS journal_metadata (
           key TEXT PRIMARY KEY,
@@ -363,6 +372,73 @@ class LocalJournal:
     with self.lock:
       self._refresh_size_cache()
 
+  def record_collection_abort(self, permit: CollectionPermit, failure: CollectionAbort) -> None:
+    """Persist confirmed exit supplied by the current execution's stop boundary."""
+    failure = CollectionAbort.model_validate(failure.model_dump(mode="json"))
+    if failure.unit != permit.unit:
+      raise ValueError("collection failure scope mismatch")
+    with self.lock, self.connection:
+      self.connection.execute("BEGIN IMMEDIATE")
+      if not self.collection_permit_received(permit) or not self.collection_execution_started(permit):
+        raise ValueError("collection failure requires original execution evidence")
+      if self.connection.execute(
+        "SELECT 1 FROM history_collection_artifacts WHERE unit_id=?", (permit.unit.unit_id,)
+      ).fetchone() is not None:
+        raise ValueError("collection failure cannot replace a completed artifact")
+      saved = self.load_collection_abort(permit)
+      if saved is not None and saved != failure:
+        raise ValueError("collection failure conflicts with recorded exit")
+      self.connection.execute(
+        "INSERT INTO history_collection_aborts(permit_id,unit_id,permit_json,failure_json) VALUES (?,?,?,?) ON CONFLICT(permit_id) DO NOTHING",
+        (str(permit.permit_id), permit.unit.unit_id, permit.model_dump_json(), failure.model_dump_json()),
+      )
+    with self.lock:
+      self._refresh_size_cache()
+
+  def load_collection_abort(self, permit: CollectionPermit) -> CollectionAbort | None:
+    with self.lock:
+      row = self.connection.execute(
+        "SELECT permit_json,failure_json FROM history_collection_aborts WHERE permit_id=?",
+        (str(permit.permit_id),),
+      ).fetchone()
+      if row is None:
+        return None
+      if CollectionPermit.model_validate_json(row["permit_json"]) != permit or not self.collection_permit_received(permit):
+        raise ValueError("collection failure conflicts with original authorization")
+      failure = CollectionAbort.model_validate_json(row["failure_json"])
+      if failure.unit != permit.unit:
+        raise ValueError("collection failure scope mismatch")
+      return failure
+
+  def confirm_collection_abort(self, permit: CollectionPermit) -> None:
+    with self.lock, self.connection:
+      self.connection.execute("BEGIN IMMEDIATE")
+      if self.load_collection_abort(permit) is None:
+        raise ValueError("collection abort confirmation lacks local evidence")
+      self.connection.execute(
+        "UPDATE history_collection_aborts SET accepted_at=COALESCE(accepted_at,CURRENT_TIMESTAMP) WHERE permit_id=?",
+        (str(permit.permit_id),),
+      )
+
+  def request_collection_aborts(self, device_id: str, request_id: str):
+    """Bounded original failures, including Worker acceptance for offline recovery."""
+    with self.lock:
+      rows = self.connection.execute(
+        "SELECT a.permit_json,a.accepted_at FROM history_collection_aborts a "
+        "JOIN history_collection_receipts r ON r.permit_id=a.permit_id "
+        "WHERE r.device_id=? AND r.request_id=? ORDER BY r.unit_index LIMIT 2049",
+        (device_id, request_id),
+      ).fetchall()
+      if len(rows) > 2048:
+        raise ValueError("collection abort recovery exceeds request unit budget")
+      results = []
+      for row in rows:
+        permit = CollectionPermit.model_validate_json(row["permit_json"])
+        if str(permit.device_id) != device_id or str(permit.unit.request_id) != request_id:
+          raise ValueError("collection abort recovery scope mismatch")
+        results.append((permit, self.load_collection_abort(permit), row["accepted_at"] is not None))
+      return results
+
   def record_collection_artifact(self, *, permit_id: str, artifacts, artifact) -> bool:
     """Bind verified bytes to a received permit, without claiming upload success."""
     verified = artifacts.inspect(artifact.unit, expected_sha256=artifact.sha256)
@@ -370,6 +446,10 @@ class LocalJournal:
       raise ValueError("collection artifact metadata mismatch")
     with self.lock, self.connection:
       self.connection.execute("BEGIN IMMEDIATE")
+      if self.connection.execute(
+        "SELECT 1 FROM history_collection_aborts WHERE unit_id=?", (artifact.unit.unit_id,)
+      ).fetchone() is not None:
+        raise ValueError("collection artifact cannot replace a recorded failure")
       receipt = self.connection.execute(
         "SELECT unit_id FROM history_collection_receipts WHERE permit_id=?",
         (permit_id,),

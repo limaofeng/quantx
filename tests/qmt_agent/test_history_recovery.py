@@ -20,7 +20,10 @@ async def test_recovery_is_bounded_and_bad_request_does_not_starve_next(tmp_path
     _market_data_upload_client=lambda: Mock(),
     _history_access_token=AsyncMock(),
     _historical_worker_lock=asyncio.Lock(),
-    journal=SimpleNamespace(history_upload_retired=lambda *args: False),
+    journal=SimpleNamespace(
+      history_upload_retired=lambda *args: False,
+      request_collection_aborts=lambda *args: [],
+    ),
   )
   pipeline = HistoryPipeline(runtime)
   ids = [UUID(int=value) for value in (1, 2, 3)]

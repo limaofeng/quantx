@@ -187,3 +187,27 @@ def test_child_rechecks_expiry_after_startup_before_native_entry():
       },
     )
   broker.iter_market_data.assert_not_called()
+
+
+async def test_uncertain_child_startup_cannot_become_abort():
+  import asyncio
+  from unittest.mock import Mock
+
+  from quantx_qmt_agent import runtime as module
+  from quantx_qmt_agent.history_pipeline import HistoryPipeline
+
+  runtime = module.AgentRuntime.__new__(module.AgentRuntime)
+  runtime.broker = SimpleNamespace(historical_market_data_worker_kind=lambda: "xtdata")
+  runtime._historical_worker_lock = asyncio.Lock()
+  runtime._ensure_historical_worker_sync = Mock(
+    side_effect=OSError("spawn interrupted")
+  )
+  runtime._shutdown_historical_worker_sync = Mock()
+  pipeline = HistoryPipeline.__new__(HistoryPipeline)
+  pipeline.runtime = runtime
+  async with runtime._historical_worker_lock:
+    with pytest.raises(module._FatalMarketDataPreparationError) as caught:
+      list(runtime._collect_history_unit_sync(permit(), PAYLOAD))
+    with pytest.raises(module._FatalMarketDataPreparationError):
+      pipeline._stop_failed_native(caught.value)
+  runtime._shutdown_historical_worker_sync.assert_not_called()

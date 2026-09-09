@@ -422,11 +422,13 @@ async def test_receipt_consumer_runs_while_ingestion_waits(monkeypatch):
     await asyncio.wait_for(task, 1)
 
 
+@pytest.mark.parametrize("native_failed", [False, True])
 async def test_agent_executor_through_authenticated_api_and_worker(
   receipts,
   gateway_auth,  # noqa: F811
   tmp_path,
   monkeypatch,
+  native_failed,
 ):
   import asyncio
 
@@ -435,7 +437,10 @@ async def test_agent_executor_through_authenticated_api_and_worker(
   from quantx_infrastructure.models.agent_runtime import AgentDevice
   from quantx_market_data import collection_receipts as api
   from quantx_market_data.api import create_app
-  from quantx_qmt_agent.collection_execution import CollectionExecution
+  from quantx_qmt_agent.collection_execution import (
+    CollectionExecution,
+    CollectionFailed,
+  )
   from quantx_qmt_agent.journal import LocalJournal
   from quantx_qmt_agent.native_unit_artifact import NativeUnitArtifacts
 
@@ -468,6 +473,8 @@ async def test_agent_executor_through_authenticated_api_and_worker(
     native_lock=asyncio.Lock(),
     reserve=lambda _: None,
     release=lambda _: None,
+    stop_native=lambda _: None,
+    abort=AsyncMock(side_effect=AssertionError("successful path cannot abort")),
   )
   payload = {
     "operation": "bars",
@@ -523,14 +530,33 @@ async def test_agent_executor_through_authenticated_api_and_worker(
             )
           )
 
-        artifact = await executor.execute(
+        async def abort(value, failure):
+          assert value == grant
+          assert journal.load_collection_abort(grant) == failure
+          await acknowledge(CollectionReceipt(event="ABORT", abort=failure))
+
+        executor.abort = abort
+
+        def collect():
+          if native_failed:
+            raise RuntimeError("native failure")
+          yield {"value": 1}
+
+        execution = executor.execute(
           grant,
           server_state="ISSUED",
           unit_payload=payload,
           start=start,
           finish=finish,
-          collect=lambda: iter([{"value": 1}]),
+          collect=collect,
         )
+        if native_failed:
+          with pytest.raises(CollectionFailed):
+            await execution
+          assert await state(first, grant) == "ABORTED"
+          assert (await client.get(path + "/ABORT")).json()["status"] == "ACCEPTED"
+          return
+        artifact = await execution
         assert await state(first, grant) == "FINISHED"
         assert list(executor.artifacts.replay(artifact)) == [{"value": 1}]
         assert (await client.get(path + "/FINISH")).json()["status"] == "ACCEPTED"

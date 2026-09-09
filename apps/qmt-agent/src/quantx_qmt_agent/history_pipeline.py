@@ -21,7 +21,11 @@ from quantx_contracts.history_upload import (
   HistoryUploadSnapshot,
 )
 
-from .collection_execution import CollectionExecution, join_history_thread
+from .collection_execution import (
+  CollectionExecution,
+  CollectionFailed,
+  join_history_thread,
+)
 from .collection_receipts import HistoryReceiptClient
 from .historical_worker import _HistoricalDiskBudget
 from .history_jobs import HistoryJobs
@@ -46,6 +50,14 @@ class HistoryPipeline:
     return _HistoricalDiskBudget(
       max_bytes=self.runtime._available_history_spool_bytes()
     )
+
+  def _stop_failed_native(self, error):
+    from .runtime import _FatalMarketDataPreparationError
+
+    if isinstance(error, _FatalMarketDataPreparationError):
+      # A stuck IPC helper is also uncertainty, even if its child was killed.
+      raise error
+    self.runtime._shutdown_historical_worker_sync(graceful=False)
 
   def _retain(self, message):
     if self.runtime.journal.history_upload_retired(
@@ -91,7 +103,27 @@ class HistoryPipeline:
             results[str(request_id)] = "RETIRED"
             continue
           job = await join_history_thread(self.jobs.load, request_id)
+          failures = await join_history_thread(
+            self.runtime.journal.request_collection_aborts,
+            self.runtime.configuration.device_id,
+            str(request_id),
+          )
           accepted = await join_history_thread(self.jobs.upload_acceptance, job)
+        if failures:
+          pending = [
+            (permit, failure)
+            for permit, failure, confirmed in failures
+            if not confirmed
+          ]
+          for permit, failure in pending[:2]:
+            await self.receipts.abort(permit, failure)
+            await join_history_thread(
+              self.runtime.journal.confirm_collection_abort, permit
+            )
+          results[str(request_id)] = (
+            "COLLECTION_FAILED" if len(pending) <= 2 else "ABORT_PENDING"
+          )
+          continue
         snapshot = await self._upload_snapshot(str(request_id))
         if not snapshot.frozen:
           results[str(request_id)] = "WAITING_HISTORY_SESSION"
@@ -279,14 +311,19 @@ class HistoryPipeline:
       native_lock=runtime._historical_worker_lock,
       reserve=reserve,
       release=release,
+      stop_native=self._stop_failed_native,
+      abort=self.receipts.abort,
     )
-    await execution.execute(
-      message.permit,
-      server_state=message.state,
-      unit_payload=message.unit_payload,
-      start=start,
-      finish=self.receipts.finish,
-      collect=lambda: runtime._collect_history_unit_sync(
-        message.permit, job.request.payload
-      ),
-    )
+    try:
+      await execution.execute(
+        message.permit,
+        server_state=message.state,
+        unit_payload=message.unit_payload,
+        start=start,
+        finish=self.receipts.finish,
+        collect=lambda: runtime._collect_history_unit_sync(
+          message.permit, job.request.payload
+        ),
+      )
+    except CollectionFailed:
+      self.active.pop(message.permit.unit.request_id, None)
