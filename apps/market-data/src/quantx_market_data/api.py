@@ -37,6 +37,7 @@ from quantx_infrastructure.services.local_divid_factor_reader import (
 from quantx_infrastructure.services.local_history_reader import (
   HistoryReadBusy,
   LocalHistoryReader,
+  PublishedHistoryReader,
 )
 from quantx_infrastructure.services.market_data_demand_store import (
   MarketDataDemandCapacity,
@@ -44,6 +45,7 @@ from quantx_infrastructure.services.market_data_demand_store import (
 )
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
@@ -56,7 +58,15 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
       raise RuntimeError("Market Data API requires an internal service token")
     app.state.token = resolved_token
     app.state.store = store if store is not None else MarketDataDemandStore()
-    app.state.reader = reader if reader is not None else LocalHistoryReader()
+    from quantx_infrastructure.config.settings import settings
+
+    app.state.reader = (
+      reader
+      if reader is not None
+      else PublishedHistoryReader(async_sessionmaker(app.state.store.engine))
+      if settings.environment == "development"
+      else LocalHistoryReader()
+    )
     app.state.factor_reader = LocalDividFactorReader(
       getattr(app.state.store, "engine", None)
     )

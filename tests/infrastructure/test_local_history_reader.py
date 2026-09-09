@@ -173,6 +173,18 @@ async def test_cancelled_read_keeps_capacity_until_sdk_thread_exits():
   assert not reader._slot.locked()
 
 
+@pytest.mark.parametrize("environment", ["testing", "production"])
+async def test_non_development_default_reader_keeps_existing_storage(
+  environment, monkeypatch
+):
+  from quantx_infrastructure.config.settings import settings
+
+  monkeypatch.setattr(settings, "environment", environment)
+  app = create_app(store=object(), token="secret")
+  async with app.router.lifespan_context(app):
+    assert type(app.state.reader) is LocalHistoryReader
+
+
 async def test_http_read_is_authenticated_local_and_has_no_request_mutations():
   store = SimpleNamespace(create_market_data_request=AsyncMock())
   connection = Connection([[]])

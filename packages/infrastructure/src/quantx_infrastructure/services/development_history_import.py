@@ -15,10 +15,12 @@ import httpx
 from quantx_application.market_data.ingestion import IngestionEvidenceConflict
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 
 from quantx_infrastructure.database.connection import AsyncSessionLocal
-from quantx_infrastructure.database.timeseries_connection import NonRetryableWriteError
+from quantx_infrastructure.database.timeseries_connection import (
+  NonRetryableWriteError,
+  get_timeseries_connection,
+)
 from quantx_infrastructure.services.data_exchange import (
   content_path,
   export_root,
@@ -26,11 +28,7 @@ from quantx_infrastructure.services.data_exchange import (
   submit,
   submit_in_transaction,
 )
-from quantx_infrastructure.services.data_exchange_reference import (
-  import_reference,
-  import_reference_in_transaction,
-  verify_imported_reference,
-)
+from quantx_infrastructure.services.data_exchange_reference import import_reference
 from quantx_infrastructure.services.development_delivery_execution import (
   run_delivery_execution,
 )
@@ -51,14 +49,10 @@ from quantx_infrastructure.services.development_ingestion_progress import (
 from quantx_infrastructure.services.market_data_persistence_verification import (
   MarketDataPersistenceBlockedError,
   MarketDataPersistenceMismatchError,
-  MarketDataPersistenceQueryError,
-  MarketDataPersistenceVerificationError,
 )
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   MAX_TRANSFER_CHUNK_COMPRESSED_BYTES,
   MarketDataValidationError,
-  ingest_uploaded_bar_request,
-  verify_uploaded_bar_request,
 )
 
 
@@ -232,7 +226,30 @@ async def _import_partition_owned(
     return await _ingest_local_partition(identity, request, manifest, ingestion_store)
 
 
+async def _block_legacy_delivery(identity, owner):
+  # Preserve the old receipt, files, checkpoints and reserved attempts verbatim.
+  reason = "LOCAL_STORAGE_VERSION_MIGRATION_REQUIRED"
+  async with _delivery_transaction(owner) as db:
+    await db.execute(
+      text(
+        "UPDATE development_data_export SET state='BLOCKED',error=:reason,updated_at=clock_timestamp() WHERE id=:id"
+      ),
+      {"id": identity, "reason": reason},
+    )
+  return {"id": identity, "status": "BLOCKED", "reason": reason}
+
+
 async def _ingest_local_partition(identity, request, manifest, ingestion_store):
+  from .development_version_ingestion import ingest_development_storage_version
+  from .market_data_ingestion_progress import evidence_hash
+
+  prior = await ingestion_store.status()
+  if prior is not None and isinstance(manifest, dict):
+    legacy_hash = evidence_hash(
+      {"payload": manifest.get("payload"), "chunks": manifest.get("chunks")}
+    )
+    if prior["progress"]["manifest_hash"] == legacy_hash:
+      return await _block_legacy_delivery(identity, ingestion_store.owner)
   progress = await ingestion_store.begin()
   if progress.state["blocked"]:
     return {
@@ -242,35 +259,9 @@ async def _ingest_local_partition(identity, request, manifest, ingestion_store):
     }
   try:
     validate_delivery_manifest(manifest, request)
-    audit = await ingest_uploaded_bar_request(
-      ImportedTransfer(manifest), identity, progress=progress
+    return await ingest_development_storage_version(
+      request, manifest, progress, connection=get_timeseries_connection()
     )
-    async with _delivery_transaction(ingestion_store.owner) as db:
-      reference_audit = await import_reference_in_transaction(
-        await db.connection(),
-        manifest["reference"],
-        code=request.instrument,
-        owner=ingestion_store.owner,
-      )
-      receipt = {
-        **manifest,
-        "local_verification": {**audit, "reference_verification": reference_audit},
-      }
-      await ingestion_store.mutate_in_transaction(
-        db,
-        identity,
-        claim_token=progress.claim_token,
-        action="advance",
-        values={"phase": "VERIFIED"},
-      )
-      await db.execute(
-        text("""
-        UPDATE development_data_export SET state='LOCAL_VERIFIED',error=NULL,manifest=CAST(:manifest AS JSON),
-        updated_at=CURRENT_TIMESTAMP WHERE id=:id
-      """),
-        {"id": identity, "manifest": json.dumps(receipt, default=str)},
-      )
-    return receipt
 
   except Exception as exc:
     permanent = isinstance(
@@ -306,61 +297,14 @@ async def _ingest_local_partition(identity, request, manifest, ingestion_store):
 
 
 async def _recheck_local_partition(identity, request, receipt, budget):
-  try:
-    if not isinstance(receipt, dict):
-      raise ValueError("Missing local receipt")
-    manifest = {k: v for k, v in receipt.items() if k != "local_verification"}
-    validate_delivery_manifest(manifest, request)
-    current = await verify_uploaded_bar_request(ImportedTransfer(manifest), identity)
-    async with _delivery_transaction(budget.owner) as db:
-      await verify_imported_reference(
-        await db.connection(),
-        manifest["reference"],
-        receipt.get("local_verification", {}).get("reference_verification"),
-        code=request.instrument,
-      )
-      result = {
-        **receipt,
-        "local_verification": {**receipt["local_verification"], **current},
-      }
-      await db.execute(
-        text("""
-        UPDATE development_data_export SET state='LOCAL_VERIFIED',error=NULL,
-          manifest=CAST(:manifest AS JSON),updated_at=clock_timestamp() WHERE id=:id
-      """),
-        {"id": identity, "manifest": json.dumps(result, default=str)},
-      )
-      await db.execute(
-        text("""
-        UPDATE development_data_download_budget SET wait_reason=NULL,transient_failures=0,
-          next_probe_at=clock_timestamp(),updated_at=clock_timestamp() WHERE delivery_id=:id
-      """),
-        {"id": identity},
-      )
-    return result
-  except MarketDataPersistenceBlockedError as exc:
-    state, reason = "BLOCKED", exc.reason_code
-  except (MarketDataPersistenceQueryError, SQLAlchemyError):
-    state, reason = "WAITING_LOCAL_PROOF", "LOCAL_READBACK_UNAVAILABLE"
-  except (
-    ValueError,
-    MarketDataValidationError,
-    MarketDataPersistenceMismatchError,
-    MarketDataPersistenceVerificationError,
-    FileNotFoundError,
-  ):
-    state, reason = "BLOCKED", "LOCAL_DELIVERY_PROOF_INVALID"
-  async with _delivery_transaction(budget.owner) as db:
-    await db.execute(
-      text("""
-      UPDATE development_data_export SET state=:state,error=:reason,
-        updated_at=clock_timestamp() WHERE id=:id
-    """),
-      {"id": identity, "state": state, "reason": reason},
-    )
-  if state == "WAITING_LOCAL_PROOF":
-    await budget.schedule("local_failed")
-  return {"id": identity, "status": state, "reason": reason}
+  from .development_version_ingestion import recheck_development_storage_version
+
+  audit = receipt.get("local_verification") if isinstance(receipt, dict) else None
+  if isinstance(audit, dict) and "immutable_storage" not in audit:
+    return await _block_legacy_delivery(identity, budget.owner)
+  return await recheck_development_storage_version(
+    request, receipt, identity, budget, connection=get_timeseries_connection()
+  )
 
 
 async def run_range(instruments: list[str], period: str, start: date, end: date) -> int:
