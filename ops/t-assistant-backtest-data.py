@@ -45,19 +45,17 @@ async def acquire(args):
   # Process-local controls only. No service configuration is modified.
   configure_environment(args.environment)
   logging.disable(logging.CRITICAL)
-  from urllib.parse import urlsplit
 
   from quantx_engine.t_assistant_backtest_data import acquire_backtest_dataset
   from quantx_infrastructure.config.settings import settings
-  from quantx_infrastructure.services.historical_market_data_service import (
-    HistoricalMarketDataService,
+  from quantx_infrastructure.services.local_historical_tick_reader import (
+    LocalHistoricalTickReader,
   )
   from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
-  source = urlsplit(settings.influxdb_host)
-  source_version = (
-    f"influxdb:{source.hostname}:{source.port}/{settings.influxdb_database}/ticks"
-  )
+  # This is the requested local interface identity, not an attestation of the
+  # service's physical database version. Dataset parts pin the returned bytes.
+  source_version = f"local-market-data-api:{settings.environment}:history-v1"
   codes = tuple(code.strip().upper() for code in args.instruments.split(","))
   calendar = TradingDateHelper()
   start, end = args.start, args.end
@@ -80,7 +78,7 @@ async def acquire(args):
       request_agent_market_data,
     )
 
-    pages = HistoricalMarketDataService().iter_tick_pages(
+    pages = LocalHistoricalTickReader().iter_tick_pages(
       stock_code=codes[0],
       start_time=datetime.combine(start, time.min, SHANGHAI),
       end_time=datetime.combine(end, time.max, SHANGHAI),
@@ -157,7 +155,7 @@ async def acquire(args):
     flush=True,
   )
   dataset = await acquire_backtest_dataset(
-    history=HistoricalMarketDataService(),
+    history=LocalHistoricalTickReader(),
     calendar=calendar,
     source_version=source_version,
     instruments=codes,

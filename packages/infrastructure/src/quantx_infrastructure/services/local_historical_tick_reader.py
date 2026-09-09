@@ -9,6 +9,7 @@ from quantx_contracts.market_data_service import HistoryRead
 
 from quantx_infrastructure.core.data.tick_identity import tick_query_end_time
 from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.tick import Tick
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalTickPaginationError,
@@ -31,6 +32,22 @@ def _ticks(records):
 
 class LocalHistoricalTickReader:
   """Own one HTTP client per consumed stream; never open a historical repository."""
+
+  async def read_daily_klines(self, *, stock_code, trading_date):
+    """Read a daily reference; two rows allow the consumer to reject duplicates."""
+    client = LocalMarketDataClient()
+    try:
+      page = await client.read_history(
+        HistoryRead(
+          instrument=stock_code,
+          period="1d",
+          trading_date=trading_date,
+          page_size=2,
+        )
+      )
+      return [KLine(**row) for row in page.records]
+    finally:
+      await client.close()
 
   async def iter_tick_pages(
     self,

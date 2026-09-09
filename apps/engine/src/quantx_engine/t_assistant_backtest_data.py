@@ -1,10 +1,11 @@
 """Pin historical input hashes, optionally sharing immutable snapshot objects.
 
-Callers inject the existing HistoricalMarketDataService and TradingDateHelper
+Callers inject LocalHistoricalTickReader and TradingDateHelper
 with their explicitly selected data environment. This module never discovers or
 starts a service, connects to QMT, or writes back to either source.
 """
 
+from contextlib import aclosing
 from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite
 from numbers import Integral, Real
@@ -60,13 +61,7 @@ def _source_row(tick, preserve_raw):
 
 
 async def _daily_limits(history, code, day):
-  daily = await history.get_kline_data(
-    stock_code=code,
-    period="1d",
-    start_time=datetime.combine(day, time.min, SHANGHAI),
-    end_time=datetime.combine(day, time.max, SHANGHAI),
-    limit=2,
-  )
+  daily = await history.read_daily_klines(stock_code=code, trading_date=day)
   if len(daily) > 1 or any(
     bar.time.astimezone(SHANGHAI).date() != day for bar in daily
   ):
@@ -210,14 +205,17 @@ class BacktestDataset:
           limits = await _daily_limits(
             self.history, part["code"], date.fromisoformat(day)
           )
-          async for page in self.history.iter_tick_pages(
-            stock_code=part["code"],
-            start_time=datetime.combine(date.fromisoformat(day), time.min, SHANGHAI),
-            end_time=datetime.combine(date.fromisoformat(day), time.max, SHANGHAI),
-          ):
-            rows_read.extend(
-              {**_source_row(tick, material["preserve_raw"]), **limits} for tick in page
+          async with aclosing(
+            self.history.iter_tick_pages(
+              stock_code=part["code"],
+              start_time=datetime.combine(date.fromisoformat(day), time.min, SHANGHAI),
+              end_time=datetime.combine(date.fromisoformat(day), time.max, SHANGHAI),
             )
+          ) as pages:
+            async for page in pages:
+              rows_read.extend(
+                {**_source_row(tick, material["preserve_raw"]), **limits} for tick in page
+              )
           content = {"rows": rows_read}
         else:
           path = self.directory.parent / "objects" / (part["hash"] + ".json")
@@ -304,18 +302,48 @@ async def acquire_backtest_dataset(
       reason = None
       try:
         limits = await _daily_limits(history, code, day)
-        async for page in history.iter_tick_pages(
-          stock_code=code,
-          start_time=datetime.combine(day, time.min, SHANGHAI),
-          end_time=datetime.combine(day, time.max, SHANGHAI),
-        ):
-          for tick in page:
-            row = _source_row(tick, preserve_raw)
-            row.update(limits)
-            status_key = str(row["stock_status"])
-            stock_status_counts[status_key] = stock_status_counts.get(status_key, 0) + 1
-            identity = (row["source_time_ms"], row["tick_ordinal"])
-            if preserve_raw:
+        async with aclosing(
+          history.iter_tick_pages(
+            stock_code=code,
+            start_time=datetime.combine(day, time.min, SHANGHAI),
+            end_time=datetime.combine(day, time.max, SHANGHAI),
+          )
+        ) as pages:
+          async for page in pages:
+            for tick in page:
+              row = _source_row(tick, preserve_raw)
+              row.update(limits)
+              status_key = str(row["stock_status"])
+              stock_status_counts[status_key] = stock_status_counts.get(status_key, 0) + 1
+              identity = (row["source_time_ms"], row["tick_ordinal"])
+              if preserve_raw:
+                if (
+                  row["stock_code"] != code
+                  or type(identity[0]) is not int
+                  or identity[0] <= 0
+                  or type(identity[1]) is not int
+                  or identity[1] < 0
+                  or (previous is not None and identity <= previous)
+                ):
+                  raise ValueError("BACKTEST_SOURCE_IDENTITY_INVALID")
+                source_at = datetime.fromtimestamp(identity[0] / 1000, SHANGHAI)
+                if source_at.date() != day:
+                  raise ValueError("BACKTEST_SOURCE_OUTSIDE_REQUEST")
+                if not classify_market_data_session(source_at).is_continuous:
+                  rows.append(row)
+                  previous = identity
+                  continue
+                missing = [
+                  key
+                  for key in ("price_tick",)
+                  if row[key] is None or row[key] <= 0
+                ]
+                for key in missing:
+                  missing_references[key] = missing_references.get(key, 0) + 1
+                if "price_tick" in missing:
+                  rows.append(row)
+                  previous = identity
+                  continue
               if (
                 row["stock_code"] != code
                 or type(identity[0]) is not int
@@ -323,59 +351,32 @@ async def acquire_backtest_dataset(
                 or type(identity[1]) is not int
                 or identity[1] < 0
                 or (previous is not None and identity <= previous)
+                or any(
+                  not isfinite(row[k]) or row[k] <= 0
+                  for k in ("price_tick",)
+                )
+                or any(
+                  row[k] is not None and (not isfinite(row[k]) or row[k] <= 0)
+                  for k in ("up_stop_price", "down_stop_price")
+                )
+                or type(row["stock_status"]) is not int
               ):
-                raise ValueError("BACKTEST_SOURCE_IDENTITY_INVALID")
-              source_at = datetime.fromtimestamp(identity[0] / 1000, SHANGHAI)
-              if source_at.date() != day:
+                raise ValueError("BACKTEST_SOURCE_IDENTITY_OR_LIMIT_INVALID")
+              item = _event(
+                row,
+                stream_id="acquisition-validation",
+                sequence=len(rows) + 1,
+                symbol_sequence=len(rows) + 1,
+                latency_ms=latency_ms,
+              )
+              if item.market.timestamp.astimezone(SHANGHAI).date() != day:
                 raise ValueError("BACKTEST_SOURCE_OUTSIDE_REQUEST")
-              if not classify_market_data_session(source_at).is_continuous:
-                rows.append(row)
-                previous = identity
-                continue
-              missing = [
-                key
-                for key in ("price_tick",)
-                if row[key] is None or row[key] <= 0
-              ]
-              for key in missing:
-                missing_references[key] = missing_references.get(key, 0) + 1
-              if "price_tick" in missing:
-                rows.append(row)
-                previous = identity
-                continue
-            if (
-              row["stock_code"] != code
-              or type(identity[0]) is not int
-              or identity[0] <= 0
-              or type(identity[1]) is not int
-              or identity[1] < 0
-              or (previous is not None and identity <= previous)
-              or any(
-                not isfinite(row[k]) or row[k] <= 0
-                for k in ("price_tick",)
-              )
-              or any(
-                row[k] is not None and (not isfinite(row[k]) or row[k] <= 0)
-                for k in ("up_stop_price", "down_stop_price")
-              )
-              or type(row["stock_status"]) is not int
-            ):
-              raise ValueError("BACKTEST_SOURCE_IDENTITY_OR_LIMIT_INVALID")
-            item = _event(
-              row,
-              stream_id="acquisition-validation",
-              sequence=len(rows) + 1,
-              symbol_sequence=len(rows) + 1,
-              latency_ms=latency_ms,
-            )
-            if item.market.timestamp.astimezone(SHANGHAI).date() != day:
-              raise ValueError("BACKTEST_SOURCE_OUTSIDE_REQUEST")
-            at = item.market.timestamp.astimezone(SHANGHAI)
-            minute = at.hour * 60 + at.minute
-            if minute in expected_minutes:
-              observed_minutes.add(minute)
-            rows.append(row)
-            previous = identity
+              at = item.market.timestamp.astimezone(SHANGHAI)
+              minute = at.hour * 60 + at.minute
+              if minute in expected_minutes:
+                observed_minutes.add(minute)
+              rows.append(row)
+              previous = identity
       except Exception as exc:
         # Do not publish source exception strings (may contain connection details).
         detail = str(exc)

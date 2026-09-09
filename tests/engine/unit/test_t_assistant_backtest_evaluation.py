@@ -2,10 +2,11 @@
 
 import json
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, time
 from types import SimpleNamespace
 
 import pytest
+from quantx_domain.clock import SHANGHAI
 from quantx_engine.t_assistant_backtest_data import (
   BacktestDataset,
   acquire_backtest_dataset,
@@ -31,10 +32,10 @@ class History:
     self.broken = broken
     self.calls = []
 
-  async def get_kline_data(self, **kwargs):
+  async def read_daily_klines(self, **kwargs):
     return [
       SimpleNamespace(
-        time=kwargs["start_time"], up_stop_price=110.0, down_stop_price=90.0
+        time=datetime.combine(kwargs["trading_date"], time.min, SHANGHAI), up_stop_price=110.0, down_stop_price=90.0
       )
     ]
 

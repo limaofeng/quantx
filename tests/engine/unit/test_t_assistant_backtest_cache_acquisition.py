@@ -11,7 +11,7 @@ from tests.engine.unit.test_t_assistant_backtest_runtime import CODES
 
 
 class HistoricalCache(History):
-  async def get_kline_data(self, **kwargs):
+  async def read_daily_klines(self, **kwargs):
     return []
 
   async def iter_tick_pages(self, **kwargs):
@@ -112,10 +112,10 @@ async def test_backtest_replays_without_daily_limits_and_never_uses_tick_limits(
   from tests.engine.unit.test_t_assistant_backtest_runtime import runtime
 
   class NoDailyReference(History):
-    async def get_kline_data(self, **kwargs):
+    async def read_daily_klines(self, **kwargs):
       if not daily_present:
         return []
-      bars = await super().get_kline_data(**kwargs)
+      bars = await super().read_daily_klines(**kwargs)
       for bar in bars:
         bar.up_stop_price = bar.down_stop_price = None
       return bars
@@ -160,8 +160,8 @@ async def test_reference_replay_joins_daily_limits_and_detects_changes(tmp_path)
   class DailyHistory(History):
     limit = 111.0
 
-    async def get_kline_data(self, **kwargs):
-      bars = await super().get_kline_data(**kwargs)
+    async def read_daily_klines(self, **kwargs):
+      bars = await super().read_daily_klines(**kwargs)
       bars[0].up_stop_price = self.limit
       return bars
 
