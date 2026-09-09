@@ -2195,6 +2195,29 @@ type FlowRun {
   detailedLogs: [LogLine!]!
 }
 
+enum HistoryDownloadMode {
+  ALWAYS
+  CUSTOM
+}
+
+type HistoryDownloadSettingsView {
+  version: Int!
+  mode: HistoryDownloadMode!
+  nonTradingDaysAllowed: Boolean!
+  windows: [HistoryDownloadTimeWindow!]!
+  updatedAt: DateTime
+}
+
+type HistoryDownloadTimeWindow {
+  start: String!
+  end: String!
+}
+
+input HistoryDownloadTimeWindowInput {
+  start: String!
+  end: String!
+}
+
 """节假日信息"""
 type Holiday {
   id: Int!
@@ -3791,6 +3814,8 @@ type MessageResponse {
 
 "QuantX 系统数据变更接口\n\n## 主要功能\n\n### 订单操作\n- 创建买入/卖出订单\n- 取消未成交订单\n\n### 持仓管理\n- 执行清仓操作\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 策略管理\n- 创建、更新、删除策略模板\n- 管理策略实例的生命周期\n"
 type Mutation {
+  updateHistoryDownloadSettings(input: UpdateHistoryDownloadSettingsInput!): HistoryDownloadSettingsView!
+
   """更新 AI Runtime 全局非敏感配置"""
   updateAiRuntimeSettings(input: UpdateAiRuntimeSettingsInput!): AiRuntimeSettings!
 
@@ -4108,6 +4133,18 @@ type Mutation {
 
   """更新分组内自选股完整排序"""
   reorderWatchlistGroupItems(input: ReorderWatchlistGroupItemsInput!): WatchlistMutationResult!
+
+  """原生设备预览 CANARY 发布确认；正式证据由 Engine 执行时复核"""
+  previewTAssistantLiveRelease(request: TAssistantReleaseRequest!): TAssistantReleaseResult!
+
+  """消费原设备发布凭据并入队；入队不表示发布成功或允许交易"""
+  confirmTAssistantLiveRelease(challengeId: String!, confirmationToken: String!): TAssistantReleaseResult!
+
+  """预览独立 LIVE ENTRY 及其绑定的自动退出保护"""
+  previewTAssistantLiveEntry(accountId: String!, executionId: String!, intentId: String!): TradeApprovalPreviewResult!
+
+  """消费原设备凭据，将同一 ENTRY 交给 Engine 重新分配；不表示成交"""
+  confirmTAssistantLiveEntry(accountId: String!, executionId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
 
   """上报做 T V3 客户端固定低基数刷新遥测"""
   recordTTradeClientTelemetry(input: TTradeClientTelemetryInput!): TTradeClientTelemetryResult!
@@ -4826,6 +4863,8 @@ type QuarantinedOrder {
 
 "QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
+  historyDownloadSettings: HistoryDownloadSettingsView!
+
   """AI Runtime 全局非敏感配置与应用状态"""
   aiRuntimeSettings: AiRuntimeSettings!
 
@@ -5173,6 +5212,9 @@ type Query {
   tAssistantPaperReasons(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperReasonTAssistantPaperPage!
   tAssistantPaperOrders(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperOrderTAssistantPaperPage!
   tAssistantPaperExitPlans(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperExitPlanTAssistantPaperPage!
+
+  """当前独立 LIVE 做 T 执行的人工确认队列"""
+  tAssistantLiveApprovalQueue(accountId: String!): TAssistantLiveApprovalQueue!
 
   """按精确回测版本读取真实机会事件，不从审计推导信号"""
   tTradeReplaySignalEvaluations(runId: String!, backtestId: String!, filters: TTradeReplaySignalFilterInput = null, first: Int! = 50, after: String = null): TTradeReplaySignalPage!
@@ -7351,6 +7393,27 @@ type Subscription {
   strategyKlines(runId: String!, periods: [String!] = null): StrategyKLineData!
 }
 
+type TAssistantLiveApprovalQueue {
+  executionId: String
+  status: String
+  entryAuthorization: String
+  entryReadiness: String
+  reasonCodes: [String!]!
+  entries: [TAssistantLiveEntry!]!
+  truncated: Boolean!
+}
+
+type TAssistantLiveEntry {
+  intentId: String!
+  instrumentCode: String!
+  status: String!
+  requestedAmount: Float
+  reason: String!
+  expiresAt: DateTime
+  canPreview: Boolean!
+  confirmationStatus: String!
+}
+
 type TAssistantPaperAllocation {
   allocationBatchId: String!
   cycleId: String!
@@ -7474,6 +7537,41 @@ type TAssistantPaperReason {
 type TAssistantPaperReasonTAssistantPaperPage {
   nodes: [TAssistantPaperReason!]!
   pageInfo: PageInfo!
+}
+
+type TAssistantReleasePreview {
+  challengeId: String!
+  confirmationToken: String!
+  expiresAt: DateTime!
+  accountId: String!
+  sourceExecutionId: String!
+  configVersionId: String!
+  configSnapshotHash: String!
+  reportHash: String!
+  policyHash: String!
+  windowStart: DateTime!
+  windowEnd: DateTime!
+}
+
+input TAssistantReleaseRequest {
+  accountId: String!
+  sourceExecutionId: String!
+  configVersionId: String!
+  expectedConfigHash: String!
+  expectedHeadVersion: Int!
+  evaluationId: String!
+  expectedReportHash: String!
+  expectedPolicyHash: String!
+  windowStart: DateTime!
+  windowEnd: DateTime!
+}
+
+type TAssistantReleaseResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: TAssistantReleasePreview
+  engineCommandId: String
 }
 
 """做 T 买入确认同时覆盖的精确自动退出范围"""
@@ -9320,6 +9418,13 @@ input UpdateEntryPlanInput {
   exitProtection: EntryExitProtectionInput = null
   note: String! = ""
   idempotencyKey: String! = ""
+}
+
+input UpdateHistoryDownloadSettingsInput {
+  expectedVersion: Int!
+  mode: HistoryDownloadMode!
+  nonTradingDaysAllowed: Boolean!
+  windows: [HistoryDownloadTimeWindowInput!]!
 }
 
 """更新人工计划"""

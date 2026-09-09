@@ -316,3 +316,16 @@ mutation 仍需 `ADMIN`。训练查询的 operation policy 为 `market:read` +
 `confirmExitIntent` 或 `rejectExitIntent`。确认挑战只授权该意图再次进入统一
 风控，不代表委托提交或成交。旧 `liquidatePosition` 与
 `liquidateAllPositions` 保留为 `AVAILABLE_NOW + UNALLOCATED_ONLY` 兼容适配器。
+
+## 独立做 T CANARY 发布确认
+
+`previewTAssistantLiveRelease(request)` 与 `confirmTAssistantLiveRelease(challengeId,
+confirmationToken)` 仅面向原生设备会话，要求唯一账户、`t-trade:control` 和
+`trade:approve`，签发及消费时均复验会话。预览绑定原 PAPER execution、目标配置 hash、
+已审核 P5 报告/policy hash、评估 UUID、配置头版本及维护窗口；不接受文件路径或审核人参数。
+凭据有效期最多 60 秒。确认与 Engine outbox 入队同事务，重复确认返回原命令 ID。
+`RELEASE_QUEUED` 仅表示入队，须读取该 Engine 命令结果确认发布状态。
+
+Engine 使用显式 `T_ASSISTANT_EVALUATION_ROOT/<evaluationId>`，重新核验 P5 文件、事实链、
+指标和目标交易策略后创建 WARMING 执行。该根目录须在部署端配置且只放已审核的评估产物。
+预览本身不代表 P5 通过；服务不启用实盘开关，预热、账户与 Agent 就绪仍需后续检查。

@@ -542,7 +542,17 @@ _register(
   risk="ADMIN",
 )
 
+_register(
+  "Mutation",
+  "t-trade:control",
+  {"previewTAssistantLiveRelease", "confirmTAssistantLiveRelease"},
+  audiences=("native",),
+  risk="TRADING_WRITE",
+)
+
 _TRADE_APPROVAL_FIELDS = {
+  "previewTAssistantLiveRelease",
+  "confirmTAssistantLiveRelease",
   "confirmAccountExecutionControl",
   "activateTTradeLive",
   "approveStrategyTradeIntent",

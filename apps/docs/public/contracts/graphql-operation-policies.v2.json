@@ -376,6 +376,30 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "confirmTAssistantLiveEntry": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "liquidation:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmTAssistantLiveRelease": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "confirmTTradeControl": {
         "audiences": [
           "web",
@@ -792,6 +816,30 @@
         ],
         "requiredPermissions": [
           "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewTAssistantLiveEntry": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "liquidation:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewTAssistantLiveRelease": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
           "trade:approve"
         ],
         "risk": "TRADING_WRITE",
@@ -1507,6 +1555,16 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "updateHistoryDownloadSettings": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-config:write"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
       "updateManualExitPlan": {
         "audiences": [
           "web",
@@ -2024,6 +2082,16 @@
         "stability": "web-internal"
       },
       "getDeploymentByName": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "historyDownloadSettings": {
         "audiences": [
           "web"
         ],
@@ -2933,6 +3001,18 @@
         "stability": "supported"
       },
       "strategyRuns": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tAssistantLiveApprovalQueue": {
         "audiences": [
           "web",
           "native",

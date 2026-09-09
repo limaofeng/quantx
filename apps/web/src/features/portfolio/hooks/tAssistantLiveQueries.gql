@@ -81,3 +81,33 @@ mutation Portfolio_ConfirmTAssistantLiveEntry(
     challengeId
   }
 }
+
+mutation Portfolio_PreviewTAssistantLiveRelease($request: TAssistantReleaseRequest!) {
+  previewTAssistantLiveRelease(request: $request) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      expiresAt
+      accountId
+      sourceExecutionId
+      configVersionId
+      configSnapshotHash
+      reportHash
+      policyHash
+      windowStart
+      windowEnd
+    }
+  }
+}
+
+mutation Portfolio_ConfirmTAssistantLiveRelease($challengeId: String!, $confirmationToken: String!) {
+  confirmTAssistantLiveRelease(challengeId: $challengeId, confirmationToken: $confirmationToken) {
+    success
+    code
+    message
+    engineCommandId
+  }
+}

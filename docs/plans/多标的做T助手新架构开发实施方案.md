@@ -730,7 +730,17 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   API→outbox→Engine→WARMING 合成整链及联合负例 15 项通过，配置变化/回滚补强后 API
   定向 10 项通过，Ruff 通过；证据 `p6-api-release-confirmation.xml`、`p6-api-release-final.xml`
   均位于 `.codex_screenshots/`。测试替换会话查库结果；公开 GraphQL 与客户端契约尚未接入。
-- 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
+- 原生 GraphQL 已暴露发布预览/确认，操作策略明确 native + t-trade:control/trade:approve；
+  输出绑定目标/报告/policy hash、窗口和确认凭据，确认返回队列命令 ID，不声明发布成功。
+  客户端 .gql、生成类型及公开 SDL/v2 operation policy 已同步。相关 Python 16 项及接口级
+  1 项通过；本地 Caddy `/health/live` 与新类型 introspection 通过，根目录 codegen/check/
+  lint/test:run/build 全通过（165 文件、895 测试；仅原有 Fast Refresh 警告）。
+  证据 `.codex_screenshots/p6-release-{schema,graphql,codegen,check,lint,test-run,build}.log`。
+  为恢复实际端点：开发库已备份 `p6-pre-schema-development.dump`（4909945 字节、归档目录可读），
+  0059→0069 迁移完成；0063 对已存在 history settings 做精确结构接管，3 项测试及实际迁移通过，
+  独立提交 `18db38c7`。本机忽略文件补内部随机 token，标准 dev/full/paper 服务已恢复。
+  未接发布结果查询/操作界面，未创建业务审批或启用实盘，发布服务仍需正式评估根目录配置。
+- 剩余开发顺序：LIVE 发布结果查询与界面、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

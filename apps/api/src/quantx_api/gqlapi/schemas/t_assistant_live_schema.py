@@ -1,5 +1,6 @@
 """Explicit LIVE owner queue and device-bound two-phase entry confirmation."""
 
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 import strawberry
@@ -15,6 +16,10 @@ from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from sqlalchemy import case, select
 
 from ..security import authorized_account_id, principal_from_context
+from ..t_assistant_release_confirmation import (
+  consume_release_confirmation,
+  issue_release_confirmation,
+)
 from ..trade_approval import (
   T_TRADE_ENTRY_APPROVAL,
   TradeApprovalChallengeError,
@@ -27,6 +32,44 @@ from ..types.trade_approval_types import (
   TradeApprovalPreview,
   TradeApprovalPreviewResult,
 )
+
+
+@strawberry.input
+class TAssistantReleaseRequest:
+  account_id: str
+  source_execution_id: str
+  config_version_id: str
+  expected_config_hash: str
+  expected_head_version: int
+  evaluation_id: str
+  expected_report_hash: str
+  expected_policy_hash: str
+  window_start: datetime
+  window_end: datetime
+
+
+@strawberry.type
+class TAssistantReleasePreview:
+  challenge_id: str
+  confirmation_token: str
+  expires_at: datetime
+  account_id: str
+  source_execution_id: str
+  config_version_id: str
+  config_snapshot_hash: str
+  report_hash: str
+  policy_hash: str
+  window_start: datetime
+  window_end: datetime
+
+
+@strawberry.type
+class TAssistantReleaseResult:
+  success: bool
+  code: str
+  message: str
+  preview: TAssistantReleasePreview | None = None
+  engine_command_id: str | None = None
 
 
 @strawberry.type
@@ -223,6 +266,77 @@ def _approval_scope(info, account_id):
 
 @strawberry.type
 class TAssistantLiveMutation:
+  @strawberry.mutation(
+    description="原生设备预览 CANARY 发布确认；正式证据由 Engine 执行时复核"
+  )
+  async def preview_t_assistant_live_release(
+    self, info: strawberry.types.Info, request: TAssistantReleaseRequest
+  ) -> TAssistantReleaseResult:
+    principal = principal_from_context(info.context)
+    try:
+      async with AsyncSessionLocal() as db, db.begin():
+        issued = await issue_release_confirmation(
+          db, principal=principal, request=asdict(request), now=datetime.now(UTC)
+        )
+      normalized = issued["request"]
+      return TAssistantReleaseResult(
+        success=True,
+        code="PREVIEW_READY",
+        message="请核对目标配置、已审核报告和维护窗口；确认后交由 Engine 复核发布",
+        preview=TAssistantReleasePreview(
+          challenge_id=issued["challenge_id"],
+          confirmation_token=issued["confirmation_token"],
+          expires_at=issued["expires_at"],
+          account_id=normalized["account_id"],
+          source_execution_id=normalized["source_execution_id"],
+          config_version_id=normalized["config_version_id"],
+          config_snapshot_hash=normalized["expected_config_hash"],
+          report_hash=normalized["expected_report_hash"],
+          policy_hash=normalized["expected_policy_hash"],
+          window_start=datetime.fromisoformat(normalized["window_start"]),
+          window_end=datetime.fromisoformat(normalized["window_end"]),
+        ),
+      )
+    except TradeApprovalChallengeError as exc:
+      return TAssistantReleaseResult(success=False, code=exc.code, message=exc.message)
+    except ValueError:
+      return TAssistantReleaseResult(
+        success=False,
+        code="RELEASE_PREVIEW_UNAVAILABLE",
+        message="发布范围、配置或窗口已变化，请核对后重试",
+      )
+
+  @strawberry.mutation(
+    description="消费原设备发布凭据并入队；入队不表示发布成功或允许交易"
+  )
+  async def confirm_t_assistant_live_release(
+    self, info: strawberry.types.Info, challenge_id: str, confirmation_token: str
+  ) -> TAssistantReleaseResult:
+    principal = principal_from_context(info.context)
+    try:
+      async with AsyncSessionLocal() as db, db.begin():
+        command_id = await consume_release_confirmation(
+          db,
+          principal=principal,
+          challenge_id=challenge_id,
+          confirmation_token=confirmation_token,
+          now=datetime.now(UTC),
+        )
+      return TAssistantReleaseResult(
+        success=True,
+        code="RELEASE_QUEUED",
+        message="发布请求已入队，等待 Engine 复核结果",
+        engine_command_id=command_id,
+      )
+    except TradeApprovalChallengeError as exc:
+      return TAssistantReleaseResult(success=False, code=exc.code, message=exc.message)
+    except ValueError:
+      return TAssistantReleaseResult(
+        success=False,
+        code="RELEASE_CONFIRMATION_UNAVAILABLE",
+        message="发布凭据或配置已变化，请重新预览",
+      )
+
   @strawberry.mutation(description="预览独立 LIVE ENTRY 及其绑定的自动退出保护")
   async def preview_t_assistant_live_entry(
     self,
