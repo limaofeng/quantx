@@ -1000,6 +1000,9 @@ async def stock_selection_training_dispatch_flow(
   poll_interval_seconds: float = 0.25,
   prefect_flow_run_id: str = "",
 ) -> dict[str, Any]:
+  from quantx_trainer.dispatch_status import DispatchObservation
+
+  observation = DispatchObservation(Path(config_path), "training")
   async with training_session(config_path) as db:
     logger = get_run_logger()
     timestamp = now or _now()
@@ -1007,10 +1010,10 @@ async def stock_selection_training_dispatch_flow(
     lost = await recover_lost_training_runs(repository, now=timestamp)
     heartbeat_details = await repository.get_execution_capability(now=now or _now())
     if heartbeat_details.get("cpu_available") is not True:
-      return {"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"}
+      return observation.record({"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"})
     admission_reason = await asyncio.to_thread(_host_admission_reason)
     if admission_reason:
-      return {"status": "QUEUED", "reason": admission_reason}
+      return observation.record({"status": "QUEUED", "reason": admission_reason})
     flow_id = (
       prefect_flow_run_id
       or os.environ.get("PREFECT_FLOW_RUN_ID", "")
@@ -1024,14 +1027,14 @@ async def stock_selection_training_dispatch_flow(
           flow_id, timestamp, prepare_execution=prepare,
         )
       except TrainerAdmissionClosed as exc:
-        return {"status": "QUEUED", "reason": str(exc)}
+        return observation.record({"status": "QUEUED", "reason": str(exc)})
       if run is None:
-        return {
+        return observation.record({
           "status": "IDLE",
           "reason": "NO_QUEUED_RUN_OR_RUNNING_LIMIT",
           "recovered_run_ids": lost,
           "capability": heartbeat_details,
-        }
+        })
       spec = await repository.get_spec(str(run.spec_id))
       dataset = (
         await repository.get_dataset(str(spec.dataset_version))
@@ -1046,11 +1049,12 @@ async def stock_selection_training_dispatch_flow(
           error_message="immutable training spec or certified dataset is missing",
           completed_at=timestamp,
         )
-        return {
+        return observation.record({
           "status": "FAILED",
           "run_id": str(run.run_id),
           "error_code": "TRAINING_EVIDENCE_MISSING",
-        }
+        })
+      observation.record({"status": "RUNNING", "run_id": str(run.run_id)})
       logger.info("开始隔离次日上涨概率训练: run_id=%s", run.run_id)
       result = await _run_claimed_job(
         repository,
@@ -1062,7 +1066,7 @@ async def stock_selection_training_dispatch_flow(
       )
       result["recovered_run_ids"] = lost
       result["capability"] = heartbeat_details
-      return result
+      return observation.record(result)
 
 
 @flow(name="stock-selection-training-capability", retries=0)

@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 from prefect import flow, get_run_logger
@@ -229,6 +230,9 @@ async def _run_preparation_process(config, job, payload, check):
 
 @flow(name="trainer-preparation", retries=0)
 async def trainer_preparation_flow(config_path: str):
+  from quantx_trainer.dispatch_status import DispatchObservation
+
+  observation = DispatchObservation(Path(config_path), "preparation")
   async with training_session(config_path) as db:
     config = current_config()
     repository = ResearchPreparationRepository(db)
@@ -236,7 +240,7 @@ async def trainer_preparation_flow(config_path: str):
     recovered = await recover_preparation_results(config, repository, datasets)
     reason = await asyncio.to_thread(_host_admission_reason)
     if reason:
-      return {"status": "QUEUED", "reason": reason}
+      return observation.record({"status": "QUEUED", "reason": reason})
     with _input_attempt(get_run_logger()) as prepare:
       from quantx_trainer.admission import TrainerAdmissionClosed
 
@@ -245,10 +249,11 @@ async def trainer_preparation_flow(config_path: str):
           str(uuid.uuid4()), kinds=("GPU", "CERTIFY"), executor="TRAINER", prepare_execution=prepare
         )
       except TrainerAdmissionClosed as exc:
-        return {"status": "QUEUED", "reason": str(exc)}
+        return observation.record({"status": "QUEUED", "reason": str(exc)})
       if job is None:
-        return {"status": "IDLE", "recovered_job_ids": recovered}
+        return observation.record({"status": "IDLE", "recovered_job_ids": recovered})
       job_id, owner = job.job_id, job.flow_run_id
+      observation.record({"status": "RUNNING", "job_id": str(job_id)})
 
       async def check():
         await repository.progress(job_id, expected_flow_run_id=owner)
@@ -270,29 +275,29 @@ async def trainer_preparation_flow(config_path: str):
           if type(result.get("ready")) is not bool:
             raise ValueError("PREPARATION_RESULT_INVALID")
           registration_started = True
-          return await _finish_preparation_result(config, repository, datasets, job, result)
+          return observation.record(await _finish_preparation_result(config, repository, datasets, job, result))
         except PreparationAdmissionDenied:
           await repository.requeue_trainer_admission(job_id, expected_flow_run_id=owner)
-          return {
+          return observation.record({
             "job_id": job_id,
             "status": "QUEUED",
             "reason": "HOST_ADMISSION_DENIED",
-          }
+          })
         except PreparationStopUnconfirmed:
-          return {
+          return observation.record({
             "job_id": job_id,
             "status": "RUNNING",
             "reason": "PREPARATION_STOP_UNCONFIRMED",
-          }
+          })
         except asyncio.CancelledError:
           raise
         except Exception:
           if registration_started:
-            return {
+            return observation.record({
               "job_id": job_id,
               "status": "RUNNING",
               "reason": "PREPARATION_RESULT_REGISTRATION_PENDING",
-            }
+            })
           await repository.progress(
             job_id,
             expected_flow_run_id=owner,
@@ -300,4 +305,4 @@ async def trainer_preparation_flow(config_path: str):
             phase="准备执行失败",
             error="PREPARATION_RETRY_REQUIRED",
           )
-          return {"job_id": job_id, "status": "FAILED"}
+          return observation.record({"job_id": job_id, "status": "FAILED"})
