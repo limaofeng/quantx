@@ -11,6 +11,7 @@ import os
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from quantx_contracts.history_upload import HistoryUploadChunk, HistoryUploadSnapshot
 from quantx_infrastructure.auth.agent_access import authenticate_agent_session
 from quantx_infrastructure.auth.errors import AuthError
 from quantx_infrastructure.auth.tokens import utcnow
@@ -217,6 +218,57 @@ async def _requeue_busy_market_data_request(
     market_request.updated_at = utcnow()
     await db.commit()
     return True
+
+
+@agent_router.get(
+  "/agent/market-data/{request_id}/upload", response_model=HistoryUploadSnapshot
+)
+async def get_market_data_upload(request_id: uuid.UUID, request: Request):
+  """Read immutable receipt identities, never paths, files or collection state."""
+  async with AsyncSessionLocal() as db:
+    try:
+      identity = await authenticate_agent_session(
+        db, settings, token=_bearer(request), history=True
+      )
+    except AuthError as exc:
+      raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    # The same row lock as PUT/complete gives one coherent request + chunk view.
+    row = await db.scalar(
+      select(MarketDataRequest)
+      .where(
+        MarketDataRequest.request_id == str(request_id),
+        MarketDataRequest.device_id == identity.device.id,
+      )
+      .with_for_update(read=True)
+    )
+    if row is None:
+      raise HTTPException(status_code=404, detail="行情数据请求不存在")
+    transfers = (
+      (
+        await db.execute(
+          select(MarketDataTransfer)
+          .where(MarketDataTransfer.request_id == str(request_id))
+          .order_by(MarketDataTransfer.chunk_index)
+          .limit(129)
+        )
+      )
+      .scalars()
+      .all()
+    )
+    return HistoryUploadSnapshot(
+      request_id=request_id,
+      status=row.status,
+      total_chunks=row.expected_chunks,
+      chunks=[
+        HistoryUploadChunk(
+          index=item.chunk_index,
+          sha256=item.checksum_sha256,
+          record_count=item.record_count,
+          byte_count=item.compressed_bytes,
+        )
+        for item in transfers
+      ],
+    )
 
 
 @agent_router.post(

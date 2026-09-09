@@ -5356,7 +5356,7 @@ class AgentRuntime:
     chunk_index: int,
     chunk: _MarketDataSpoolChunk,
     total_chunks: int,
-  ) -> None:
+  ) -> httpx.Response:
     self._ensure_market_upload_state()
     async with self._history_upload_slots:
       upload_started = time.monotonic()
@@ -5403,6 +5403,7 @@ class AgentRuntime:
     uploaded = self._history_uploaded_chunks.setdefault(request_id, {})
     uploaded[chunk_index] = chunk.compressed_bytes
     self._set_history_progress(request_id, uploaded_bytes=sum(uploaded.values()))
+    return response
 
   async def _upload_provisional_market_data_chunk(
     self,
@@ -5410,8 +5411,8 @@ class AgentRuntime:
     request_id: str,
     chunk_index: int,
     chunk: _MarketDataSpoolChunk,
-  ) -> None:
-    await self._put_market_data_chunk(
+  ) -> httpx.Response:
+    return await self._put_market_data_chunk(
       client,
       request_id=request_id,
       chunk_index=chunk_index,
@@ -5425,14 +5426,13 @@ class AgentRuntime:
     total_chunks: int,
     *,
     client: httpx.AsyncClient | None = None,
-  ) -> None:
+  ) -> httpx.Response:
     if client is None:
-      await self._finalize_market_data_upload(
+      return await self._finalize_market_data_upload(
         request_id,
         total_chunks,
         client=self._market_data_upload_client(),
       )
-      return
     self._ensure_market_upload_state()
     async with self._history_upload_slots:
       response = await client.post(
@@ -5454,6 +5454,7 @@ class AgentRuntime:
 
     getattr(self, "_history_progress", {}).pop(request_id, None)
     getattr(self, "_history_uploaded_chunks", {}).pop(request_id, None)
+    return response
 
   async def _prepared_market_data_chunks(
     self,

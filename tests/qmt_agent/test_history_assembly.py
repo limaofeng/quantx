@@ -175,3 +175,48 @@ async def test_staging_and_compression_share_remaining_physical_budget(
       runtime._prepare_history_job_sync(job, artifacts)
   assert len(list(job.artifacts_directory.glob("*.jsonl"))) == len(job.units)
   assert not list(runtime._market_spool_root.glob("request-*/chunk-*.json.gz"))
+
+
+async def test_many_small_native_units_do_not_exhaust_wire_chunk_limit(assembly):
+  runtime, _, _, _ = assembly
+  payload = {
+    "operation": "instrument_details",
+    "stock_list": [f"{index:06d}.SZ" for index in range(2580)],
+  }
+  payloads = historical_work_units(payload)
+  assert len(payloads) == 129
+  request = HistoryRequest(
+    request_id=uuid4(), payload=payload, unit_count=129, completed_units=129
+  )
+  job = HistoryJobs(
+    runtime._market_spool_root, device_id=runtime.configuration.device_id
+  ).retain(request, reserve=Mock(), release=Mock())
+  artifacts = NativeUnitArtifacts(
+    job.artifacts_directory, max_bytes=100000, max_record_bytes=10000, max_records=100
+  )
+  now = datetime.now(timezone.utc)
+  for unit, unit_payload in zip(job.units, payloads, strict=True):
+    permit = CollectionPermit(
+      permit_id=uuid4(),
+      device_id=runtime.configuration.device_id,
+      owner_epoch=1,
+      unit=unit,
+      issued_at=now,
+      expires_at=now + timedelta(seconds=15),
+    )
+    runtime.journal.accept_collection_permit(
+      permit, device_id=runtime.configuration.device_id, unit=unit, now=now
+    )
+    result = artifacts.seal(
+      unit,
+      ({"code": code} for code in unit_payload["stock_list"]),
+      reserve=Mock(),
+      release=Mock(),
+    )
+    runtime.journal.record_collection_artifact(
+      permit_id=str(permit.permit_id), artifacts=artifacts, artifact=result
+    )
+  async with runtime._historical_worker_lock:
+    prepared = runtime._prepare_history_job_sync(job, artifacts)
+  assert len(prepared.chunks) == 1
+  assert prepared.record_count == 2580

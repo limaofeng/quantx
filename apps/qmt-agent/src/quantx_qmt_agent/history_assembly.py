@@ -16,7 +16,11 @@ from quantx_contracts import (
 )
 from quantx_contracts.collection_permit import CollectionUnit
 
-from .historical_worker import _HistoricalDiskBudget, _iter_request_records
+from .historical_worker import (
+  HISTORICAL_CHECKPOINT,
+  _HistoricalDiskBudget,
+  _iter_request_records,
+)
 from .history_jobs import HistoryJob
 from .journal import LocalJournal
 from .native_unit_artifact import NativeUnitArtifacts
@@ -109,7 +113,7 @@ def history_request_records(
       raise ValueError("history assembly plan identity mismatch")
     yield from _verified_unit_records(artifacts.replay(results[index]), payload)
 
-  yield from _iter_request_records(
+  records = _iter_request_records(
     None,
     request.payload,
     SimpleNamespace(send=lambda _: None),
@@ -121,3 +125,11 @@ def history_request_records(
     disk_budget=disk_budget,
     read_unit=read_unit,
   )
+  try:
+    for record in records:
+      # All native work is already complete. Scheduling boundaries must not
+      # turn many tiny units into more than the wire's 128 upload chunks.
+      if record is not chunk_boundary and record is not HISTORICAL_CHECKPOINT:
+        yield record
+  finally:
+    records.close()

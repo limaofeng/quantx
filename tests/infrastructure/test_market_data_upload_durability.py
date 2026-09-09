@@ -110,3 +110,51 @@ async def test_cancel_waits_for_publisher_before_cleanup(tmp_path, monkeypatch):
       await task
   assert destination.read_bytes() == b"retained"
   assert not temporary.exists()
+
+
+async def test_upload_snapshot_is_scoped_read_only_and_excludes_storage_paths(
+  tmp_path, monkeypatch
+):
+  from types import SimpleNamespace
+  from uuid import UUID
+
+  import httpx
+  from fastapi import FastAPI, HTTPException
+  from quantx_contracts.history_upload import HistoryUploadSnapshot
+
+  async with _market_data_database() as (_, sessions):
+    _configure_api(monkeypatch, sessions, tmp_path)
+    await _seed_dispatch_request(
+      sessions,
+      request_id=REQUEST_ID,
+      status="DELIVERED",
+      now=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    request = SimpleNamespace(headers={"authorization": "Bearer agent-token"})
+    app = FastAPI()
+    app.include_router(api.agent_router)
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+      response = await client.get(
+        f"/agent/market-data/{REQUEST_ID}/upload", headers=request.headers
+      )
+      assert response.status_code == 200
+      before = HistoryUploadSnapshot.model_validate_json(response.content)
+    assert not before.frozen and before.chunks == []
+    await _upload(b"compressed-test-bytes", total_chunks=1)
+    snapshot = await api.get_market_data_upload(UUID(REQUEST_ID), request)
+    assert snapshot.frozen and snapshot.total_chunks == 1
+    assert snapshot.chunks[0].byte_count == len(b"compressed-test-bytes")
+    assert "storage_reference" not in snapshot.model_dump_json()
+    assert await api.get_market_data_upload(UUID(REQUEST_ID), request) == snapshot
+    async with sessions() as db:
+      assert (await db.get(MarketDataRequest, REQUEST_ID)).status == "UPLOADED"
+
+    async def wrong_device(*args, **kwargs):
+      return SimpleNamespace(device=SimpleNamespace(id="other-device"))
+
+    monkeypatch.setattr(api, "authenticate_agent_session", wrong_device)
+    with pytest.raises(HTTPException) as rejected:
+      await api.get_market_data_upload(UUID(REQUEST_ID), request)
+    assert rejected.value.status_code == 404

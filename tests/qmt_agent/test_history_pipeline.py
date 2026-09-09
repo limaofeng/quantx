@@ -31,7 +31,10 @@ PAYLOAD = {
 
 
 @pytest.mark.parametrize("lose_finish", [False, True])
-async def test_retained_request_to_native_file_and_http_upload(tmp_path, lose_finish):
+@pytest.mark.parametrize("lose_complete", [False, True])
+async def test_retained_request_to_native_file_and_http_upload(
+  tmp_path, lose_finish, lose_complete
+):
   runtime = AgentRuntime.__new__(AgentRuntime)
   runtime.configuration = SimpleNamespace(
     device_id=str(uuid4()), api_url="https://history.test"
@@ -55,11 +58,23 @@ async def test_retained_request_to_native_file_and_http_upload(tmp_path, lose_fi
   )
   events, captured = [], []
   lost = False
+  frozen, lost_complete, uploaded = False, False, []
 
   async def http(message):
-    nonlocal lost
+    nonlocal lost, frozen, lost_complete
     assert message.headers["authorization"] == "Bearer history-only-token"
     body = await message.aread()
+    if message.method == "GET":
+      assert message.url.path.endswith("/upload")
+      return httpx.Response(
+        200,
+        json={
+          "request_id": str(request.request_id),
+          "status": "UPLOADED" if frozen else "RECEIVING",
+          "total_chunks": len(uploaded) if frozen else None,
+          "chunks": uploaded,
+        },
+      )
     if message.url.path.endswith("/receipts"):
       receipt = json.loads(body)
       events.append(receipt["event"])
@@ -78,12 +93,24 @@ async def test_retained_request_to_native_file_and_http_upload(tmp_path, lose_fi
       assert message.headers["x-total-chunks"] == "0"
       assert message.headers["x-content-sha256"] == hashlib.sha256(body).hexdigest()
       captured.extend(json.loads(gzip.decompress(body)))
+      uploaded.append(
+        {
+          "index": 0,
+          "sha256": hashlib.sha256(body).hexdigest(),
+          "record_count": int(message.headers["x-record-count"]),
+          "byte_count": len(body),
+        }
+      )
       events.append("PUT")
     else:
       assert message.url.path.endswith("/complete")
       assert message.headers["x-total-chunks"] == "1"
       events.append("COMPLETE")
-    return httpx.Response(202, json={"accepted": True})
+      frozen = True
+      if lose_complete and not lost_complete:
+        lost_complete = True
+        raise httpx.ReadError("lost complete response")
+    return httpx.Response(202, json={"accepted": True, "duplicate": False})
 
   def native(grant, payload):
     assert grant == permit and payload == PAYLOAD
@@ -117,11 +144,15 @@ async def test_retained_request_to_native_file_and_http_upload(tmp_path, lose_fi
         grant = grant.model_copy(update={"state": "STARTED"})
       await runtime._handle_history_work(grant)
       assert "PUT" not in events  # local FINISH alone is not server progress
-      await runtime._handle_history_work(
-        request.model_copy(update={"completed_units": 1})
-      )
+      completed = request.model_copy(update={"completed_units": 1})
+      if lose_complete:
+        with pytest.raises(httpx.ReadError, match="lost complete"):
+          await runtime._handle_history_work(completed)
+      await runtime._handle_history_work(completed)
       assert events.count("NATIVE") == 1
       assert events.count("START") == 1
+      assert events.count("PUT") == 1
+      assert events.count("COMPLETE") == 1
       assert events[-2:] == ["PUT", "COMPLETE"]
       assert captured[0]["close"] == 10
       await runtime._handle_history_work(
@@ -133,3 +164,36 @@ async def test_retained_request_to_native_file_and_http_upload(tmp_path, lose_fi
       runtime._history_upload_io_executor.shutdown(wait=True)
       runtime._historical_ipc_executor.shutdown(wait=True)
       runtime.journal.connection.close()
+
+
+@pytest.mark.parametrize(
+  "status, body",
+  [
+    (200, {"accepted": True, "duplicate": False}),
+    (202, {"accepted": False, "duplicate": False}),
+    (202, {"accepted": 1, "duplicate": False}),
+    (202, {"accepted": True}),
+  ],
+)
+def test_upload_ack_must_match_contract(status, body):
+  from quantx_qmt_agent.history_pipeline import HistoryPipeline
+
+  with pytest.raises(ValueError):
+    HistoryPipeline._require_upload_ack(httpx.Response(status, json=body))
+
+
+def test_upload_snapshot_cannot_skip_different_local_bytes():
+  from quantx_contracts.history_upload import HistoryUploadSnapshot
+  from quantx_qmt_agent.history_pipeline import HistoryPipeline
+
+  snapshot = HistoryUploadSnapshot(
+    request_id=uuid4(),
+    status="RECEIVING",
+    total_chunks=None,
+    chunks=[{"index": 0, "sha256": "0" * 64, "record_count": 1, "byte_count": 10}],
+  )
+  prepared = SimpleNamespace(
+    chunks=[SimpleNamespace(digest="1" * 64, record_count=1, compressed_bytes=10)]
+  )
+  with pytest.raises(ValueError, match="differs from local bytes"):
+    HistoryPipeline._matching_chunks(snapshot, prepared)

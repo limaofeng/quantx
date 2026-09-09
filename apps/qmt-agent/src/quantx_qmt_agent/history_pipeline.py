@@ -6,10 +6,17 @@ blocking disk/native operation is joined before cancelling its owning handler.
 
 from __future__ import annotations
 
+import asyncio
+
 from quantx_contracts.history_session import (
   HistoryGrant,
   HistoryRequest,
   HistoryRequestRemoved,
+)
+from quantx_contracts.history_upload import (
+  HistoryUploadAcknowledgement,
+  HistoryUploadChunk,
+  HistoryUploadSnapshot,
 )
 
 from .collection_execution import CollectionExecution, join_history_thread
@@ -55,6 +62,59 @@ class HistoryPipeline:
       max_records=MAX_MARKET_DATA_REQUEST_RECORDS,
     )
 
+  async def _upload_snapshot(self, request_id):
+    runtime = self.runtime
+    async with asyncio.timeout(10):
+      token = await runtime._history_access_token()
+      async with runtime._market_data_upload_client().stream(
+        "GET",
+        f"{runtime.configuration.api_url}/agent/market-data/{request_id}/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=5,
+      ) as response:
+        response.raise_for_status()
+        if response.status_code != 200:
+          raise ValueError("unexpected history upload snapshot response")
+        raw = bytearray()
+        async for block in response.aiter_bytes():
+          if len(raw) + len(block) > 64 * 1024:
+            raise ValueError("history upload snapshot exceeds limit")
+          raw.extend(block)
+    snapshot = HistoryUploadSnapshot.model_validate_json(raw)
+    if str(snapshot.request_id) != request_id:
+      raise ValueError("history upload snapshot request mismatch")
+    if snapshot.status in {"FAILED", "CANCELLED", "INCOMPLETE"}:
+      raise ValueError("history upload request is terminal without acceptance")
+    return snapshot
+
+  @staticmethod
+  def _matching_chunks(snapshot, prepared):
+    if snapshot.total_chunks is not None and snapshot.total_chunks != len(
+      prepared.chunks
+    ):
+      raise ValueError("history upload manifest count mismatch")
+    matched = set()
+    for actual in snapshot.chunks:
+      if actual.index >= len(prepared.chunks):
+        raise ValueError("history upload manifest has unexpected chunk")
+      chunk = prepared.chunks[actual.index]
+      expected = HistoryUploadChunk(
+        index=actual.index,
+        sha256=chunk.digest,
+        record_count=chunk.record_count,
+        byte_count=chunk.compressed_bytes,
+      )
+      if actual != expected:
+        raise ValueError("history upload manifest differs from local bytes")
+      matched.add(actual.index)
+    return matched
+
+  @staticmethod
+  def _require_upload_ack(response):
+    if response.status_code != 202 or len(response.content) > 4096:
+      raise ValueError("unexpected history upload acknowledgement")
+    HistoryUploadAcknowledgement.model_validate_json(response.content)
+
   async def handle(self, message):
     runtime = self.runtime
     if isinstance(message, HistoryRequestRemoved):
@@ -74,13 +134,25 @@ class HistoryPipeline:
         )
       request_id = str(message.request_id)
       client = runtime._market_data_upload_client()
+      snapshot = await self._upload_snapshot(request_id)
+      matched = self._matching_chunks(snapshot, prepared)
+      if snapshot.frozen:
+        return
       for index, chunk in enumerate(prepared.chunks):
-        await runtime._upload_provisional_market_data_chunk(
+        if index in matched:
+          continue
+        response = await runtime._upload_provisional_market_data_chunk(
           client, request_id, index, chunk
         )
-      await runtime._finalize_market_data_upload(
+        self._require_upload_ack(response)
+      response = await runtime._finalize_market_data_upload(
         request_id, len(prepared.chunks), client=client
       )
+      self._require_upload_ack(response)
+      snapshot = await self._upload_snapshot(request_id)
+      self._matching_chunks(snapshot, prepared)
+      if not snapshot.frozen:
+        raise ValueError("history upload has not frozen its manifest")
       return
     if not isinstance(message, HistoryGrant):
       raise ValueError("unsupported history pipeline message")
