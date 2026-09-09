@@ -236,6 +236,19 @@ async def _dispatch(
   command_id: Optional[str] = None,
 ) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
+  if command_type == "T_ASSISTANT_CONFIRM_LIVE_RELEASE":
+    import os
+
+    from .t_assistant_confirmed_release import execute_confirmed_release
+
+    root = os.environ.get("T_ASSISTANT_EVALUATION_ROOT", "").strip()
+    if not root or set(payload) != {"challenge_id"}:
+      raise ValueError("LIVE_RELEASE_EVIDENCE_ROOT_AND_CHALLENGE_REQUIRED")
+    async with AsyncSessionLocal() as db, db.begin():
+      return await execute_confirmed_release(
+        db, challenge_id=payload["challenge_id"], command_id=command_id,
+        evidence_root=root, now=utcnow().replace(tzinfo=UTC),
+      )
   if command_type == "T_ASSISTANT_PREPARE_LIVE_CANARY":
     from .t_assistant_live_admission import dispatch_live_canary_preparation
 

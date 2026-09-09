@@ -716,6 +716,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   合成评估→真实隔离审批记录→现有命令创建 WARMING 整链及负例共 31 项通过，Ruff 通过。
   证据 `.codex_screenshots/p6-release-approval.xml`。公开端身份认证与二次确认仍未接入，
   actor 和 review_reference 由未来受信调用方提供，本服务不将普通参数视作用户实际授权。
+- Engine 注册 `T_ASSISTANT_CONFIRM_LIVE_RELEASE`，命令只能携带 challenge_id；核对
+  已消费控制面挑战、原 outbox message/aggregate/payload、账户与消费时效。审核人取挑战行，
+  不接受参数注入。评估 UUID 只解析到显式 `T_ASSISTANT_EVALUATION_ROOT` 的直接子目录。
+  完整证据核验、审批写入及 WARMING 创建位于同一保存点；失败整体回滚，重投复用原结果。
+  7 项隔离测试通过，含原命令重投、未消费/过期挑战、篡改命令、注入 actor、目录越界、
+  维护窗口未开始时审批回滚；Ruff 通过，证据 `.codex_screenshots/p6-confirmed-release.xml`。
+  API 侧挑战签发/消费尚待接入，当前测试挑战为合成记录；环境未配置评估根目录时拒绝命令。
 - 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
