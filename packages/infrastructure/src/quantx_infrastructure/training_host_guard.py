@@ -328,6 +328,14 @@ class HostResourceGuard:
 _active = threading.local()
 
 
+def training_cpu_threads() -> int:
+  """Use this process's admitted budget; standalone computations use one thread."""
+  guard = getattr(_active, "guard", None)
+  if guard is not None and guard.process.pid == os.getpid():
+    return guard.policy.cpu_threads
+  return 1
+
+
 @contextmanager
 def high_resource_guard():
   """Nested CLI entrypoints share ownership; a fork must acquire its own lock."""

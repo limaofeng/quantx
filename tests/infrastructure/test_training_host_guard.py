@@ -113,9 +113,25 @@ def test_nested_entrypoints_share_the_same_process_admission(root, monkeypatch):
     module, "HostResourceGuard", lambda path: original(path, now=evening)
   )
   with module.high_resource_guard() as outer:
+    assert module.training_cpu_threads() == 64
     with module.high_resource_guard() as inner:
       assert inner is outer
+      assert module.training_cpu_threads() == 64
   assert module._active.guard is None
+  assert module.training_cpu_threads() == 1
+
+
+def test_thread_budget_does_not_accept_inherited_owner_or_ambient_override(monkeypatch):
+  monkeypatch.setenv("OMP_NUM_THREADS", "999")
+  monkeypatch.setattr(
+    module._active,
+    "guard",
+    SimpleNamespace(
+      process=SimpleNamespace(pid=-1), policy=SimpleNamespace(cpu_threads=64)
+    ),
+    raising=False,
+  )
+  assert module.training_cpu_threads() == 1
 
 
 def test_cpu_budget_uses_measured_process_consumption(root, monkeypatch):

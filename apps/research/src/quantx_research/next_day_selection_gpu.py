@@ -30,6 +30,7 @@ from quantx_domain.stock_selection_training import (
   GpuQualificationStatus,
   stable_json_sha256,
 )
+from quantx_infrastructure.training_host_guard import training_cpu_threads
 
 from quantx_research.artifacts import write_json
 
@@ -887,6 +888,7 @@ def _default_backend_trial(
   started = time.perf_counter()
   params: dict[str, Any] = {
     "objective": "binary",
+    "n_jobs": training_cpu_threads(),
     "n_estimators": 40,
     "num_leaves": 15,
     "learning_rate": 0.03,

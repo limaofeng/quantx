@@ -76,7 +76,7 @@ def test_qualification_benchmark_excludes_future_outcomes(monkeypatch):
 
   class Model:
     def __init__(self, **kwargs):
-      pass
+      assert kwargs["n_jobs"] == 1
 
     def fit(self, x, y):
       assert x.shape[1] == len(selection_feature_columns())

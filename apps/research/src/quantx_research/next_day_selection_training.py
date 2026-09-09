@@ -43,6 +43,7 @@ from quantx_domain.stock_selection_training import (
   gate_conclusion,
   stable_json_sha256,
 )
+from quantx_infrastructure.training_host_guard import training_cpu_threads
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
@@ -381,7 +382,7 @@ def _fit_family(
       "colsample_bytree": config.lightgbm.colsample_bytree,
       "max_bin": config.lightgbm.max_bin,
       "random_state": config.random_seed,
-      "n_jobs": -1,
+      "n_jobs": training_cpu_threads(),
       "verbosity": -1,
       "device_type": (
         "gpu"
