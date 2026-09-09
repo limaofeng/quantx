@@ -22,6 +22,7 @@ from quantx_infrastructure.models.agent_runtime import (
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
+  TTradeRolloutEvent,
 )
 from quantx_infrastructure.models.enums import (
   AccountType,
@@ -39,6 +40,7 @@ from quantx_infrastructure.models.risk_increase_admission import (
 )
 from quantx_infrastructure.models.strategy import Strategy
 from quantx_infrastructure.models.strategy_run import StrategyRun
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_confirmation_challenge import (
   TradeConfirmationChallenge,
@@ -64,8 +66,8 @@ class SimulatedProcessLoss(BaseException):
 
 
 @pytest.fixture
-async def buy_chain(monkeypatch):
-  clock = SimpleNamespace(now=datetime(2026, 9, 7, 2))
+async def buy_chain(monkeypatch, request):
+  clock = SimpleNamespace(now=getattr(request, "param", datetime(2026, 9, 7, 2)))
   monkeypatch.setattr(commands, "utcnow", lambda: clock.now)
   monkeypatch.setattr(admission, "utcnow", lambda: clock.now)
   monkeypatch.setattr(
@@ -81,6 +83,8 @@ async def buy_chain(monkeypatch):
     OrderCorrelation,
     TradeCommandOutbox,
     TTradeBatch,
+    TTradeRolloutEvent,
+    TTradeGlobalConfig,
     StrategyRuntimeEvent,
     Order,
     Trade,
@@ -614,3 +618,49 @@ async def test_manual_buy_rejects_missing_or_wrong_owner_challenge(buy_chain, fa
     await initial_order(buy_chain)
   async with buy_chain.sessions() as db:
     assert list((await db.scalars(select(TradeCommandOutbox))).all()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("buy_chain", [datetime(2026, 9, 7, 6, 49, 20)], indirect=True)
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("filled", [0, 100])
+async def test_cutoff_retires_crashed_buy_replacement_and_never_resumes_next_day(
+  buy_chain, prepared, filled
+):
+  from quantx_engine.t_order_lifecycle import advance_order
+  from quantx_infrastructure.services.t_order_lifecycle_state import t_order_lifecycle_active
+
+  client = await initial_order(buy_chain)
+  await converge_first_attempt(buy_chain, client, filled)
+  buy_chain.clock.now += timedelta(seconds=31)  # 14:49:51 Shanghai.
+  with pytest.raises(SimulatedProcessLoss, match="simulated process loss"):
+    await replace(
+      buy_chain, client,
+      crash_after_stage=not prepared, crash_after_prepare=prepared,
+    )
+  buy_chain.clock.now += timedelta(seconds=9)  # Cutoff, still before total TTL.
+  async with buy_chain.sessions() as db:
+    pending = await db.get(PendingTradeOrder, client)
+    assert t_order_lifecycle_active(pending, buy_chain.clock.now)
+    assert (await db.get(TradeIntentRecord, "intent-1")).status == "EXECUTION_READY"
+    await advance_order(db, client, now=buy_chain.clock.now)
+    await db.commit()
+  for current in (buy_chain.clock.now, datetime(2026, 9, 8, 1, 30)):
+    buy_chain.clock.now = current
+    async with buy_chain.sessions() as db:
+      await advance_order(db, client, now=current)
+      await db.commit()
+    async with buy_chain.sessions() as db:
+      pending = await db.get(PendingTradeOrder, client)
+      assert pending.request_metadata["t_order_lifecycle_finished"] is True
+      assert pending.owner_id == "run-1" and pending.trace_id == "trace-1"
+      intent = await db.get(TradeIntentRecord, "intent-1")
+      assert intent.status != "EXECUTION_READY"
+      assert intent.executed_volume == filled
+      assert len(list((await db.scalars(select(PendingTradeOrder))).all())) == 1
+      assert len(list((await db.scalars(select(TradeCommandOutbox))).all())) == 1
+      assert not list((await db.scalars(select(AccountRiskIncreaseAdmissionBatch).where(
+        AccountRiskIncreaseAdmissionBatch.status == "PREPARED",
+      ))).all())
+      trades = list((await db.scalars(select(Trade))).all())
+      assert sum(trade.volume for trade in trades) == filled

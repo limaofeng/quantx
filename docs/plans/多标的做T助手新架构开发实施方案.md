@@ -1085,6 +1085,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   backlog 阻断，原 cut 与 ExitPlan 不变，无重建运行时。**3 项测试与 Ruff 通过**，证据
   `.codex_screenshots/p6-late-receipts-first.log`；SQLite 隔离验证覆盖实际事件入库/消费代码，
   不包括券商 inbox 传输、公共订单/成交投影或完整进程验收。
+  旧源公共 BUY 续单链补充独立 cutoff 证据：14:49:51 在持久化 staging/PREPARED 后模拟
+  进程丢失，14:50 恢复时总 TTL 尚未到，仍清除可执行续单和 PREPARED 准入；零成交/
+  部分成交两分支次日 09:30 重入均不生成新委托，原 owner/trace 与实际成交量保留。
+  该集成文件已补齐排空守卫所需真实表，**13 项测试与 Ruff 通过**，日志
+  `.codex_screenshots/p6-cutoff-recovery-v2.log`。准入/持久化/恢复使用实际实现，账户容量、
+  设备和券商回报为隔离夹具；不替代独立新源和次日原 ExitPlan 整链验收。
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
