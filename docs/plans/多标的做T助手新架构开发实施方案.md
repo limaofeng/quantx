@@ -1106,6 +1106,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `.codex_screenshots/p6-live-exit-inputs-{v2,final}.log`、
   `.codex_screenshots/p6-live-exit-scope-regression.log`。持仓可卖量由隔离夹具模拟券商更新，
   尚未验证 LIVE 出场授权、公共下单、T+1 风控与成交的完整跨日闭环。
+  继续打通隔离跨日评估→原确认派生授权→实际 OrderSizer/风控→TradingService 下单端口：
+  停止的独立 LIVE 来源、原计划首日可卖量 0 不提交，次日恢复可卖量后按 EXIT_PLAN owner
+  提交 100 股，source/batch 引用及原确认 ID 保留；派生后撤销设备会话会等待人工确认，
+  不调用下单端口。**2 项测试及 Ruff 通过**，证据
+  `.codex_screenshots/p6-live-exit-submission-final.log`。TradingService 的账户读取与下单
+  IO 为替身，尚需验证该端口之后的持久化 outbox、券商回报和原计划成交收敛；不计实盘闭环。
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
