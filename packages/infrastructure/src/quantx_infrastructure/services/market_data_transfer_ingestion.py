@@ -1064,6 +1064,21 @@ def _save_market_data_period_sync(
   }
 
 
+async def _settle_task(task: asyncio.Future) -> bool:
+  """Join already-started bounded work despite repeated parent cancellation."""
+  interrupted = False
+  while not task.done():
+    try:
+      await asyncio.shield(task)
+    except asyncio.CancelledError:
+      interrupted = True
+    except Exception:
+      break
+  if not task.cancelled():
+    task.exception()
+  return interrupted
+
+
 async def save_market_data_period(
   *,
   period: str,
@@ -1081,10 +1096,7 @@ async def save_market_data_period(
   except asyncio.CancelledError:
     # A sent synchronous write has an unknown outcome until the SDK returns.
     # Join that bounded call before the ingestion claim can be released.
-    try:
-      await asyncio.shield(task)
-    except Exception:
-      pass
+    await _settle_task(task)
     raise
 
 
@@ -1537,16 +1549,18 @@ async def claim_ingest_and_finish_market_data_request(
     # Releasing first permits a second ingester to race the cancelled one.
     if ingestion_task is not None and not ingestion_task.done():
       ingestion_task.cancel()
-      await asyncio.shield(asyncio.gather(ingestion_task, return_exceptions=True))
+      await _settle_task(asyncio.gather(ingestion_task, return_exceptions=True))
     # Cancellation is not evidence that the immutable transfer is invalid.
     try:
-      await asyncio.shield(
+      release_task = asyncio.create_task(
         store.release_market_data_request_claim(
           request_id,
           claim_token=claim_token,
           error="CancelledError: market-data ingestion was cancelled",
         )
       )
+      await _settle_task(release_task)
+      release_task.result()
     except Exception:
       logger.exception(
         "Could not release cancelled market-data claim request_id=%s",
@@ -1629,7 +1643,11 @@ async def claim_ingest_and_finish_market_data_request(
     if ingestion_task is not None and not ingestion_task.done():
       ingestion_task.cancel()
     lease_task.cancel()
-    await asyncio.gather(
-      *(task for task in (ingestion_task, lease_task) if task is not None),
-      return_exceptions=True,
+    interrupted = await _settle_task(
+      asyncio.gather(
+        *(task for task in (ingestion_task, lease_task) if task is not None),
+        return_exceptions=True,
+      )
     )
+    if interrupted:
+      raise asyncio.CancelledError
