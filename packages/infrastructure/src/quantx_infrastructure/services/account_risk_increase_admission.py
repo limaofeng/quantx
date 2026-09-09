@@ -24,6 +24,7 @@ from quantx_domain.trading.risk_increase_admission import (
   risk_increase_intent_manifest_hash,
 )
 from sqlalchemy import select, text
+from sqlalchemy.orm.attributes import flag_modified
 
 from quantx_infrastructure.models.agent_runtime import AccountExecutionControl
 from quantx_infrastructure.models.paper_execution import PaperExecutionAccountRecord
@@ -377,6 +378,9 @@ class AccountRiskIncreaseAdmissionSequencer:
       intent.admission_rank = ranked_item.admission_rank
       intent.admission_policy_version = policy_version
       intent.admission_input_fingerprint = input_fingerprint
+      # Ranking credentials have their own batch timestamp; preserve the intent's
+      # economic fact time instead of letting ORM onupdate invalidate this cut.
+      flag_modified(intent, "updated_at")
       admission_items.append(
         AccountRiskIncreaseAdmissionItem(
           admission_item_id=str(uuid.uuid4()),
