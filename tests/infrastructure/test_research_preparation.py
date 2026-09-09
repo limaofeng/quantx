@@ -111,14 +111,14 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assert await repo.running_jobs(kinds=("DOWNLOAD",)) == []
     gpu_id = assigned.job_id
     with pytest.raises(ValueError, match="归属"):
-      await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="old-owner")
-    await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="trainer")
+      await repo.requeue_trainer_admission(gpu_id, expected_flow_run_id="old-owner")
+    await repo.requeue_trainer_admission(gpu_id, expected_flow_run_id="trainer")
     reassigned = await repo.claim("new-trainer", kinds=("GPU",), executor="TRAINER")
     assert reassigned.job_id == gpu_id
     assert reassigned.flow_run_id == "new-trainer"
     with pytest.raises(ValueError, match="归属"):
-      await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="trainer")
-    await repo.requeue_gpu_inputs(gpu_id, expected_flow_run_id="new-trainer")
+      await repo.requeue_trainer_admission(gpu_id, expected_flow_run_id="trainer")
+    await repo.requeue_trainer_inputs(gpu_id, expected_flow_run_id="new-trainer")
 
     def unavailable(job_id, owner):
       raise OSError("input evidence unavailable")
@@ -157,6 +157,8 @@ async def test_certification_handoff_is_owner_fenced_immutable_and_executor_rout
     job = await repo.claim("export-owner", kinds=("CERTIFY",), executor="WORKER")
     with pytest.raises(ValueError, match="归属"):
       await repo.handoff_certification(job_id, expected_flow_run_id="other", reference=reference)
+    with pytest.raises(ValueError, match="归属"):
+      await repo.requeue_trainer_inputs(job_id, expected_flow_run_id="export-owner")
     await repo.handoff_certification(job_id, expected_flow_run_id="export-owner", reference=reference)
     # Commit acknowledgement loss: identical retry is harmless and does not
     # overwrite the subsequent Trainer owner.
@@ -178,4 +180,8 @@ async def test_certification_handoff_is_owner_fenced_immutable_and_executor_rout
     assert await repo.claim("worker", kinds=("CERTIFY",), executor="WORKER") is None
     retried = await repo.claim("trainer-retry", kinds=("CERTIFY",), executor="TRAINER")
     assert CertificationInputReference.model_validate(retried.request["certification_input"]).bundle.bundle_id == reference.bundle.bundle_id
+    await repo.requeue_trainer_admission(job_id, expected_flow_run_id="trainer-retry")
+    await repo.claim("trainer-final", kinds=("CERTIFY",), executor="TRAINER")
+    await repo.requeue_trainer_inputs(job_id, expected_flow_run_id="trainer-final")
+    assert await repo.claim("worker", kinds=("CERTIFY",), executor="WORKER") is None
   await engine.dispose()

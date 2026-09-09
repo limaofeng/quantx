@@ -173,12 +173,12 @@ Trainer 调度器使用同一约束：每次独立调用使用独立标识，发
 conda run -n quantx-train python -m quantx_trainer.main publish-dataset --config C:\Users\limao\QuantXTraining\state\trainer.toml --dataset-version <dataset_version>
 ```
 
-命令重新核验认证证据，发布并读回 bundle 后，才登记不可替换的 `source_bundle`。迁移 `20260910_0074` 与开发角色的数据集 UPDATE 权限必须先由运维应用；本地尚未部署。旧数据集缺失传输清单时不可训练，需要先完成发布。准备流程自动发布与持久化交接仍待接入。
+命令重新核验认证证据，发布并读回 bundle 后，才登记不可替换的 `source_bundle`。迁移 `20260910_0074` 与开发角色的数据集 UPDATE 权限必须先由运维应用；本地尚未部署。旧数据集缺失传输清单时不可训练，需要先完成发布。Trainer 侧认证结果自动发布与恢复已接入；Worker 冻结输入发布和交接调用仍待接入。
 
 调度领取后按清单从受限 SFTP 拉取至 `state_root/dataset-cache/<bundle_id>`，逐文件校验后原子完成，再核对认证清单与数据库投影，成功后才启动 Research。磁盘保留空间来自主机策略；下载和核验共享运行归属/取消/心跳监督，部分文件可供后续重试复用。最终评估按父运行的 `artifact_bundle` 自动下载至 `state_root/parent-cache/<bundle_id>`，校验数据库 manifest 哈希、父运行身份和 Research 内部文件清单后传给计算子进程。Research 以认证清单和开发锁核验父制品，不再要求目录名等于 run_id。输入阶段建立按执行归属隔离的监督者/请求记录，后续调度只有在监督者确定退出、没有任何计算进程记录、数据库仍为原归属 PREFLIGHT 且尚无进度时才重新排队；已有取消请求则收敛为 CANCELLED。新领取复用完整/部分缓存并保留旧诊断证据。领取事务持有队列行锁时先落盘输入监督者证据，再提交 RUNNING；写入失败回滚，提交确认丢失仍保留证据。常驻进程中，本次尝试退出会在所有输入 I/O 结束后由原监督者写入结束标记；后续调度可恢复领取确认丢失、元数据断联、输入异常及取消所遗留的任务，不必等待整个进程退出。已有计算记录仍排除输入重排；结束标记无法写入则保留待核验。跨机器与进程级有界终止验收尚未完成。
 
 ### GPU 资格准备
 
-`trainer-gpu-preparation` 仅领取 GPU 类型准备任务，使用同一显式运行配置与 `quantx-train-pool`。Worker 仅领取 COVERAGE、DOWNLOAD、CERTIFY；构建认证的导出交接尚未完成。Trainer 从已登记 bundle 拉取数据集，GPU wheel 证据固定为 `state_root/gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl`，资格结果写入 `state_root/gpu/qualification.json`，能力探测读取同一路径。Research 子进程仅接收文件路径和隔离环境，不接收数据库/Prefect 凭据。
+`trainer-preparation` 领取 GPU 及已登记 `certification_input` 的 CERTIFY 任务，使用同一显式运行配置与 `quantx-train-pool`。Worker 只领取 COVERAGE、DOWNLOAD 和尚未交接的 CERTIFY；其冻结输入导出/发布调用仍待接入，端到端迁移尚未完成。认证输入下载至 `state_root/certification-cache/<bundle_id>`，计算只使用冻结文件，结果登记与发布完成后才写入成功。Trainer 从已登记 bundle 拉取数据集，GPU wheel 证据固定为 `state_root/gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl`，资格结果写入 `state_root/gpu/qualification.json`，能力探测读取同一路径。Research 子进程仅接收文件路径和隔离环境，不接收数据库/Prefect 凭据。
 
-准备监督端每 10 秒核对归属并写心跳，保存请求及计算进程身份，退出未确认保持 RUNNING。异步启动返回句柄前被打断时保留 STARTING，不开放重试。资格计算完成后若数据库登记失败，保持 RUNNING；后续调度在新领取与计算门禁之前重试登记。正常执行与恢复共用尝试锁，恢复要求明确零退出码、原请求绑定和完整结果，可在原监督进程仍存活时收敛，不重跑资格基准。主机门禁退出码 75 在记录退出后按原归属重新排队，后续重新领取生成新归属；其他明确的非零退出记录失败，即使存在 ready 结果也不登记成功。未知退出继续保留运行态。GPU 输入下载阶段同样在领取提交前写入监督者证据；本次尝试结束后写结束标记。只在无计算记录且输入确认停止时按原归属重排，复用原缓存；写盘失败回滚领取。缺少退出记录的中途崩溃收敛、运行端部署与真实 GPU 资格验收仍待完成。
+准备监督端每 10 秒核对归属并写心跳，保存请求及计算进程身份，退出未确认保持 RUNNING。异步启动返回句柄前被打断时保留 STARTING，不开放重试。资格或认证计算完成后若数据库登记、制品发布或终态写入失败，保持 RUNNING；后续调度在新领取与计算门禁之前恢复结果处理。认证恢复核对原请求、零退出码、输入清单和结果制品，再幂等登记与发布，不重复计算。正常执行与恢复共用尝试锁，恢复要求明确零退出码、原请求绑定和完整结果，可在原监督进程仍存活时收敛，不重跑资格基准。主机门禁退出码 75 在记录退出后按原归属重新排队，后续重新领取生成新归属；其他明确的非零退出记录失败，即使存在 ready 结果也不登记成功。未知退出继续保留运行态。GPU 与认证输入下载阶段同样在领取提交前写入监督者证据；本次尝试结束后写结束标记。只在无计算记录且输入确认停止时按原归属重排，复用原缓存；写盘失败回滚领取。缺少退出记录的中途崩溃收敛、运行端部署与真实 GPU 资格验收仍待完成。

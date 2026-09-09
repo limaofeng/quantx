@@ -1,7 +1,7 @@
 name: quantx-trainer
 deployments:
-  - name: trainer-gpu-preparation
-    entrypoint: apps/trainer/src/quantx_trainer/preparation_flow.py:trainer_gpu_preparation_flow
+  - name: trainer-preparation
+    entrypoint: apps/trainer/src/quantx_trainer/preparation_flow.py:trainer_preparation_flow
     parameters:
       config_path: "{{ $QUANTX_TRAINER_CONFIG }}"
     work_pool:

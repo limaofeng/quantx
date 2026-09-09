@@ -13,7 +13,7 @@ from quantx_contracts.research_preparation import (
   CertificationInputReference,
   ResearchPreparationConfig,
 )
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import and_, or_, select, text, update
 
 from quantx_infrastructure.models.research_preparation import (
   ResearchPreparationJob as Job,
@@ -289,19 +289,21 @@ class ResearchPreparationRepository:
     row.error, row.updated_at = None, now()
     await self.db.commit()
 
-  async def requeue_gpu_admission(self, job_id, *, expected_flow_run_id):
+  async def requeue_trainer_admission(self, job_id, *, expected_flow_run_id):
     """Requeue only after the supervisor verifies a host-admission exit."""
-    await self._requeue_gpu(job_id, expected_flow_run_id=expected_flow_run_id, phase="等待主机资源")
+    await self._requeue_trainer(job_id, expected_flow_run_id=expected_flow_run_id, phase="等待主机资源")
 
-  async def requeue_gpu_inputs(self, job_id, *, expected_flow_run_id):
+  async def requeue_trainer_inputs(self, job_id, *, expected_flow_run_id):
     """Requeue only after input-only execution is proven stopped."""
-    await self._requeue_gpu(job_id, expected_flow_run_id=expected_flow_run_id, phase="恢复输入准备")
+    await self._requeue_trainer(job_id, expected_flow_run_id=expected_flow_run_id, phase="恢复输入准备")
 
-  async def _requeue_gpu(self, job_id, *, expected_flow_run_id, phase):
+  async def _requeue_trainer(self, job_id, *, expected_flow_run_id, phase):
     if not expected_flow_run_id:
       raise ValueError("准备任务执行归属无效")
     result = await self.db.execute(
-      update(Job).where(Job.job_id == job_id, Job.kind == "GPU", Job.status == "RUNNING",
+      update(Job).where(Job.job_id == job_id,
+                        or_(Job.kind == "GPU", and_(Job.kind == "CERTIFY", Job.request["certification_input"]["manifest_sha256"].as_string().is_not(None))),
+                        Job.status == "RUNNING",
                         Job.flow_run_id == expected_flow_run_id)
       .values(status="QUEUED", phase=phase, flow_run_id=None,
               error=None, updated_at=now())

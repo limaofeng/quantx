@@ -75,7 +75,7 @@ def test_training_deployments_have_only_the_isolated_pool_and_required_configura
     module, function = entry["entrypoint"].split(":")
     assert (root / module).is_file()
     from quantx_trainer import preparation_flow
-    owner = preparation_flow if function == "trainer_gpu_preparation_flow" else training_flow
+    owner = preparation_flow if function == "trainer_preparation_flow" else training_flow
     parameter = inspect.signature(getattr(owner, function).fn).parameters[
       "config_path"
     ]
