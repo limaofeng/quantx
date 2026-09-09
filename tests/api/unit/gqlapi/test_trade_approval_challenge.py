@@ -1103,7 +1103,7 @@ async def test_independent_t_schema2_challenge_and_drained_replay(independent_t_
   assert database.lock_order == ["TTradeGlobalConfig", "TAssistantExecutionRecord"]
   command = _approval_command_kwargs()
   command.update(command_type="T_ASSISTANT_APPROVE_ENTRY", command_aggregate_id="execution-1")
-  command["command_payload"] = {"execution_id": "execution-1", "intent_id": INTENT_ID}
+  command["command_payload"] = {"execution_id": "execution-1", "intent_id": INTENT_ID, "account_id": ACCOUNT_ID}
   first = await TradeApprovalChallengeService.consume(
     **args, confirmation_token=preview.confirmation_token, **command,
   )
@@ -1130,7 +1130,7 @@ async def test_independent_t_drain_blocks_new_confirmation(independent_t_challen
       await TradeApprovalChallengeService.issue(**args)
     else:
       await TradeApprovalChallengeService.consume(
-        **args, confirmation_token=preview.confirmation_token, **_approval_command_kwargs(),
+        **args, confirmation_token=preview.confirmation_token, **_independent_command(),
       )
   assert caught.value.code == "T_ENTRY_SOURCE_NOT_READY"
   assert not database.commands
@@ -1184,3 +1184,22 @@ async def test_consumed_challenge_cannot_skip_direction_check(configured_challen
       **args, confirmation_token=preview.confirmation_token, **_approval_command_kwargs(),
     )
   assert caught.value.code == "UNSUPPORTED_APPROVAL_ACTION"
+
+
+def _independent_command():
+  return dict(command_type="T_ASSISTANT_APPROVE_ENTRY", command_aggregate_id="execution-1",
+    command_idempotency_key="independent-approval", command_payload={
+      "execution_id": "execution-1", "intent_id": INTENT_ID, "account_id": ACCOUNT_ID,
+    })
+
+
+async def test_independent_t_cannot_dispatch_legacy_command(independent_t_challenge):
+  _, database, _, binding = independent_t_challenge
+  args = dict(principal=_principal(), action=T_TRADE_ENTRY_APPROVAL,
+    account_id=ACCOUNT_ID, intent_id=INTENT_ID, **binding)
+  preview = await TradeApprovalChallengeService.issue(**args)
+  with pytest.raises(TradeApprovalChallengeError) as caught:
+    await TradeApprovalChallengeService.consume(**args,
+      confirmation_token=preview.confirmation_token, **_approval_command_kwargs())
+  assert caught.value.code == "INVALID_APPROVAL_COMMAND_BINDING"
+  assert not database.commands and database.challenges[0].consumed_at is None

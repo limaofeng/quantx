@@ -89,10 +89,16 @@ async def _seed(
     async with db.begin():
       db.add(
         TTradeGlobalConfig(
-          id="config-1", account_id="account-1", enabled=True, mode=environment.value.lower()
+          id="config-1", account_id="account-1", enabled=True, mode=environment.value.lower(),
+          desired_environment=environment.value
         )
       )
       await TAssistantConfigRepository(db).append_version(version)
+      if environment is ExecutionEnvironment.LIVE:
+        head = await db.get(TTradeGlobalConfig, "config-1")
+        head.active_config_version_id = version.config_version_id
+        head.state_version += 1
+        await db.flush()
       if environment is ExecutionEnvironment.PAPER:
         owner = await TAssistantExecutionRepository(db).ensure_paper_shadow(
           account_id="account-1", version=version, now=NOW,

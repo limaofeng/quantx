@@ -46,6 +46,12 @@ P6 隔离开发提供 `T_ASSISTANT_DRAIN_ENTRY` Engine 命令（`execution_id`�
 STOPPED 或 successor READY。scope、时间或命令关联异常使整帧回滚并报错。
 该命令尚未接 Web，不能用于 legacy StrategyRun；新 T LIVE 入场 handler 仍未开放。
 
+P6 隔离开发提供 `T_ASSISTANT_APPROVE_ENTRY`（`execution_id`、`intent_id`、`account_id`、
+`approval_audit`）：校验已消费的 schema 2 设备凭据与当前来源，在同一事务记录确认并重入
+ALLOCATION_PENDING。它不发送订单；后续 allocation 必须使用确认后的账户和义务快照。
+重复投递返回原操作结果，不重开终态意图；审计或状态写入失败整体回滚。0062 在数据库层
+约束重入分配及新快照，尚未应用业务库。当前尚无新 T LIVE 入场执行路由或确认 GraphQL 入口。
+
 P6 的独立源退出确认支持 schema 2，精确绑定 execution、候选及退出范围。成交后公共
 授权派生和账户锁支持该源，终态 source 不影响退出；PAPER 仍只锁自身模拟账户。
 设备预览/确认、LIVE 分配和新 owner 入场回报 handler 尚需接线，不能据此发布实盘执行。

@@ -574,8 +574,18 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
 - API 确认服务已支持独立 T LIVE schema 2 预览/消费，按 head→execution→intent 加锁，
   新操作复核启用状态、当前 config、MANUAL_CONFIRM 与 READY；排空后仅允许已消费操作
   返回原结果。来源漂移、配置停用/切换、排空和终态重试方向检查等 **80 项相关 API 测试通过**。
-  这是服务层能力，尚未新增 GraphQL 入口或 Engine 新 T 确认 handler，不宣称确认整链完成。
-- 剩余开发顺序：独立 T 确认命令/重新分配接线→LIVE 组合事实读取、
+  尚未新增 GraphQL 入口；Engine 确认与重新分配进展如下。
+- `T_ASSISTANT_APPROVE_ENTRY` 已消费同一账户/执行/意图的 schema 2 凭据并写不可变审计，
+  将原意图送回 ALLOCATION_PENDING；版本和原始金额不改动。新 attempt 使用确认后的
+  account/obligation/envelope cut，重新算出的 CAP 可以降低额度；配置停用/切换继续阻断。
+  API 只允许绑定该专用命令，并从 Principal 填写 actor/device，不能路由旧 run 命令。
+- 0062 要求确认审计与重入分配同事务，禁止直接进入 EXECUTION_READY；数据库延迟约束
+  复核确认后的快照。相同业务时刻连续写入也显式保留业务时间，避免 ORM onupdate 漂移。
+  **104 项相关测试通过**（JUnit `.codex_screenshots/p6-confirmation-unit.xml`），包含
+  API 预览→消费→真实消息箱→Engine→重新分配的 SQLite 集成、终态重试、审计失败回滚。
+  **4 项 PostgreSQL 完整迁移链测试通过**：重新分配/SQL 绕过拒绝、旧 cut 回滚、并发重复
+  确认、确认与排空竞争；仅专用测试库随机 schema，业务库未应用 0062。
+- 剩余开发顺序：LIVE 组合事实读取、确认界面/GraphQL 入口、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor→P7 新故障/性能→P8。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

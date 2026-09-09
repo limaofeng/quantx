@@ -35,6 +35,9 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   authorization_expiry_for_challenge,
   bind_t_trade_exit_authorization_to_challenge_payload,
 )
+from quantx_infrastructure.services.trade_confirmation_material import (
+  intent_fingerprint as _intent_fingerprint,
+)
 from sqlalchemy import select
 
 from quantx_api.auth.principal import Principal
@@ -140,45 +143,6 @@ def _intent_expiry(record: TradeIntentRecord) -> Optional[datetime]:
   if created_at is None or ttl_ms <= 0:
     return None
   return created_at + timedelta(milliseconds=ttl_ms)
-
-
-def _intent_subject_payload(record: TradeIntentRecord) -> dict[str, Any]:
-  metadata = dict(record.intent_metadata or {})
-  # The strategy-backed approval path still uses this slot because the Engine
-  # validates the consumed challenge audit from the intent snapshot.  Owner
-  # identity is always taken from durable columns and supplied explicitly by
-  # the caller; metadata is excluded from owner resolution.
-  metadata.pop(_CHALLENGE_METADATA_KEY, None)
-  return {
-    "id": record.id,
-    "run_id": record.strategy_run_id,
-    "owner_type": record.owner_type,
-    "owner_id": record.owner_id,
-    "environment": record.environment,
-    "account_id": record.account_id,
-    "instrument_code": record.instrument_code,
-    "direction": record.direction,
-    "bucket": record.bucket,
-    "reason": record.reason,
-    "status": record.status,
-    "confidence": record.confidence,
-    "target_amount": record.target_amount,
-    "target_position_pct": record.target_position_pct,
-    "target_volume": record.target_volume,
-    "limit_price_hint": record.limit_price_hint,
-    "metadata": metadata,
-  }
-
-
-def _intent_fingerprint(record: TradeIntentRecord) -> str:
-  encoded = json.dumps(
-    _intent_subject_payload(record),
-    ensure_ascii=True,
-    separators=(",", ":"),
-    sort_keys=True,
-    default=str,
-  ).encode("utf-8")
-  return hashlib.sha256(encoded).hexdigest()
 
 
 def _command_payload_fingerprint(payload: Any) -> str:
@@ -1106,6 +1070,30 @@ class TradeApprovalChallengeService:
         "INVALID_APPROVAL_COMMAND_BINDING",
         "确认命令绑定信息不完整",
       )
+
+    if execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+      expected_command = {
+        "execution_id": execution_ref.owner_id,
+        "intent_id": intent_id,
+        "account_id": normalized_account_id,
+      }
+      if (
+        action != T_TRADE_ENTRY_APPROVAL
+        or command_type != "T_ASSISTANT_APPROVE_ENTRY"
+        or command_aggregate_id != execution_ref.owner_id
+        or not isinstance(command_payload, dict)
+        or any(command_payload.get(key) != value for key, value in expected_command.items())
+        or command_payload.get("run_id")
+      ):
+        raise TradeApprovalChallengeError(
+          "INVALID_APPROVAL_COMMAND_BINDING", "确认命令与做 T 执行身份不匹配",
+        )
+      command_payload = dict(command_payload)
+      command_payload["approval_audit"] = {
+        "actor_id": principal.user_id,
+        "device_session_id": principal.device_session_id,
+        "channel": "T_ASSISTANT_DEVICE_CHALLENGE",
+      }
 
     async for db in get_async_db():
       source = await _lock_t_entry_source(

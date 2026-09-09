@@ -236,6 +236,18 @@ async def _dispatch(
   command_id: Optional[str] = None,
 ) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
+  if command_type == "T_ASSISTANT_APPROVE_ENTRY":
+    from quantx_infrastructure.services.t_entry_confirmation import confirm_live_entry
+
+    async with AsyncSessionLocal() as db, db.begin():
+      result = await confirm_live_entry(
+        db, execution_id=str(payload.get("execution_id") or ""),
+        intent_id=str(payload.get("intent_id") or ""),
+        account_id=str(payload.get("account_id") or ""),
+        approval_audit=dict(payload.get("approval_audit") or {}),
+        now=utcnow().replace(tzinfo=UTC),
+      )
+    return {"success": True, **result}
   if command_type == "T_ASSISTANT_DRAIN_ENTRY":
     from .t_assistant_live_drain import drain_live_entry_work
 
