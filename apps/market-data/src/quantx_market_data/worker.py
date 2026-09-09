@@ -25,10 +25,14 @@ logger = logging.getLogger(__name__)
 
 async def advance_development_delivery(store) -> bool:
   from quantx_infrastructure.services.development_history_import import import_partition
+  from quantx_infrastructure.services.development_reference_requests import (
+    advance_reference_request,
+  )
 
+  reference = await advance_reference_request(store)
   item = await store.next_development_delivery()
   if item is None:
-    return False
+    return reference
   try:
     await import_partition(
       HistoryPartitionRequest.model_validate(item["request"]), owner=store

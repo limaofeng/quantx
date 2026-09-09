@@ -177,6 +177,25 @@ LOCAL_VERIFIED 交付、VERIFIED 阶段和相符的发布证明可返回结果�
 中仅包含标的、周期、行数；它不是 Agent 传输协议的 `bar_summary`，不构造无法由分区
 摘要合并得到的整段键哈希。Agent 上传协议保持原有完整键摘要约束。
 
+开发年度日历和独立因子参考导入使用同一内部鉴权边界：
+
+```text
+POST /market-data/internal/v1/reference-requests
+GET  /market-data/internal/v1/reference-requests/{request_id}
+```
+
+提交只在 development 开放。请求为 `calendar`（SH、年度）或 `divid_factors`
+（标的、起止日期），状态为 QUEUED、WAITING、VERIFIED、BLOCKED。接口只持久化请求并
+返回状态，Data Worker 获取最多 2 MiB 的源快照、固定源内容，再在同一事务中导入、
+回读和提交结果。每次网络期限 30 秒，累计最多 4 次执行，重启与取消不返还尝试。
+永久无效来源直接阻塞；短暂网络故障持久化退避；提交相同请求不清除预算或终态。
+
+空开发库的范围请求先提交年度日历，未完成时返回 DEVELOPMENT_REFERENCE_PENDING
+及持久化引用；不会在 CLI 或 Prefect Flow 内下载、写入日历或独立因子。日历完成后
+按完整返回的年度快照拆分分区。VERIFIED 结果为严格校验的日历快照，或带内容摘要的
+因子验证行数；有明确覆盖证明的零因子结果可以成功。GET 不返回固定源对象，状态
+查询不会重复导入或消耗尝试。此机制证明本地内容与源快照一致，不代替源日历的维护。
+
 GraphQL 使用单一 `qmtAgentConnection` 视图返回当前 Agent、五段连接链路、
 行情流与本地 journal 的非敏感指标，以及折叠的历史登记。Web 通过
 `createAgentEnrollment` 发起安全交接，使用 `cancelAgentHandover` 取消；

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 from quantx_infrastructure.services import development_history_import as importer
-from quantx_infrastructure.services.holiday_service import HolidayService
 
 
 @pytest.mark.parametrize("first_status", ["INCOMPLETE", "WAITING_SOURCE", "BLOCKED"])
@@ -16,7 +15,12 @@ async def test_range_submits_later_partitions_and_reports_failures(
   calls = []
 
   async def holidays(*args, **kwargs):
-    return [SimpleNamespace(date=date(2026, 1, 1))]
+    return [
+      SimpleNamespace(
+        state="VERIFIED",
+        result=SimpleNamespace(holidays=[SimpleNamespace(date=date(2026, 1, 1))]),
+      )
+    ]
 
   async def partition(request):
     calls.append(request)
@@ -28,7 +32,7 @@ async def test_range_submits_later_partitions_and_reports_failures(
       }
     return {"status": "LOCAL_VERIFIED", "delivery_result": {"records_verified": 3}}
 
-  monkeypatch.setattr(HolidayService, "get_holidays", holidays)
+  monkeypatch.setattr(importer, "_wait_reference_requests", holidays)
   monkeypatch.setattr(importer, "request_partition_delivery", partition)
   result = await importer.request_remote_history(
     {
@@ -91,9 +95,16 @@ async def test_range_aggregates_each_published_partition_once(monkeypatch):
     }
 
   monkeypatch.setattr(
-    HolidayService,
-    "get_holidays",
-    AsyncMock(return_value=[SimpleNamespace(date=date(2026, 1, 1))]),
+    importer,
+    "_wait_reference_requests",
+    AsyncMock(
+      return_value=[
+        SimpleNamespace(
+          state="VERIFIED",
+          result=SimpleNamespace(holidays=[SimpleNamespace(date=date(2026, 1, 1))]),
+        )
+      ]
+    ),
   )
   monkeypatch.setattr(importer, "request_partition_delivery", partition)
   result = await importer.request_remote_history(

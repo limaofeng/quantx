@@ -1,8 +1,6 @@
 """Published proofs travel through Data API; callers do not read source files."""
 # ruff: noqa: F811
 
-from datetime import date
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -10,7 +8,6 @@ import pytest
 from quantx_contracts.market_data_service import HistoryDemand
 from quantx_infrastructure.services import development_history_import as importer
 from quantx_infrastructure.services import local_market_data_client as clients
-from quantx_infrastructure.services.holiday_service import HolidayService
 from quantx_market_data.api import create_app
 from quantx_market_data.worker import advance_development_delivery
 from sqlalchemy import text
@@ -93,6 +90,13 @@ async def test_range_completion_uses_api_proofs_without_local_receipt_or_file_ac
 ):
   case = delivery
   case.first.demand_source_kind = "REMOTE"
+  from quantx_contracts.development_reference import CalendarRequest
+  from quantx_infrastructure.services.development_reference_requests import (
+    DevelopmentReferenceStore,
+  )
+
+  await DevelopmentReferenceStore(case.first.engine).submit(CalendarRequest(year=2026))
+
   await case.first.submit_history_demand(
     HistoryDemand.model_validate(case.request.model_dump())
   )
@@ -110,11 +114,7 @@ async def test_range_completion_uses_api_proofs_without_local_receipt_or_file_ac
     "LocalMarketDataClient",
     lambda: client_class(transport=httpx.ASGITransport(app), token="internal"),
   )
-  monkeypatch.setattr(
-    HolidayService,
-    "get_holidays",
-    AsyncMock(return_value=[SimpleNamespace(date=date(2026, 1, 1))]),
-  )
+
   monkeypatch.setattr(
     importer,
     "get_export",

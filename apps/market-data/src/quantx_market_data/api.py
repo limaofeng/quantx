@@ -12,6 +12,11 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import Response
 from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
+from quantx_contracts.development_reference import (
+  ReferenceAccepted,
+  ReferenceRequest,
+  ReferenceStatus,
+)
 from quantx_contracts.divid_factor_read import DividFactorRead, DividFactorWindow
 from quantx_contracts.history_collection_api import (
   MAX_HISTORY_RESULT_BYTES,
@@ -154,6 +159,47 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
       raise HTTPException(429, "FACTOR_READ_CAPACITY") from None
     except (ValueError, TimeoutError, SQLAlchemyError):
       raise HTTPException(503, "FACTOR_READ_UNAVAILABLE") from None
+
+  @app.post(
+    "/market-data/internal/v1/reference-requests",
+    status_code=202,
+    response_model=ReferenceAccepted,
+    dependencies=[Depends(authorize)],
+  )
+  async def submit_reference(request: ReferenceRequest):
+    from quantx_infrastructure.config.settings import settings
+    from quantx_infrastructure.services.development_reference_requests import (
+      DevelopmentReferenceStore,
+      ReferenceCapacity,
+    )
+
+    if settings.environment != "development":
+      raise HTTPException(403, "DEVELOPMENT_REFERENCE_ONLY")
+    try:
+      identity = await DevelopmentReferenceStore(app.state.store.engine).submit(request)
+    except ReferenceCapacity:
+      raise HTTPException(429, "REFERENCE_REQUEST_CAPACITY") from None
+    except (SQLAlchemyError, TimeoutError):
+      raise HTTPException(503, "REFERENCE_STORAGE_UNAVAILABLE") from None
+    return {"request_id": identity}
+
+  @app.get(
+    "/market-data/internal/v1/reference-requests/{request_id}",
+    response_model=ReferenceStatus,
+    dependencies=[Depends(authorize)],
+  )
+  async def reference_status(request_id: str):
+    from quantx_infrastructure.services.development_reference_requests import (
+      DevelopmentReferenceStore,
+    )
+
+    try:
+      value = await DevelopmentReferenceStore(app.state.store.engine).status(request_id)
+    except (SQLAlchemyError, ValueError, TimeoutError):
+      raise HTTPException(503, "REFERENCE_STORAGE_UNAVAILABLE") from None
+    if value is None:
+      raise HTTPException(404, "REFERENCE_REQUEST_NOT_FOUND")
+    return value
 
   @app.post(
     "/market-data/internal/v1/demands",

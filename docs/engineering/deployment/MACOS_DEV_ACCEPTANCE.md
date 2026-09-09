@@ -58,7 +58,7 @@ QMT 为禁用，Mac 没有 QMT/XTTrading 进程。生产数据库和生产 Prefe
 
 日期与标的可换成实际已有数据。检查独立 Data Worker 和本机 Data API 的需求状态，
 以及本机 `development_data_export` 中对应分区的 `LOCAL_VERIFIED` 和发布数据版本。
-切换前先完成迁移 0082 并停止旧 `development-data-import` deployment 的日程和运行；
+切换前先完成迁移至 0083 并停止旧 `development-data-import` deployment 的日程和运行；
 新旧推进者不得并行。成功分区在 Worker 重启后不应反复下载、写入或复核。
 
 1. 盘中已有数据应能导入；缺口只能排队，不能触发盘中 QMT 下载。

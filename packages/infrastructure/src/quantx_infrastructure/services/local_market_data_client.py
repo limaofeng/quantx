@@ -6,6 +6,11 @@ from datetime import datetime
 
 import httpx
 from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
+from quantx_contracts.development_reference import (
+  REFERENCE_REQUEST,
+  ReferenceAccepted,
+  ReferenceStatus,
+)
 from quantx_contracts.divid_factor_read import DividFactorRead, DividFactorWindow
 from quantx_contracts.history_collection_api import (
   MAX_HISTORY_RESULT_BYTES,
@@ -80,6 +85,27 @@ class LocalMarketDataClient:
 
   async def close(self):
     await self.client.aclose()
+
+  async def submit_reference_request(self, request):
+    request = REFERENCE_REQUEST.validate_python(request)
+    value = await self._json(
+      "POST",
+      "/market-data/internal/v1/reference-requests",
+      json=request.model_dump(mode="json"),
+    )
+    return ReferenceAccepted.model_validate(value).request_id
+
+  async def reference_status(self, identity, *, expected_request):
+    identity = HistoryDemandAccepted(demand_id=identity).demand_id
+    value = await self._json(
+      "GET", "/market-data/internal/v1/reference-requests/" + identity
+    )
+    if value is None:
+      return None
+    result = ReferenceStatus.model_validate(value)
+    if result.request_id != identity or result.request != expected_request:
+      raise ValueError("reference request identity mismatch")
+    return result
 
   async def submit_history_demand(self, demand: HistoryDemand) -> str:
     value = await self._json(

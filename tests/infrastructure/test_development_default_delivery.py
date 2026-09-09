@@ -88,6 +88,20 @@ async def delivery(prepared, monkeypatch):
 
   def remote(request):
     calls.append((request.method, request.url.path))
+    if "/calendar/" in request.url.path:
+      return httpx.Response(
+        200,
+        json={
+          "year": 2026,
+          "market": "SH",
+          "holidays": [
+            {"date": item["date"], "description": item["description"]}
+            for item in case.manifest["reference"]["holidays"]
+          ],
+        },
+      )
+    if "/reference/" in request.url.path:
+      return httpx.Response(200, json=case.manifest["reference"])
     if "/chunks/" in request.url.path:
       return httpx.Response(200, content=files[request.url.path.rsplit("/", 1)[-1]])
     return httpx.Response(

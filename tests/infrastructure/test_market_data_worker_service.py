@@ -127,6 +127,22 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
       migration.upgrade()
 
     await connection.run_sync(upgrade_demand)
+    path = path.with_name("20260910_0083_development_reference_requests.py")
+    spec = importlib.util.spec_from_file_location("reference_request_migration", path)
+    reference_migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reference_migration)
+
+    def upgrade_reference(sync_connection):
+      operations = Operations(MigrationContext.configure(sync_connection))
+      reference_migration.op = SimpleNamespace(
+        create_index=operations.create_index,
+        create_table=lambda *args, **kwargs: operations.create_table(
+          *args, prefixes=["TEMPORARY"], **kwargs
+        ),
+      )
+      reference_migration.upgrade()
+
+    await connection.run_sync(upgrade_reference)
   result = []
   for owner in ("owner-a", "owner-b"):
     store = object.__new__(WorkerStore)

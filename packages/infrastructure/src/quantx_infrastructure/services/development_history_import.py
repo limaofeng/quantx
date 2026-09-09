@@ -28,7 +28,6 @@ from quantx_infrastructure.services.data_exchange import (
   submit,
   submit_in_transaction,
 )
-from quantx_infrastructure.services.data_exchange_reference import import_reference
 from quantx_infrastructure.services.development_delivery_execution import (
   run_delivery_execution,
 )
@@ -375,51 +374,88 @@ def main() -> None:
   )
 
 
+async def _wait_reference_requests(requests, *, timeout_seconds):
+  from .local_market_data_client import LocalMarketDataClient
+
+  if not 1 <= len(requests) <= 5000:
+    raise ValueError("reference request batch exceeds budget")
+  client = LocalMarketDataClient()
+  deadline = asyncio.get_running_loop().time() + timeout_seconds
+  try:
+    identities = [
+      await client.submit_reference_request(request) for request in requests
+    ]
+    while True:
+      statuses = [
+        await client.reference_status(identity, expected_request=request)
+        for identity, request in zip(identities, requests, strict=True)
+      ]
+      if any(status is None for status in statuses):
+        raise ValueError("submitted reference request disappeared")
+      if all(status.state == "VERIFIED" for status in statuses) or any(
+        status.state == "BLOCKED" for status in statuses
+      ):
+        return statuses
+      if asyncio.get_running_loop().time() >= deadline:
+        return statuses
+      await asyncio.sleep(1)
+  finally:
+    await client.close()
+
+
+def _reference_wait_result(statuses):
+  blocked = next((status for status in statuses if status.state == "BLOCKED"), None)
+  if blocked or any(status.state != "VERIFIED" for status in statuses):
+    return {
+      "status": "failed" if blocked else "timeout",
+      "reason": blocked.reason if blocked else "DEVELOPMENT_REFERENCE_PENDING",
+      "reference_requests": [status.model_dump(mode="json") for status in statuses],
+    }
+  return None
+
+
 async def request_remote_history(
   payload: dict, *, timeout_seconds: float = 600
 ) -> dict:
   """Adapt existing historical callers while keeping QMT requests off the Mac."""
   from datetime import datetime
 
-  from quantx_infrastructure.services.holiday_service import HolidayService
+  from quantx_contracts.development_reference import (
+    CalendarRequest,
+    FactorReferenceRequest,
+  )
+
   from quantx_infrastructure.services.market_data_transfer_ingestion import (
     _parse_bars_request,
   )
 
   if payload.get("operation", "bars") != "bars":
     if payload.get("operation") == "divid_factors":
-      async with httpx.AsyncClient(
-        base_url=os.environ["QUANTX_MARKET_DATA_URL"],
-        headers={"Authorization": f"Bearer {os.environ['QUANTX_MARKET_DATA_TOKEN']}"},
-        timeout=30,
-        trust_env=False,
-      ) as client:
-        count = 0
-        for code in payload["stock_list"]:
-          response = await client.get(
-            f"/market-data/v1/reference/{code}",
-            params={
-              "as_of": datetime.strptime(payload["end_time"], "%Y%m%d")
-              .date()
-              .isoformat()
-            },
-          )
-          response.raise_for_status()
-          reference = response.json()
-          proof = reference.get("factor_coverage", {})
-          if (
-            proof.get("status") != "VERIFIED"
-            or proof["start_date"] > payload["start_time"]
-            or proof["end_date"] < payload["end_time"]
-          ):
-            return {"status": "failed", "reason": "DIVID_FACTOR_COVERAGE_UNVERIFIED"}
-          await import_reference(reference, code=code)
-          count += len(reference["factors"])
+      codes = payload["stock_list"]
+      if not isinstance(codes, list) or len(codes) != len(set(codes)):
+        raise ValueError("factor request requires unique stock codes")
+      requests = [
+        FactorReferenceRequest(
+          instrument=code,
+          start_date=datetime.strptime(payload["start_time"], "%Y%m%d").date(),
+          end_date=datetime.strptime(payload["end_time"], "%Y%m%d").date(),
+        )
+        for code in codes
+      ]
+      statuses = await _wait_reference_requests(
+        requests, timeout_seconds=timeout_seconds
+      )
+      pending = _reference_wait_result(statuses)
+      if pending:
+        return pending
+      count = sum(status.result.records_verified for status in statuses)
       return {
         "status": "success",
         "operation": "divid_factors",
         "records_received": count,
         "records_saved": count,
+        "records_verified": count,
+        "reference_requests": [status.model_dump(mode="json") for status in statuses],
       }
     return {
       "status": "failed",
@@ -440,36 +476,14 @@ async def request_remote_history(
     )
   )
   deadline = asyncio.get_running_loop().time() + timeout_seconds
-  closed = set()
-  for year in range(start.year, end.year + 1):
-    holidays = await HolidayService().get_holidays("SH", year)
-    if not holidays:
-      async with httpx.AsyncClient(
-        base_url=os.environ["QUANTX_MARKET_DATA_URL"],
-        headers={"Authorization": f"Bearer {os.environ['QUANTX_MARKET_DATA_TOKEN']}"},
-        timeout=30,
-        trust_env=False,
-      ) as client:
-        response = await client.get(f"/market-data/v1/calendar/{year}")
-        response.raise_for_status()
-        calendar = response.json()
-      rows = calendar.get("holidays", [])
-      if (
-        calendar.get("year") != year
-        or calendar.get("market") != "SH"
-        or not 0 < len(rows) <= 366
-      ):
-        raise ValueError("Invalid source calendar")
-      for row in rows:
-        if (
-          set(row) != {"date", "description"}
-          or date.fromisoformat(row["date"]).year != year
-        ):
-          raise ValueError("Invalid source calendar day")
-      holidays = await HolidayService().bulk_save_holidays(
-        "SH", year, [{**row, "date": date.fromisoformat(row["date"])} for row in rows]
-      )
-    closed.update(item.date for item in holidays)
+  calendars = await _wait_reference_requests(
+    [CalendarRequest(year=year) for year in range(start.year, end.year + 1)],
+    timeout_seconds=max(0, deadline - asyncio.get_running_loop().time()),
+  )
+  pending = _reference_wait_result(calendars)
+  if pending:
+    return {**pending, "request_id": identity}
+  closed = {item.date for status in calendars for item in status.result.holidays}
   partitions = []
   day = start
   while day <= end:

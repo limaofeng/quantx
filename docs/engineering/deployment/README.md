@@ -213,7 +213,7 @@ conda run --no-capture-output -n quantx python ops/t-assistant-backtest-data.py 
 
 生产 Prefect Worker 的 development-data-export 每分钟执行一次；开发导入由独立
 Data Worker 的开发循环推进，CLI/历史 Flow 通过本机 Data API 提交并查询需求。
-上线本批前应用迁移 `20260910_0082`，并停止、移除旧 Prefect deployment
+上线本批前应用迁移至 `20260910_0083`，并停止、移除旧 Prefect deployment
 `development-data-import`，确认旧执行已经退出，再启动新 Data Worker；删除代码中的
 日程不会自动删除 Prefect Server 上已注册的 deployment。此处是切换步骤，尚未执行。
 macOS 离线不删除生产任务。分片保留七天，过期后从已有持久化数据
@@ -222,6 +222,9 @@ macOS 离线不删除生产任务。分片保留七天，过期后从已有持�
 开发 Worker 不重复扫描 LOCAL_VERIFIED、BLOCKED 或 INCOMPLETE；恢复只处理到期分区。
 完成后只读复核最多保留 4 次累计尝试，每次在 IO 前持久化预留，取消、重启或成功均不
 返还；耗尽返回 DELIVERY_PROOF_BUDGET_EXHAUSTED，需要显式恢复处理，不自动重开预算。
+年度日历与独立因子导入也通过本机 Data API 持久化提交，由 Data Worker 推进；每轮
+最多一个参考请求和一个行情交付，避免参考积压独占全部推进机会。空开发库首先出现
+DEVELOPMENT_REFERENCE_PENDING 属于等待日历导入，不应另启旧导入 Flow 或在调用方写库。
 没有可靠无数据证明的空区间仍视为数据不足。
 
 参考数据仅导出明确的证券、日历和因子字段。复权覆盖沿用原有 schema-v2 证据，
