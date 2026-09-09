@@ -211,8 +211,12 @@ class ExitPlanRuntime:
     owner, environment = binding
     now = time_utils.now()
     if owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
-      if environment is not ExecutionEnvironment.PAPER:
+      if environment not in {ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE}:
         raise ValueError("T_ASSISTANT_EXIT_ENVIRONMENT_UNSUPPORTED")
+    if (
+      owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+      and environment is ExecutionEnvironment.PAPER
+    ):
       from quantx_infrastructure.services.paper_exit_execution import (
         read_paper_exit_market,
       )
@@ -235,10 +239,25 @@ class ExitPlanRuntime:
         return position, self.context_from_state(None, now=now)
       return position, self.context_from_paper_market(market, now=now)
     async with AsyncSessionLocal() as db:
-      position = await PositionRepository(db).find_by_stock_code(
-        record.instrument_code,
-        account_id=record.account_id,
-      )
+      if owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+        # LIVE protection outlives its source execution. Reuse the public
+        # account/position/plan locks and validate immutable source scope.
+        scope = await lock_exit_plan_scope_for_plan(db, record.plan_id)
+        if (
+          scope.target_plan is None
+          or durable_exit_plan_source_binding(scope.target_plan) != binding
+          or any(
+            getattr(scope.target_plan, key) != getattr(record, key)
+            for key in ("account_id", "instrument_code", "source_type", "source_id")
+          )
+        ):
+          raise ValueError("EXIT_PLAN_OWNER_CHANGED")
+        position = scope.position
+      else:
+        position = await PositionRepository(db).find_by_stock_code(
+          record.instrument_code,
+          account_id=record.account_id,
+        )
     return position, self.context_from_state(
       states.get(record.instrument_code) if self._market_data_ready() else None,
       now=now,

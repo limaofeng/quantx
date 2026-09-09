@@ -1098,6 +1098,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   **49 项恢复/候选控制测试及 Ruff 通过**，日志
   `.codex_screenshots/p6-independent-cutoff-verified.log`；使用实际候选生成、不可变 intake、
   恢复与候选控制代码配合隔离数据库，不代替独立新源券商闭环和跨日 ExitPlan 验收。
+  公共退出运行时修复独立 LIVE 来源误报 `T_ASSISTANT_EXIT_ENVIRONMENT_UNSUPPORTED`
+  的接线缺口：复用账户→持仓→计划锁及不可变 source 校验，读取账户持仓与公共行情，
+  不依赖源运行时存活。新增证据覆盖实际 CANARY 创建/来源停止、当日及次日持仓输入、
+  行情失效、来源缺失/账户不符，以及读取期间标的漂移拒绝；原 plan/source/batch 不变。
+  **12 项输入、公共 runtime、PAPER 与作用域回归及 Ruff 通过**，日志
+  `.codex_screenshots/p6-live-exit-inputs-{v2,final}.log`、
+  `.codex_screenshots/p6-live-exit-scope-regression.log`。持仓可卖量由隔离夹具模拟券商更新，
+  尚未验证 LIVE 出场授权、公共下单、T+1 风控与成交的完整跨日闭环。
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
