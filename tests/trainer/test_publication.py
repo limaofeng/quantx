@@ -63,6 +63,7 @@ def result(tmp_path, monkeypatch):
   )
   repository = SimpleNamespace(
     get_run=AsyncMock(return_value=row),
+    heartbeat_execution=AsyncMock(return_value=row),
     get_spec=AsyncMock(return_value=SimpleNamespace(**spec)),
     record_artifact_bundle=AsyncMock(),
     complete_run=AsyncMock(),
@@ -112,10 +113,11 @@ async def test_publication_retry_keeps_frozen_evidence_and_does_not_retrain(
       None,
     ]
   else:
-    result.repository.complete_run.side_effect = [
-      ConnectionError("private endpoint"),
-      None,
-    ]
+    async def commit_with_lost_ack(*args, **kwargs):
+      if result.row.status == "RUNNING":
+        result.row.status = "SUCCEEDED"
+        raise ConnectionError("private endpoint")
+    result.repository.complete_run.side_effect = commit_with_lost_ack
   with pytest.raises(
     publication.PublicationError, match="^PUBLICATION_RETRY_REQUIRED$"
   ):
@@ -130,6 +132,8 @@ async def test_publication_retry_keeps_frozen_evidence_and_does_not_retrain(
   assert completed["status"] == "SUCCEEDED"
   assert (result.control / "publication.json").read_bytes() == frozen
   assert len(result.uploads) == 2 and len(set(result.uploads)) == 1
+  if failure_at == "completion":
+    assert result.repository.heartbeat_execution.await_count == 1
   assert (
     result.repository.complete_run.call_args.kwargs["expected_flow_run_id"] == "owner"
   )
@@ -288,3 +292,52 @@ async def test_trainer_normal_flow_publishes_before_success_and_resumes_failed_t
     assert len(result.uploads) == 2
   result.repository.record_artifact_bundle.assert_awaited_once()
   result.repository.complete_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["disconnect", "cancel", "owner"])
+async def test_upload_heartbeat_stops_writer_when_control_is_lost(
+  result, monkeypatch, failure
+):
+  monkeypatch.setattr(publication, "PUBLICATION_HEARTBEAT_SECONDS", 0.01)
+  exited = threading.Event()
+  calls = 0
+
+  async def heartbeat(*args, **kwargs):
+    nonlocal calls
+    calls += 1
+    if calls == 3:
+      if failure == "disconnect":
+        raise ConnectionError("private control-plane endpoint")
+      if failure == "cancel":
+        result.row.cancel_requested_at = "requested"
+      else:
+        result.row.prefect_flow_run_id = "new-owner"
+    return result.row
+
+  @contextmanager
+  def store(config, *, cancel):
+    def publish(bundle, directory):
+      assert cancel.wait(5)
+      raise OSError("closed")
+
+    try:
+      yield SimpleNamespace(publish=publish)
+    finally:
+      exited.set()
+
+  result.repository.heartbeat_execution.side_effect = heartbeat
+  monkeypatch.setattr(publication, "open_store", store)
+  async with asyncio.timeout(3):
+    with pytest.raises(publication.PublicationError) as caught:
+      await publication.publish_result(
+        result.config, result.repository, run_id="run-1", owner="owner"
+      )
+  assert "private" not in str(caught.value)
+  assert calls >= 3
+  assert exited.is_set()
+  result.repository.record_artifact_bundle.assert_not_called()
+  result.repository.complete_run.assert_not_called()
+  assert (result.control / "publication.json").is_file()
+  with publication.publication_lock(result.control):
+    pass

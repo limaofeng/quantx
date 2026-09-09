@@ -25,6 +25,25 @@ class PublicationError(RuntimeError):
   """Stable public publication failure; local evidence remains intact."""
 
 
+PUBLICATION_HEARTBEAT_SECONDS = 10.0
+
+
+async def _publication_heartbeat(repository, run_id: str, owner: str) -> None:
+  row = await repository.get_run(run_id)
+  if (
+    row is None
+    or row.prefect_flow_run_id != owner
+    or row.status not in {"RUNNING", "SUCCEEDED"}
+  ):
+    raise PublicationError("PUBLICATION_OWNERSHIP_LOST")
+  if row.status == "RUNNING":
+    row = await repository.heartbeat_execution(run_id, expected_flow_run_id=owner)
+  if row.prefect_flow_run_id != owner or row.status not in {"RUNNING", "SUCCEEDED"}:
+    raise PublicationError("PUBLICATION_OWNERSHIP_LOST")
+  if row.cancel_requested_at is not None:
+    raise PublicationError("PUBLICATION_CANCEL_REQUESTED")
+
+
 def read_object(path: Path) -> dict:
   reject_links(path)
   if path.stat().st_size > 8 * 1024 * 1024:
@@ -199,10 +218,15 @@ async def _publish_result(
           if store.publish(bundle, directory) != bundle.bundle_id:
             raise PublicationError("PUBLICATION_REMOTE_IDENTITY_MISMATCH")
 
+      await _publication_heartbeat(repository, run_id, owner)
       task = asyncio.create_task(asyncio.to_thread(upload))
       try:
-        await asyncio.shield(task)
-      except asyncio.CancelledError:
+        while not task.done():
+          done, _ = await asyncio.wait({task}, timeout=PUBLICATION_HEARTBEAT_SECONDS)
+          if not done:
+            await _publication_heartbeat(repository, run_id, owner)
+        task.result()
+      except BaseException:
         cancel.set()
         # Keep the publication lock until the network writer is actually done.
         while not task.done():
