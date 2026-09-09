@@ -21,6 +21,8 @@ from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade_confirmation_challenge import (
   TradeConfirmationChallenge,
 )
@@ -325,7 +327,9 @@ def _validate_pending_intent(
   intent_id: str,
 ) -> TradeIntentRecord:
   allowed_owner_types = {
-    T_TRADE_ENTRY_APPROVAL: frozenset({ExecutionOwnerType.STRATEGY_RUN}),
+    T_TRADE_ENTRY_APPROVAL: frozenset({
+      ExecutionOwnerType.STRATEGY_RUN, ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    }),
     STRATEGY_TRADE_INTENT_APPROVAL: frozenset({ExecutionOwnerType.STRATEGY_RUN}),
     EXIT_PLAN_SELL_APPROVAL: frozenset({ExecutionOwnerType.EXIT_PLAN}),
   }
@@ -346,11 +350,6 @@ def _validate_pending_intent(
       "INTENT_NOT_FOUND",
       "交易信号不存在或不属于当前业务对象",
     )
-  if str(record.status or "").upper() != "AWAITING_APPROVAL":
-    raise TradeApprovalChallengeError(
-      "INTENT_NOT_AWAITING_APPROVAL",
-      "交易信号已处理、已过期或不再等待确认",
-    )
   expected_direction = (
     "SELL" if action == EXIT_PLAN_SELL_APPROVAL else "BUY"
   )
@@ -359,7 +358,54 @@ def _validate_pending_intent(
       "UNSUPPORTED_APPROVAL_ACTION",
       f"当前确认动作只支持 {expected_direction} 意图",
     )
+  if str(record.status or "").upper() != "AWAITING_APPROVAL":
+    raise TradeApprovalChallengeError(
+      "INTENT_NOT_AWAITING_APPROVAL",
+      "交易信号已处理、已过期或不再等待确认",
+    )
   return record
+
+
+async def _lock_t_entry_source(db, *, execution_ref, environment, account_id):
+  """Fence previews/consumption against drain using head -> execution -> intent.
+
+  Identity is checked even on consumed retries. Readiness is checked separately
+  for new operations so a drained source can still return its durable result.
+  """
+  if execution_ref.owner_type is not ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+    return None
+  probe = await db.get(TAssistantExecutionRecord, execution_ref.owner_id)
+  if probe is None or environment is not ExecutionEnvironment.LIVE:
+    raise TradeApprovalChallengeError("T_ENTRY_SOURCE_INVALID", "做 T 执行来源无效")
+  head = await db.get(
+    TTradeGlobalConfig, probe.config_id, with_for_update=True, populate_existing=True,
+  )
+  source = await db.get(
+    TAssistantExecutionRecord, execution_ref.owner_id,
+    with_for_update=True, populate_existing=True,
+  )
+  if (
+    head is None or source is None
+    or source.account_id != account_id or head.account_id != account_id
+    or source.environment != "LIVE"
+    or source.entry_authorization != "MANUAL_CONFIRM"
+  ):
+    raise TradeApprovalChallengeError("T_ENTRY_SOURCE_INVALID", "做 T 执行来源无效")
+  return head, source
+
+
+def _require_t_entry_source_ready(context):
+  if context is None:
+    return
+  head, source = context
+  if (
+    source.status != "RUNNING" or source.entry_readiness != "READY"
+    or not head.enabled or head.desired_environment != "LIVE"
+    or head.active_config_version_id != source.config_version_id
+  ):
+    raise TradeApprovalChallengeError(
+      "T_ENTRY_SOURCE_NOT_READY", "做 T 执行已阻断新入场，请等待新的可确认信号",
+    )
 
 
 class TradeApprovalChallengeService:
@@ -848,6 +894,10 @@ class TradeApprovalChallengeService:
     now = time_utils.now()
 
     async for db in get_async_db():
+      source = await _lock_t_entry_source(
+        db, execution_ref=execution_ref, environment=environment,
+        account_id=normalized_account_id,
+      )
       result = await db.execute(
         select(TradeIntentRecord)
         .where(TradeIntentRecord.id == intent_id)
@@ -937,6 +987,7 @@ class TradeApprovalChallengeService:
             "operation_status": "REPLACED",
           }
 
+      _require_t_entry_source_ready(source)
       record = _validate_pending_intent(
         raw_record,
         action=action,
@@ -1057,6 +1108,10 @@ class TradeApprovalChallengeService:
       )
 
     async for db in get_async_db():
+      source = await _lock_t_entry_source(
+        db, execution_ref=execution_ref, environment=environment,
+        account_id=normalized_account_id,
+      )
       result = await db.execute(
         select(TradeIntentRecord)
         .where(TradeIntentRecord.id == intent_id)
@@ -1224,6 +1279,7 @@ class TradeApprovalChallengeService:
             idempotency_key=str(resolved_command_idempotency_key),
           )
         return str(challenge.id)
+      _require_t_entry_source_ready(source)
       record = _validate_pending_intent(
         record,
         action=action,

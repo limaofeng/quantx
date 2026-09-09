@@ -571,7 +571,11 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   无订单意图且同事务写审计。59 项相关单测、4 项完整迁移链 PostgreSQL 测试通过，
   包括 PAPER 回归、LIVE 分配后排空、缺失审计整事务回滚与直接 SQL 绕过拒绝。
   PostgreSQL 仅使用专用测试库随机 schema，结束确认删除；业务库未应用 0060/0061。
-- 剩余开发顺序：独立 T 确认预览/消费接线→LIVE 组合事实读取、
+- API 确认服务已支持独立 T LIVE schema 2 预览/消费，按 head→execution→intent 加锁，
+  新操作复核启用状态、当前 config、MANUAL_CONFIRM 与 READY；排空后仅允许已消费操作
+  返回原结果。来源漂移、配置停用/切换、排空和终态重试方向检查等 **80 项相关 API 测试通过**。
+  这是服务层能力，尚未新增 GraphQL 入口或 Engine 新 T 确认 handler，不宣称确认整链完成。
+- 剩余开发顺序：独立 T 确认命令/重新分配接线→LIVE 组合事实读取、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor→P7 新故障/性能→P8。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
