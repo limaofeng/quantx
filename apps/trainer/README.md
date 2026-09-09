@@ -7,6 +7,12 @@
 
 数据认证已拆分为 Research 生成不可变文件、监督端核验并登记两步。公共目录校验与认证字段投影位于 `quantx_infrastructure.training_dataset_store`；当前准备任务仍由 Worker 监督，后续 Trainer 复用同一验证边界。数据库登记失败保留生成文件，文件校验失败则拒绝登记。准备任务的进度、心跳和终态写入必须匹配领取时的 flow_run_id；心跳超时仅表示未知，不能自动释放任务供重试。Worker 的失败收敛等待本次工作停止；直接准备子进程先终止并等待 5 秒，再强制结束并等待 5 秒。退出未确认则保持 RUNNING，不开放重试；Windows 后代进程仍需独立约束与验收。准备进程持久化退出证据与 Trainer 领取交接仍待实现。
 
+## 固定提交代码包
+
+开发机使用显式 Conda Python 执行 `ops/trainer/package_code.py --revision <提交 SHA> --output <新输出目录>`。入口先解析一次提交，再从 Git 对象生成 `code.zip` 和 `manifest.json`，不复制工作区改动；输出目录已存在时拒绝覆盖。包内包含根 `pyproject.toml`、`uv.lock`、apps、packages、ops 和 tests，以保留完整 workspace 元数据及验收代码。这份源码包不会自动安装其中的应用。
+
+清单记录提交、锁文件哈希、ZIP 大小/哈希及逐文件大小/哈希/权限；ZIP 顺序、时间戳和权限规范化，同一提交可重复生成。拒绝链接、特殊文件、路径穿越、Windows 保留名及大小写冲突。输出目录旁的 `.package-lock` 排除同目标并发打包；异常中止遗留锁时，先确认打包进程已退出，再由运维移除该锁。代码包只冻结部署输入，后续仍需核验、安装和运行目录写入保护；不代表依赖环境或 GPU 已验收。
+
 ## Conda 环境安装
 
 Windows 独立训练代码目录中执行：
