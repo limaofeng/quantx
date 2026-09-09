@@ -19,6 +19,7 @@ def result(tmp_path, monkeypatch):
   directory.mkdir(parents=True)
   control = state / "control" / "run-1"
   control.mkdir(parents=True)
+  (control / "process.json").write_text(json.dumps({"state": "EXITED", "returncode": 0}))
   files = [
     "metrics.json",
     "data-quality.json",
@@ -463,6 +464,7 @@ async def test_trainer_normal_flow_publishes_before_success_and_resumes_failed_t
 ):
   from quantx_trainer import training_flow as flow
 
+  (result.control / "process.json").unlink()
   process = subprocess.Popen([sys.executable, "-c", "pass"])
   process.wait(timeout=5)
   monkeypatch.setattr(flow, "current_config", lambda: result.config)
@@ -487,6 +489,48 @@ async def test_trainer_normal_flow_publishes_before_success_and_resumes_failed_t
     assert len(result.uploads) == 2
   result.repository.record_artifact_bundle.assert_awaited_once()
   result.repository.complete_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returncode", [75, 1, None, False])
+async def test_recovery_publication_requires_recorded_zero_exit(result, returncode):
+  (result.control / "process.json").write_text(
+    json.dumps({"state": "EXITED", "returncode": returncode})
+  )
+  with pytest.raises(publication.PublicationError, match="EXECUTION_NOT_SUCCESSFUL"):
+    await publication.publish_result(result.config, result.repository, run_id="run-1", owner="owner")
+  assert result.uploads == []
+  result.repository.complete_run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_publish_success_manifest_after_protection_exit(result, monkeypatch):
+  from quantx_trainer import training_flow as flow
+
+  (result.control / "process.json").write_text(json.dumps({"state": "EXITED", "returncode": 75}))
+  monkeypatch.setattr(flow, "current_config", lambda: result.config)
+  monkeypatch.setattr(flow, "inspect_execution", lambda *args, **kwargs: "EXITED")
+  result.repository.list_runs = AsyncMock(return_value=[result.row])
+  result.repository.fail_run = AsyncMock()
+  assert await flow.recover_lost_training_runs(result.repository) == ["run-1"]
+  result.repository.fail_run.assert_awaited_once()
+  assert result.uploads == []
+  result.repository.complete_run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_result_pending_if_exit_evidence_disappears(result, monkeypatch):
+  from quantx_trainer import training_flow as flow
+
+  (result.control / "process.json").unlink()
+  monkeypatch.setattr(flow, "current_config", lambda: result.config)
+  monkeypatch.setattr(flow, "inspect_execution", lambda *args, **kwargs: "EXITED")
+  result.repository.list_runs = AsyncMock(return_value=[result.row])
+  result.repository.fail_run = AsyncMock()
+  assert await flow.recover_lost_training_runs(result.repository) == []
+  result.repository.fail_run.assert_not_called()
+  assert result.uploads == []
+  result.repository.complete_run.assert_not_called()
 
 
 @pytest.mark.asyncio

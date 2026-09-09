@@ -744,7 +744,18 @@ async def recover_lost_training_runs(repository: Any, *, now: datetime | None = 
     if state != "EXITED":
       continue
     manifest_path = research_runs_root() / run_id / "manifest.json"
+    successful_exit = False
     if manifest_path.is_file() and _json_read(manifest_path).get("status") == "SUCCEEDED":
+      try:
+        execution = _json_read(directory / "process.json")
+      except ValueError:
+        continue  # Changed or unreadable exit evidence cannot authorize publication.
+      successful_exit = (
+        execution.get("state") == "EXITED"
+        and type(execution.get("returncode")) is int
+        and execution["returncode"] == 0
+      )
+    if successful_exit:
       try:
         await publish_result(current_config(), repository, run_id=run_id, owner=owner)
         lost.append(run_id)

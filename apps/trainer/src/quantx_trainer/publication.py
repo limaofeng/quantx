@@ -217,6 +217,14 @@ async def _publish_result(
       ready = state is True if local_supervisor else state == "EXITED"
       if not ready:
         raise PublicationError("PUBLICATION_EXECUTION_NOT_STOPPED")
+      if not local_supervisor:
+        execution = read_object(control / "process.json")
+        if (
+          execution.get("state") != "EXITED"
+          or type(execution.get("returncode")) is not int
+          or execution["returncode"] != 0
+        ):
+          raise PublicationError("PUBLICATION_EXECUTION_NOT_SUCCESSFUL")
       cancel = threading.Event()
       bundle = await _supervised_io(
         lambda: result_bundle(
