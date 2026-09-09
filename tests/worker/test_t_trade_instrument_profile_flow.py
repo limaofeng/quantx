@@ -108,7 +108,7 @@ async def test_profile_flow_materializes_each_explicit_instrument(monkeypatch) -
   )
   monkeypatch.setattr(
     profile_flow,
-    "HistoricalMarketDataService",
+    "LocalHistoricalTickReader",
     lambda: SimpleNamespace(iter_tick_pages=iter_tick_pages),
   )
   monkeypatch.setattr(
@@ -188,7 +188,7 @@ async def test_profile_flow_classifies_repository_integrity_as_failed(monkeypatc
   )
   monkeypatch.setattr(
     profile_flow,
-    "HistoricalMarketDataService",
+    "LocalHistoricalTickReader",
     lambda: type("_MarketData", (), {"iter_tick_pages": iter_tick_pages})(),
   )
   monkeypatch.setattr(

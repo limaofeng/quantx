@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
@@ -16,8 +17,10 @@ from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_reposit
   TTradeInstrumentProfileRepository,
 )
 from quantx_infrastructure.services.historical_market_data_service import (
-  HistoricalMarketDataService,
   HistoricalTickPaginationError,
+)
+from quantx_infrastructure.services.local_historical_tick_reader import (
+  LocalHistoricalTickReader,
 )
 from quantx_infrastructure.services.t_trade_instrument_profile_service import (
   T_TRADE_PROFILE_MAX_PAGES,
@@ -64,8 +67,7 @@ async def resolve_profile_as_of(
 
   target = current.date()
   if not (
-    await helper.is_trading_date("SH", target)
-    and current.time() >= PROFILE_CUTOFF
+    await helper.is_trading_date("SH", target) and current.time() >= PROFILE_CUTOFF
   ):
     target = await helper.trading_time_service.get_previous_trading_day(
       "SH",
@@ -115,7 +117,7 @@ async def resolve_profile_instruments(
 
 async def _iter_profile_tick_pages(
   *,
-  service: HistoricalMarketDataService,
+  service: LocalHistoricalTickReader,
   stock_code: str,
   start_time: datetime,
   end_time: datetime,
@@ -137,21 +139,23 @@ async def _iter_profile_tick_pages(
   final_date = end_time.date()
   while current_date <= final_date:
     chunk_last_date = min(
-      current_date
-      + timedelta(days=PROFILE_QUERY_CHUNK_CALENDAR_DAYS - 1),
+      current_date + timedelta(days=PROFILE_QUERY_CHUNK_CALENDAR_DAYS - 1),
       final_date,
     )
     chunk_start = max(start_time, datetime.combine(current_date, time.min))
     chunk_end = min(end_time, datetime.combine(chunk_last_date, time.max))
-    async for page in service.iter_tick_pages(
-      stock_code=stock_code,
-      start_time=chunk_start,
-      end_time=chunk_end,
-      page_size=page_size,
-      max_pages=max_pages,
-      max_source_ticks=max_source_ticks,
-    ):
-      yield page
+    async with aclosing(
+      service.iter_tick_pages(
+        stock_code=stock_code,
+        start_time=chunk_start,
+        end_time=chunk_end,
+        page_size=page_size,
+        max_pages=max_pages,
+        max_source_ticks=max_source_ticks,
+      )
+    ) as pages:
+      async for page in pages:
+        yield page
     current_date = chunk_last_date + timedelta(days=1)
 
 
@@ -186,7 +190,7 @@ async def t_trade_instrument_profile_flow(
       "errors": [],
     }
 
-  market_data = HistoricalMarketDataService()
+  market_data = LocalHistoricalTickReader()
   profile_service = TTradeInstrumentProfileService()
   start_at = datetime.combine(
     as_of.date() - timedelta(days=max(lookback_calendar_days - 1, 0)),
@@ -207,7 +211,7 @@ async def t_trade_instrument_profile_flow(
         max_pages=T_TRADE_PROFILE_MAX_PAGES,
         max_source_ticks=T_TRADE_PROFILE_MAX_SOURCE_TICKS,
       )
-      async with AsyncSessionLocal() as db:
+      async with aclosing(pages), AsyncSessionLocal() as db:
         await profile_service.build_and_save_profile_from_pages(
           instrument_code=code,
           pages=pages,
