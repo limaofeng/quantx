@@ -65,6 +65,8 @@ conda run -n quantx-train quantx-trainer-config-check --config D:\QuantXTraining
 
 子进程环境采用系统必需变量白名单，显式设置开发目标及关闭实盘门，不继承券商参数、设备密钥、生产环境文件或 Python 搜索路径。后续进程启动必须使用完整的该环境映射，不能与父进程环境再次合并。
 
+安全解包在代码根目录保留 `.trainer-source.json`（原始已验证清单）。Research 制品记录优先使用此提交证据，并复核清单文件的大小/哈希及额外文件；文件变化标记 `dirty`，损坏或不可读证据拒绝，不回退到父目录 Git。仅忽略解释器生成的 `__pycache__`；安装产生的其他额外文件同样会标记变更。此记录不代替启动 ACL 检查，也不授权覆盖运行目录或修改依赖。
+
 ## 运行权限与控制面只读预检
 
 ```powershell

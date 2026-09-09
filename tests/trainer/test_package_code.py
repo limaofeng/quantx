@@ -198,7 +198,10 @@ def test_unpack_verified_tree_and_refuse_replacement(tmp_path):
   output = tmp_path / "code"
   manifest = package.unpack_code(bundle, manifest_digest(bundle), output)
   files = {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()}
-  assert files == {f["path"] for f in manifest["files"]}
+  assert files == {f["path"] for f in manifest["files"]} | {".trainer-source.json"}
+  assert (output / ".trainer-source.json").read_bytes() == (
+    bundle / "manifest.json"
+  ).read_bytes()
   for item in manifest["files"]:
     assert (
       hashlib.sha256((output / item["path"]).read_bytes()).hexdigest() == item["sha256"]
@@ -280,3 +283,68 @@ def test_unpack_rejects_corruption_without_partial_output(tmp_path, fault):
   assert not (tmp_path / "escape").exists()
   assert not list(tmp_path.glob(".trainer-unpack-*"))
   assert not list(tmp_path.glob("*.package-lock"))
+
+
+def test_unpacked_runtime_preserves_commit_without_git_and_detects_changes(
+  tmp_path, monkeypatch
+):
+  import quantx_research.artifacts as artifacts
+  from quantx_research.artifacts import git_state
+
+  bundle = make_bundle(tmp_path)
+  output = tmp_path / "runtime"
+  manifest = package.unpack_code(bundle, manifest_digest(bundle), output)
+  monkeypatch.setattr(
+    artifacts.subprocess,
+    "run",
+    lambda *args, **kwargs: pytest.fail("Git must not run in a packaged tree"),
+  )
+  state = git_state(output)
+  assert state["commit"] == manifest["git_commit"]
+  assert state["dirty"] is False
+  assert state["code_manifest_sha256"] == manifest_digest(bundle)
+  cache = output / "apps" / "__pycache__"
+  cache.mkdir()
+  (cache / "module.cpython-313.pyc").write_bytes(b"cache")
+  assert git_state(output)["dirty"] is False
+  (output / "uv.lock").write_text("changed")
+  assert git_state(output)["dirty"] is True
+
+
+@pytest.mark.parametrize(
+  "fault", ["extra", "missing", "linked", "invalid-marker", "unsafe-path"]
+)
+def test_packaged_runtime_never_reports_unknown_source_as_clean(
+  tmp_path, monkeypatch, fault
+):
+  import quantx_research.artifacts as artifacts
+  from quantx_research.artifacts import git_state
+
+  bundle = make_bundle(tmp_path)
+  output = tmp_path / "runtime"
+  package.unpack_code(bundle, manifest_digest(bundle), output)
+  monkeypatch.setattr(
+    artifacts.subprocess, "run", lambda *args, **kwargs: pytest.fail("No Git fallback")
+  )
+  marker = output / ".trainer-source.json"
+  if fault == "extra":
+    (output / "injected.py").write_text("pass")
+  elif fault == "missing":
+    (output / "uv.lock").unlink()
+  elif fault == "linked":
+    (output / "uv.lock").unlink()
+    try:
+      (output / "uv.lock").symlink_to(bundle / "manifest.json")
+    except OSError:
+      pytest.skip("symlink creation unavailable")
+  elif fault == "invalid-marker":
+    marker.write_text("{")
+  else:
+    value = json.loads(marker.read_bytes())
+    value["files"][0]["path"] = "../outside"
+    marker.write_text(json.dumps(value))
+  if fault in {"invalid-marker", "unsafe-path"}:
+    with pytest.raises(ValueError, match="TRAINER_SOURCE_EVIDENCE_INVALID"):
+      git_state(output)
+  else:
+    assert git_state(output)["dirty"] is True

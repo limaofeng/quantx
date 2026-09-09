@@ -119,6 +119,12 @@ def write_yaml(path: Path, value: Any) -> Path:
 
 
 def git_state(repo_root: Path) -> dict[str, Any]:
+  from quantx_research.packaged_source import packaged_source_state
+
+  packaged = packaged_source_state(repo_root)
+  if packaged is not None:
+    return packaged
+
   def _run(*args: str) -> str:
     result = subprocess.run(
       ["git", *args],

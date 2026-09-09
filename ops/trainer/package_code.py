@@ -256,6 +256,8 @@ def unpack_code(bundle: Path, manifest_sha256: str, output: Path) -> dict:
             if size != record["size"] or digest.hexdigest() != record["sha256"]:
               raise ValueError("ARCHIVE_FILE_DIGEST_MISMATCH")
             target.chmod(record["mode"])
+      # Preserve the externally verified provenance for Git-free runtime images.
+      (staging / ".trainer-source.json").write_bytes(raw)
       if output.exists() or output.is_symlink():
         raise FileExistsError(output)
       os.rename(staging, output)
