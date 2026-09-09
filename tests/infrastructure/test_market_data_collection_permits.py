@@ -56,6 +56,11 @@ async def permits(workers):  # noqa: F811
       migration.upgrade()
 
     await connection.run_sync(upgrade)
+    plan_path = path.with_name("20260909_0068_market_data_collection_plan.py")
+    spec = importlib.util.spec_from_file_location("plan_migration", plan_path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    await connection.run_sync(upgrade)
     await connection.execute(
       text(
         "ALTER TABLE market_data_request ADD COLUMN development_only boolean NOT NULL DEFAULT false"
@@ -263,3 +268,33 @@ async def test_losing_owner_at_commit_rolls_back_completion_and_counter(
       first, "SELECT production_streak FROM market_data_collection_schedule"
     )
   ).scalar_one() == 0
+
+
+async def test_plan_progress_rolls_back_with_native_completion_on_lease_loss(
+  permits, monkeypatch
+):
+  first, _, store, device, units = permits
+  grant = await store.issue(device_id=device, unit=units[0])
+  await ack(store, grant, "START")
+  guard = first._guard_ingestion_owner
+  checks = 0
+
+  async def lose_on_commit(connection, **kwargs):
+    nonlocal checks
+    checks += 1
+    if checks == 3:
+      raise RuntimeError("worker lease was lost")
+    await guard(connection, **kwargs)
+
+  monkeypatch.setattr(first, "_guard_ingestion_owner", lose_on_commit)
+  with pytest.raises(RuntimeError, match="lease was lost"):
+    await ack(store, grant, "FINISH")
+  assert (
+    await execute(first, "SELECT next_unit_index FROM market_data_collection_plan")
+  ).scalar_one() == 0
+  monkeypatch.setattr(first, "_guard_ingestion_owner", guard)
+  assert await ack(store, grant, "FINISH")
+  assert not await ack(store, grant, "FINISH")
+  assert (
+    await execute(first, "SELECT next_unit_index FROM market_data_collection_plan")
+  ).scalar_one() == 1
