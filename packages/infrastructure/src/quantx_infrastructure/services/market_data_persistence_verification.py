@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -40,6 +41,9 @@ _MEASUREMENTS = {
   "1d": "kline_1d",
 }
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+readback_trace_scope: ContextVar[dict[str, Any]] = ContextVar(
+  "readback_trace_scope", default={}
+)
 
 
 class MarketDataPersistenceVerificationError(RuntimeError):
@@ -516,7 +520,13 @@ def _check_readback_cancelled(cancelled: threading.Event | None) -> None:
     raise MarketDataPersistenceQueryError("market-data read-back was cancelled")
 
 
-async def _await_readback(function: Callable[..., Any], **kwargs: Any) -> Any:
+async def _await_readback(
+  function: Callable[..., Any],
+  *,
+  trace_scope: dict[str, Any] | None = None,
+  **kwargs: Any,
+) -> Any:
+  scope_token = readback_trace_scope.set(trace_scope or {})
   cancelled = threading.Event()
   task = asyncio.create_task(asyncio.to_thread(function, cancelled=cancelled, **kwargs))
   try:
@@ -529,6 +539,8 @@ async def _await_readback(function: Callable[..., Any], **kwargs: Any) -> Any:
     except Exception:
       pass
     raise
+  finally:
+    readback_trace_scope.reset(scope_token)
 
 
 def _read_expected_key_group_once(
@@ -1074,11 +1086,17 @@ async def verify_persisted_bar_summaries(
         attempts_by_group[f"{item.code}/{item.period}"] = 0
       return
     budget = ReadbackBudget()
+    trace_scope = {
+      "group_sha256": digest,
+      "expected_keys": sum(len(item.keys) for item in group),
+      "code_count": len(group),
+    }
     for attempt in range(1, max_attempts + 1):
       try:
         if len(group) == 1:
           result = await _await_readback(
             _read_expected_key_batch_bounded,
+            trace_scope=trace_scope,
             batch=group[0],
             connection=connection,
             page_rows=page_rows,
@@ -1087,6 +1105,7 @@ async def verify_persisted_bar_summaries(
         else:
           result = await _await_readback(
             _read_expected_keys_bounded,
+            trace_scope=trace_scope,
             batches=tuple(group),
             connection=connection,
             page_rows=page_rows,
@@ -1235,6 +1254,7 @@ async def verify_persisted_bar_summaries(
       try:
         existing = await _await_readback(
           _read_empty_group_bounded,
+          trace_scope={"group_sha256": digest, "expected_keys": 0, "code_count": 1},
           expected=expected,
           start_ms=start_ms,
           end_exclusive_ms=end_exclusive_ms,
