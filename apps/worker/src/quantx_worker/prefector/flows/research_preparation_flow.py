@@ -41,6 +41,10 @@ from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
 from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
 
 
+class PreparationAdmissionDenied(RuntimeError):
+  """A recorded exit 75 permits a later export attempt."""
+
+
 class PreparationProcessUnconfirmed(RuntimeError):
   """The child may still exist; its job must not become retryable."""
 
@@ -93,6 +97,8 @@ async def run_research(job, directory: Path):
     if certification:
       record_spawn(evidence, process=SimpleNamespace(pid=process.pid, poll=lambda: process.returncode), **identity)
     await process.wait()
+    if certification and process.returncode == 75:
+      raise PreparationAdmissionDenied("CERTIFICATION_EXPORT_HOST_ADMISSION_DENIED")
     if process.returncode != 0 or not result_file.is_file():
       raise RuntimeError("Research 子进程未完成，请检查运行端依赖")
     result = json.loads(result_file.read_text(encoding="utf-8"))
@@ -252,17 +258,33 @@ async def recover_certification_exports():
         if inspect_execution(evidence, **identity) != "EXITED" and not local_exit_recorded(evidence, **identity):
           continue
         process = json.loads(evidence.read_text(encoding="utf-8"))
-        if process.get("state") != "EXITED" or type(process.get("returncode")) is not int or process["returncode"] != 0:
+        if process.get("state") != "EXITED" or type(process.get("returncode")) is not int:
           continue
         executed = json.loads(request.read_text(encoding="utf-8"))
         if executed != {"kind": job.kind, **job.request}:
+          continue
+        if process["returncode"] == 75:
+          async with AsyncSessionLocal() as db:
+            await ResearchPreparationRepository(db).requeue_worker_admission(job.job_id, expected_flow_run_id=job.flow_run_id)
+          recovered.append(job.job_id)
+          continue
+        if process["returncode"] != 0:
+          await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, status="FAILED",
+                           phase="导出进程失败", error="CERTIFICATION_EXPORT_PROCESS_FAILED")
+          recovered.append(job.job_id)
           continue
         result_file = directory / "result.json"
         reject_links(result_file)
         if result_file.stat().st_size > 8 * 1024 * 1024:
           continue
         result = json.loads(result_file.read_text(encoding="utf-8"))
-        if not isinstance(result, dict) or result.get("ready") is not True:
+        if not isinstance(result, dict) or type(result.get("ready")) is not bool:
+          continue
+        if result["ready"] is False:
+          await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, status="FAILED",
+                           phase="导出检查未通过", result=public_result(result),
+                           error="CERTIFICATION_EXPORT_CHECK_FAILED")
+          recovered.append(job.job_id)
           continue
 
         async def check():
@@ -304,10 +326,13 @@ async def research_preparation_dispatch_flow():
   heartbeat = asyncio.create_task(keep_alive(job.job_id, job.flow_run_id))
   work = asyncio.create_task(perform(job, directory))
   failure = None
+  admission_denied = False
   try:
     done, _ = await asyncio.wait({heartbeat, work}, return_when=asyncio.FIRST_COMPLETED)
     for task in done:
       task.result()
+  except PreparationAdmissionDenied:
+    admission_denied = True
   except asyncio.CancelledError:
     failure = {"phase": "执行中断", "error": "Worker 已停止，可重试此任务"}
     raise
@@ -327,6 +352,11 @@ async def research_preparation_dispatch_flow():
         )
       if handed_off is not None:
         failure = None
+    if admission_denied and not unconfirmed:
+      async with AsyncSessionLocal() as db:
+        await ResearchPreparationRepository(db).requeue_worker_admission(job.job_id, expected_flow_run_id=job.flow_run_id)
     if failure and not unconfirmed:
       await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, status="FAILED", **failure)
+  if admission_denied and not unconfirmed:
+    return {"job_id": job.job_id, "status": "QUEUED", "reason": "HOST_ADMISSION_DENIED"}
   return {"job_id": job.job_id, **({"status": "RUNNING", "reason": "PREPARATION_PROCESS_STOP_UNCONFIRMED"} if unconfirmed else {})}

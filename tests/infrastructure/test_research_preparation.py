@@ -156,6 +156,11 @@ async def test_certification_handoff_is_owner_fenced_immutable_and_executor_rout
     assert await repo.claim("trainer", kinds=("CERTIFY",), executor="TRAINER") is None
     job = await repo.claim("export-owner", kinds=("CERTIFY",), executor="WORKER")
     with pytest.raises(ValueError, match="归属"):
+      await repo.requeue_worker_admission(job_id, expected_flow_run_id="other")
+    await repo.requeue_worker_admission(job_id, expected_flow_run_id="export-owner")
+    assert await repo.claim("trainer", kinds=("CERTIFY",), executor="TRAINER") is None
+    await repo.claim("export-owner", kinds=("CERTIFY",), executor="WORKER")
+    with pytest.raises(ValueError, match="归属"):
       await repo.handoff_certification(job_id, expected_flow_run_id="other", reference=reference)
     with pytest.raises(ValueError, match="归属"):
       await repo.requeue_trainer_inputs(job_id, expected_flow_run_id="export-owner")
@@ -168,6 +173,8 @@ async def test_certification_handoff_is_owner_fenced_immutable_and_executor_rout
     assert await repo.claim("worker", kinds=("CERTIFY",), executor="WORKER") is None
     assigned = await repo.claim("trainer-owner", kinds=("CERTIFY",), executor="TRAINER")
     assert assigned.job_id == job_id
+    with pytest.raises(ValueError, match="交接"):
+      await repo.requeue_worker_admission(job_id, expected_flow_run_id="trainer-owner")
     await repo.handoff_certification(job_id, expected_flow_run_id="export-owner", reference=reference)
     await db.refresh(assigned)
     assert assigned.status == "RUNNING" and assigned.flow_run_id == "trainer-owner"

@@ -305,6 +305,23 @@ class ResearchPreparationRepository:
     row.error, row.updated_at = None, now()
     await self.db.commit()
 
+  async def requeue_worker_admission(self, job_id, *, expected_flow_run_id):
+    """Only a stopped Worker certification export may retry host admission."""
+    if not expected_flow_run_id:
+      raise ValueError("准备任务执行归属无效")
+    result = await self.db.execute(
+      update(Job).where(
+        Job.job_id == job_id, Job.kind == "CERTIFY", Job.status == "RUNNING",
+        Job.flow_run_id == expected_flow_run_id,
+        Job.request["certification_input"]["manifest_sha256"].as_string().is_(None),
+      ).values(status="QUEUED", phase="等待导出主机资源", flow_run_id=None,
+               error=None, updated_at=now())
+    )
+    if result.rowcount != 1:
+      await self.db.rollback()
+      raise ValueError("准备任务执行归属已变化或任务已交接")
+    await self.db.commit()
+
   async def requeue_trainer_admission(self, job_id, *, expected_flow_run_id):
     """Requeue only after the supervisor verifies a host-admission exit."""
     await self._requeue_trainer(job_id, expected_flow_run_id=expected_flow_run_id, phase="等待主机资源")

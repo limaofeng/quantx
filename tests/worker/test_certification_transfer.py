@@ -128,7 +128,7 @@ async def test_dispatch_acknowledgement_failure_respects_persisted_handoff(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [None, "locked", "request", "exit", "missing", "store", "trainer"])
+@pytest.mark.parametrize("fault", [None, "locked", "request", "exit", "nonzero", "blocked", "badready", "missing", "store", "trainer"])
 async def test_recovery_publishes_only_confirmed_original_exports(tmp_path, monkeypatch, fault):
   import json
   from contextlib import nullcontext
@@ -149,8 +149,10 @@ async def test_recovery_publishes_only_confirmed_original_exports(tmp_path, monk
   request.write_text(json.dumps({"kind": job.kind, **job.request}))
   identity = dict(run_id="job", owner="owner", request=request)
   begin_execution(evidence, **identity)
-  record_exit(evidence, returncode=75 if fault == "exit" else 0, **identity)
+  record_exit(evidence, returncode=75 if fault == "exit" else (1 if fault == "nonzero" else 0), **identity)
   result = {"ready": True, "dataset_version": "frozen-v1", "certification_input": reference.model_dump(mode="json")}
+  if fault in {"blocked", "badready"}:
+    result["ready"] = False if fault == "blocked" else "false"
   (target / "result.json").write_text(json.dumps(result))
   if fault == "request":
     request.write_text("changed")
@@ -158,7 +160,7 @@ async def test_recovery_publishes_only_confirmed_original_exports(tmp_path, monk
     evidence.unlink()
   if fault == "trainer":
     job.request["certification_input"] = reference.model_dump(mode="json")
-  repository = SimpleNamespace(running_jobs=AsyncMock(return_value=[job]), handoff_certification=AsyncMock())
+  repository = SimpleNamespace(running_jobs=AsyncMock(return_value=[job]), handoff_certification=AsyncMock(), requeue_worker_admission=AsyncMock())
 
   @asynccontextmanager
   async def session():
@@ -180,6 +182,31 @@ async def test_recovery_publishes_only_confirmed_original_exports(tmp_path, monk
   monkeypatch.setattr(flow, "update_job", AsyncMock())
   monkeypatch.setattr(flow, "run_research", AsyncMock(side_effect=AssertionError("must not recompute")))
   with publication_lock(target) if fault == "locked" else nullcontext():
-    assert await flow.recover_certification_exports() == (["job"] if fault is None else [])
+    assert await flow.recover_certification_exports() == (["job"] if fault in {None, "exit", "nonzero", "blocked"} else [])
   assert repository.handoff_certification.await_count == int(fault is None)
+  assert repository.requeue_worker_admission.await_count == int(fault == "exit")
+  if fault in {"nonzero", "blocked"}:
+    assert flow.update_job.await_args.kwargs["status"] == "FAILED"
   flow.run_research.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_requeues_confirmed_host_denial(tmp_path, monkeypatch):
+  job = SimpleNamespace(kind="CERTIFY", job_id="job", flow_run_id="owner", request={})
+  repository = SimpleNamespace(claim=AsyncMock(return_value=job), running_jobs=AsyncMock(return_value=[]), requeue_worker_admission=AsyncMock())
+
+  @asynccontextmanager
+  async def session():
+    yield SimpleNamespace(expunge=lambda row: None)
+
+  monkeypatch.setattr(flow, "root", lambda: tmp_path)
+  monkeypatch.setattr(flow, "_full_live_runtime", lambda: False)
+  monkeypatch.setattr(flow, "AsyncSessionLocal", session)
+  monkeypatch.setattr(flow, "ResearchPreparationRepository", lambda db: repository)
+  monkeypatch.setattr(flow, "perform", AsyncMock(side_effect=flow.PreparationAdmissionDenied()))
+  update = AsyncMock()
+  monkeypatch.setattr(flow, "update_job", update)
+  result = await flow.research_preparation_dispatch_flow.fn()
+  assert result["status"] == "QUEUED"
+  repository.requeue_worker_admission.assert_awaited_once_with("job", expected_flow_run_id="owner")
+  update.assert_not_awaited()

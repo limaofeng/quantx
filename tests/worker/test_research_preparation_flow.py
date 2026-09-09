@@ -188,7 +188,7 @@ async def test_interrupted_spawn_cannot_make_export_retryable(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exit_code", [0, 75])
+@pytest.mark.parametrize("exit_code", [0, 1, 75])
 async def test_certification_export_records_real_child_identity_and_exit(tmp_path, monkeypatch, exit_code):
   import asyncio
   import json
@@ -207,7 +207,7 @@ async def test_certification_export_records_real_child_identity_and_exit(tmp_pat
   monkeypatch.setattr(preparation.asyncio, "create_subprocess_exec", spawn)
   job = SimpleNamespace(kind="CERTIFY", job_id="job", flow_run_id="owner", request={"dataset_version": "version"})
   if exit_code:
-    with pytest.raises(RuntimeError):
+    with pytest.raises(preparation.PreparationAdmissionDenied if exit_code == 75 else RuntimeError):
       await preparation.run_research(job, tmp_path)
   else:
     assert await preparation.run_research(job, tmp_path) == {"ready": True}
