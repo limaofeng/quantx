@@ -132,7 +132,9 @@ async def test_report_links_frozen_inputs_and_qualification(tmp_path, damage):
     assert result["report"]["material"]["evidence"]["admission_policy_hash"]
 
 
-@pytest.mark.parametrize("damage", [None, "pass_flag", "reasons", "policy", "count"])
+@pytest.mark.parametrize(
+  "damage", [None, "pass_flag", "reasons", "policy", "count", "fees"]
+)
 async def test_frozen_policy_conclusion_is_recomputed(tmp_path, damage):
   from dataclasses import replace
 
@@ -158,13 +160,15 @@ async def test_frozen_policy_conclusion_is_recomputed(tmp_path, damage):
     report["material"]["failures"] = []
   elif damage == "policy":
     policy_hash = "0" * 64
+  elif damage == "fees":
+    report["material"]["cases"]["base"]["metrics"]["fees"] += 1
   elif damage == "count":
     report["material"]["cases"]["base"]["metrics"]["closed_batches"] = True
   # Even a freshly hashed inconsistent report must not pass conclusion validation.
   report["hash"] = evaluation.stable_manifest_hash(report["material"])
   path.write_text(json.dumps(report))
   if damage:
-    with pytest.raises(ValueError, match="BACKTEST_ADMISSION_"):
+    with pytest.raises(ValueError, match="BACKTEST_(ADMISSION|RESULT)_"):
       evaluation.verify_backtest_admission_conclusion(
         directory, expected_report_hash=report["hash"], expected_policy_hash=policy_hash
       )

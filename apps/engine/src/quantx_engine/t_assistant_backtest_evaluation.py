@@ -436,8 +436,8 @@ def verify_backtest_admission_conclusion(
 ):
   """Recompute the frozen-policy conclusion, without approving a LIVE release.
 
-  Hashes identify externally reviewed artifacts. This checks reported metrics,
-  not their derivation from broker facts; that remains a separate evidence gate.
+  Hashes identify externally reviewed artifacts. Portfolio metrics are rebuilt
+  from durable audits and valuation frames after each result chain is verified.
   """
   evidence = read_backtest_evaluation_evidence(
     directory, expected_report_hash=expected_report_hash
@@ -528,5 +528,75 @@ def _verify_comparison_result_artifacts(directory, frozen, report):
       if store.manifest["material"]["frozen"]["config"] != config:
         raise ValueError("BACKTEST_RESULT_CONFIG_SCOPE_CONFLICT")
       store.read_verified_result(expected_hash=reference["result_hash"])
+      if name == "portfolio" and summarize_persisted_backtest(store) != case["metrics"]:
+        raise ValueError("BACKTEST_RESULT_METRICS_CONFLICT")
   if indices != set(range(len(report["cases"]))):
     raise ValueError("BACKTEST_RESULT_SCENARIO_INDEX_INVALID")
+
+
+def summarize_persisted_backtest(store):
+  """Rebuild the metric inputs from frozen account and durable fill/order audits."""
+  from types import SimpleNamespace
+
+  account = store.manifest["material"]["frozen"]["initial_account"]
+  fills, orders, plans = [], {}, {}
+  seen = set()
+  final = None
+  for frame in store.frames():
+    final = frame["facts"]["evidence"]
+    for event in frame["facts"]["audit"]:
+      value = event.get("value")
+      if event["type"] == "ORDER":
+        orders[value["order_id"]] = value
+      elif event["type"] == "FILL":
+        if value["trade_id"] in seen:
+          raise ValueError("BACKTEST_METRIC_DUPLICATE_FILL")
+        seen.add(value["trade_id"])
+        fill = SimpleNamespace(
+          **{
+            **value,
+            "trade_type": SimpleNamespace(value=value["trade_type"]),
+            "trade_time": datetime.fromisoformat(value["trade_time"]),
+          }
+        )
+        fills.append(fill)
+        plan_id = fill.metadata["exit_plan_id"]
+        plan = plans.setdefault(
+          plan_id,
+          SimpleNamespace(
+            plan_id=plan_id,
+            remaining_volume=0,
+            entry_filled_volume=0,
+            template=SimpleNamespace(instrument_code=fill.instrument_code),
+          ),
+        )
+        if plan.template.instrument_code != fill.instrument_code:
+          raise ValueError("BACKTEST_METRIC_PLAN_SCOPE_CONFLICT")
+        if fill.trade_type.value == "BUY":
+          plan.entry_filled_volume += fill.volume
+          plan.remaining_volume += fill.volume
+        elif fill.trade_type.value == "SELL":
+          plan.remaining_volume -= fill.volume
+        else:
+          raise ValueError("BACKTEST_METRIC_FILL_SIDE_INVALID")
+        if plan.remaining_volume < 0:
+          raise ValueError("BACKTEST_METRIC_NEGATIVE_PLAN_VOLUME")
+  if final is None:
+    raise ValueError("BACKTEST_METRIC_FRAMES_REQUIRED")
+  pending = [
+    SimpleNamespace(request=SimpleNamespace(metadata=o["request"]["metadata"]))
+    for o in orders.values()
+    if o["status"] in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
+  ]
+  runtime = SimpleNamespace(
+    states=account["initial_positions"],
+    broker=SimpleNamespace(
+      initial_capital=account["initial_cash"]
+      + sum(p["market_value"] for p in account["initial_positions"].values()),
+      trades=fills,
+      pending_orders=pending,
+    ),
+    plans=SimpleNamespace(plans=plans),
+    _conservation=lambda: final,
+  )
+  return summarize_backtest(store, runtime)

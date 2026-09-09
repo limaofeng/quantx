@@ -14,6 +14,7 @@ from quantx_engine.t_assistant_backtest_evaluation import (
   BacktestAdmissionPolicy,
   evaluate_backtest_comparison,
   read_backtest_evaluation_evidence,
+  summarize_persisted_backtest,
 )
 
 from tests.engine.unit.test_t_assistant_backtest_runtime import CODES, runtime, ticks
@@ -140,15 +141,27 @@ async def test_counterfactual_cash_and_unconfirmed_policy(tmp_path):
     root=tmp_path / "evaluation",
   )
   exported = json.loads((directory / "report.json").read_text())
-  assert read_backtest_evaluation_evidence(
-    directory, expected_report_hash=exported["hash"]
-  )["report"] == exported
+  assert (
+    read_backtest_evaluation_evidence(directory, expected_report_hash=exported["hash"])[
+      "report"
+    ]
+    == exported
+  )
   assert report["strategy_admission"] == "NOT_EVALUATED"
   assert report["p6_allowed"] is False
   assert report["cases"]["zero"]["duplicated_cash"] == 25000
   assert report["cases"]["zero"]["metrics"]["closed_batches"] == 2
   assert report["cases"]["stress"]["metrics"]["closed_batches"] == 0
   assert report["cases"]["stress"]["metrics"]["open_batches"] == 2
+  from quantx_infrastructure.services.t_assistant_backtest_store import (
+    TAssistantBacktestStore,
+  )
+
+  for case in report["cases"].values():
+    store = TAssistantBacktestStore(
+      directory / str(case["scenario_index"]) / "portfolio" / case["execution_id"]
+    )
+    assert summarize_persisted_backtest(store) == case["metrics"]
 
 
 async def test_local_fact_constraints_and_corruption_detection(tmp_path):
