@@ -1,4 +1,4 @@
-"""Durable decision-cycle fencing and atomic PAPER-shadow material commits."""
+"""Durable decision-cycle fencing and environment-bound material commits."""
 
 from __future__ import annotations
 
@@ -371,7 +371,7 @@ class TAssistantDecisionCycleRepository:
     )
     if execution is None:
       raise TAssistantCycleConflict("T_ASSISTANT_EXECUTION_NOT_FOUND")
-    if execution.environment != ExecutionEnvironment.PAPER.value:
+    if execution.environment not in {"PAPER", "LIVE"}:
       raise TAssistantCycleConflict("OWNER_ENVIRONMENT_MISMATCH")
     if not self._execution_matches_manifest(execution, cycle.input_manifest):
       await self._abort_locked(cycle, now=now, reason=T_CYCLE_INPUT_STALE)
@@ -493,7 +493,7 @@ class TAssistantDecisionCycleRepository:
           "output_manifest_hash": output_hash,
           "material_symbol_count": len(states),
           "proposed_intent_count": len(intent_payloads),
-          "paper_shadow_only": True,
+          "paper_shadow_only": execution.environment == "PAPER",
         },
       )
     )
@@ -517,8 +517,8 @@ class TAssistantDecisionCycleRepository:
         raise TAssistantCycleConflict("T_INTENT_TYPE_INVALID")
       origin = intent.origin
       metadata = dict(intent.metadata)
-      if execution.environment != ExecutionEnvironment.PAPER.value or any(
-        metadata.get(key, "PAPER") != "PAPER"
+      if execution.environment not in {"PAPER", "LIVE"} or any(
+        metadata.get(key, execution.environment) != execution.environment
         for key in ("environment", "execution_environment")
       ):
         raise TAssistantCycleConflict("OWNER_ENVIRONMENT_MISMATCH")
@@ -560,7 +560,7 @@ class TAssistantDecisionCycleRepository:
         or event.event_type != "T_OPPORTUNITY_CANDIDATE_FROZEN"
         or event.owner_type != "T_ASSISTANT_EXECUTION"
         or event.owner_id != execution.execution_id
-        or event.environment != "PAPER"
+        or event.environment != execution.environment
         or event.account_id != execution.account_id
         or event.instrument_code != intent.instrument_code
       ):
@@ -602,7 +602,7 @@ class TAssistantDecisionCycleRepository:
       payload = trade_intent_record_data(
         intent,
         status="ALLOCATION_PENDING",
-        environment=ExecutionEnvironment.PAPER,
+        environment=ExecutionEnvironment(execution.environment),
       )
       payload.update(
         account_id=execution.account_id,
@@ -722,7 +722,7 @@ class TAssistantDecisionCycleRepository:
       snapshot.execution_ref.owner_type is not ExecutionOwnerType.T_ASSISTANT_EXECUTION
     ):
       raise TAssistantCycleConflict("OWNER_TYPE_INVALID")
-    if execution.environment != ExecutionEnvironment.PAPER.value:
+    if execution.environment not in {"PAPER", "LIVE"}:
       raise TAssistantCycleConflict("OWNER_ENVIRONMENT_MISMATCH")
     if execution.status not in {
       TAssistantExecutionStatus.WARMING.value,
@@ -764,7 +764,7 @@ class TAssistantDecisionCycleRepository:
       and execution_ref.get("owner_type")
       == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
       and execution_ref.get("owner_id") == execution.execution_id
-      and execution.environment == ExecutionEnvironment.PAPER.value
+      and execution.environment in {"PAPER", "LIVE"}
       and execution.status
       in {
         TAssistantExecutionStatus.WARMING.value,
@@ -811,9 +811,9 @@ class TAssistantDecisionCycleRepository:
       or not isinstance(payload_ref, Mapping)
       or payload_ref.get("owner_type") != ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
       or payload_ref.get("owner_id") != execution.execution_id
-      or payload.get("environment") != ExecutionEnvironment.PAPER.value
+      or payload.get("environment") != execution.environment
       or payload.get("cycle_id") != cycle.cycle_id
-      or payload.get("paper_shadow_only") is not True
+      or payload.get("paper_shadow_only") is not (execution.environment == "PAPER")
     ):
       raise TAssistantCycleConflict("T_OPPORTUNITY_EVIDENCE_OWNER_CONFLICT")
     evaluated_at = evidence.get("evaluated_at")
@@ -848,7 +848,7 @@ class TAssistantDecisionCycleRepository:
         ExecutionOwnerType.T_ASSISTANT_EXECUTION,
         execution.execution_id,
       ),
-      execution_environment=ExecutionEnvironment.PAPER,
+      execution_environment=ExecutionEnvironment(execution.environment),
       instrument_code=instrument_code,
       evaluated_at=evaluated_at,
       event_type=str(evidence.get("event_type") or "SYMBOL_MARKET_STATE_MATERIAL"),

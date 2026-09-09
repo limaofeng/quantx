@@ -25,6 +25,7 @@ from quantx_infrastructure.models.t_allocation import (
   TAllocationBatchRecord,
   TAllocationDecisionRecord,
 )
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
 from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.t_allocation_repository import (
@@ -78,6 +79,7 @@ async def _seed(
   authorization="MANUAL_CONFIRM",
   source_age_seconds=0,
   enrich_intent=None,
+  environment=ExecutionEnvironment.PAPER,
 ):
   version_fields = asdict(_version("config-1"))
   version_fields.pop("config_snapshot_hash")
@@ -87,15 +89,27 @@ async def _seed(
     async with db.begin():
       db.add(
         TTradeGlobalConfig(
-          id="config-1", account_id="account-1", enabled=True, mode="paper"
+          id="config-1", account_id="account-1", enabled=True, mode=environment.value.lower()
         )
       )
       await TAssistantConfigRepository(db).append_version(version)
-      owner = await TAssistantExecutionRepository(db).ensure_paper_shadow(
-        account_id="account-1",
-        version=version,
-        now=NOW,
-      )
+      if environment is ExecutionEnvironment.PAPER:
+        owner = await TAssistantExecutionRepository(db).ensure_paper_shadow(
+          account_id="account-1", version=version, now=NOW,
+        )
+      else:
+        owner = TAssistantExecutionRecord(
+          execution_id="live-fixture", config_id=version.config_id,
+          config_version_id=version.config_version_id, frozen_config_version=version.version,
+          config_snapshot_hash=version.config_snapshot_hash, account_id="account-1",
+          environment=environment.value, entry_authorization=version.entry_authorization.value,
+          rollout_stage=version.rollout_stage.value, status="WARMING", entry_readiness="WARMING",
+          entry_readiness_reasons=["T_REWARM_REQUIRED"], entry_readiness_as_of=NOW,
+          policy_version=version.policy_version, feature_schema_version=version.feature_schema_version,
+          scorer_mode=version.scorer_mode.value, created_at=NOW, updated_at=NOW,
+        )
+        db.add(owner)
+        await db.flush()
       execution_id = owner.execution_id
       execution_repository = TAssistantExecutionRepository(db)
       warming = await execution_repository.get_domain(execution_id)
@@ -152,7 +166,7 @@ async def _seed(
       version_id = version.config_version_id
   cut = PortfolioEvidenceCut(
     execution.execution_ref,
-    ExecutionEnvironment.PAPER,
+    environment,
     NOW,
     "snapshot",
     "a" * 64,
@@ -218,16 +232,18 @@ async def _claim(
   "authorization,status",
   [("MANUAL_CONFIRM", "AWAITING_APPROVAL"), ("AUTO", "EXECUTION_READY")],
 )
+@pytest.mark.parametrize("environment", [ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE])
 async def test_prepare_reuse_and_complete_standard_intent_transition(
-  sessions, authorization, status
+  sessions, authorization, status, environment
 ):
-  snapshot, candidates = await _seed(sessions, authorization=authorization)
+  snapshot, candidates = await _seed(sessions, authorization=authorization, environment=environment)
   async with sessions() as db:
     async with db.begin():
       repository = TAllocationRepository(db)
       batch = await _prepared(repository, snapshot, candidates)
       assert await _prepared(repository, snapshot, candidates) is batch
       assert batch.allocation_attempt == 1
+      assert batch.environment == environment.value
       assert (
         batch.intent_manifest[0]["candidate_fingerprint"]
         == candidates[0].candidate_fingerprint

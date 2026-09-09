@@ -566,7 +566,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `QUANTX_RUN_MIGRATION_GATE=true` 下 `test_t_assistant_order_identity_migration.py`
   **1 项通过**，真实 PostgreSQL 随机 schema、旧约束→0060、合法/非法 owner 形状、事务
   回滚及 schema 删除确认。此证据不替代完整迁移链、生产并发或实盘验收。
-- 剩余开发顺序：LIVE 分配意图 schema/事务守卫→独立 T 确认预览/消费接线→LIVE 组合事实读取、
+- LIVE 决策周期、候选证据、意图 intake 与分配仓储已按 execution 环境精确绑定；0061
+  扩展 LIVE 分配约束，保留不可变材料、版本/租约保护，并要求排空先撤销 source、再取消
+  无订单意图且同事务写审计。59 项相关单测、4 项完整迁移链 PostgreSQL 测试通过，
+  包括 PAPER 回归、LIVE 分配后排空、缺失审计整事务回滚与直接 SQL 绕过拒绝。
+  PostgreSQL 仅使用专用测试库随机 schema，结束确认删除；业务库未应用 0060/0061。
+- 剩余开发顺序：独立 T 确认预览/消费接线→LIVE 组合事实读取、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor→P7 新故障/性能→P8。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

@@ -303,7 +303,7 @@ class TAllocationRepository:
       allocation_batch_id=str(uuid.uuid4()),
       execution_id=execution.execution_id,
       cycle_id=cycle.cycle_id,
-      environment="PAPER",
+      environment=snapshot.environment.value,
       allocation_attempt=previous.allocation_attempt + 1 if previous is not None else 1,
       portfolio_input_fingerprint=snapshot.portfolio_input_fingerprint,
       portfolio_snapshot=allocation_evidence(snapshot),
@@ -512,7 +512,7 @@ class TAllocationRepository:
     if not isinstance(snapshot, PortfolioTDecisionSnapshot) or now < snapshot.cut.as_of:
       raise TAllocationConflict("T_ALLOCATION_SNAPSHOT_INVALID")
     if (
-      snapshot.environment != ExecutionEnvironment.PAPER
+      snapshot.environment not in {ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE}
       or snapshot.scorer_binding != "RULE_ONLY"
     ):
       raise TAllocationConflict("T_ALLOCATION_SCOPE_INVALID")
@@ -533,7 +533,7 @@ class TAllocationRepository:
     if (
       execution is None
       or cycle.execution_id != snapshot.cut.execution_ref.owner_id
-      or execution.environment != "PAPER"
+      or execution.environment != snapshot.environment.value
       or execution.scorer_mode != "RULE_ONLY"
       or snapshot.config_version != execution.config_version_id
       or snapshot.strategy_binding != execution.policy_version
@@ -571,7 +571,7 @@ class TAllocationRepository:
       if (
         row.owner_type != "T_ASSISTANT_EXECUTION"
         or row.owner_id != execution.execution_id
-        or row.environment != "PAPER"
+        or row.environment != execution.environment
         or row.direction != "BUY"
         or row.account_id != execution.account_id
         or stable_manifest_hash(trade_intent_initial_material(row)) != accepted[row.id]

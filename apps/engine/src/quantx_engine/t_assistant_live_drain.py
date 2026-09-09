@@ -139,22 +139,7 @@ async def drain_live_entry_work(
       ):
         retained.append(intent.id)
       elif intent.status in _UNSUBMITTED:
-        intent.status = "CANCELLED"
-        intent.updated_at = now.replace(tzinfo=None)
         cancelled.append(intent.id)
-        await repository.append_event(
-          TAssistantExecutionEvent(
-            execution_id,
-            f"live-drain-intent:{intent.id}",
-            "LIVE_ENTRY_DRAINED",
-            now,
-            {
-              "intent_id": intent.id,
-              "reason": reason,
-              "outcome": "CANCELLED_UNSUBMITTED",
-            },
-          )
-        )
       elif intent.status not in _TERMINAL:
         retained.append(intent.id)
     if execution.status not in {
@@ -173,6 +158,24 @@ async def drain_live_entry_work(
           "retained_intent_ids": retained,
           "retained_client_order_ids": sorted(known_clients),
         },
+      )
+    for intent in intents:
+      if intent.id not in cancelled:
+        continue
+      intent.status = "CANCELLED"
+      intent.updated_at = now.replace(tzinfo=None)
+      await repository.append_event(
+        TAssistantExecutionEvent(
+          execution_id,
+          f"live-drain-intent:{intent.id}",
+          "LIVE_ENTRY_DRAINED",
+          now,
+          {
+            "intent_id": intent.id,
+            "reason": reason,
+            "outcome": "CANCELLED_UNSUBMITTED",
+          },
+        )
       )
     await db.flush()
     return LiveEntryDrainResult(

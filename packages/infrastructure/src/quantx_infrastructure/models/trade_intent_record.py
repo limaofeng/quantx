@@ -32,7 +32,7 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
       "(allocation_cycle_id IS NULL AND allocation_decision_id IS NULL "
       "AND allocation_next_eligible_at IS NULL AND allocation_version = 0) OR "
       "(allocation_cycle_id IS NOT NULL AND owner_type = 'T_ASSISTANT_EXECUTION' "
-      "AND environment = 'PAPER' AND direction = 'BUY')",
+      "AND environment IN ('PAPER','LIVE') AND direction = 'BUY')",
       name="ck_trade_intent_allocation_scope",
     ),
     CheckConstraint(

@@ -208,9 +208,9 @@ def candidate_evidence_row(execution, intent):
     "evaluated_at": NOW,
     "payload": {
       "execution_ref": execution.execution_ref.to_dict(),
-      "environment": "PAPER",
+      "environment": execution.environment.value,
       "cycle_id": intent.origin.cycle_id,
-      "paper_shadow_only": True,
+      "paper_shadow_only": execution.environment is ExecutionEnvironment.PAPER,
       "candidate_evidence": {
         "candidate": candidate.to_dict(),
         "evaluation": evaluation,

@@ -1163,9 +1163,9 @@ def _required_environment(
     raise ValueError("做 T 机会评估缺少 execution environment")
   if (
     owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
-    and environment != ExecutionEnvironment.PAPER.value
+    and environment not in {ExecutionEnvironment.PAPER.value, ExecutionEnvironment.LIVE.value}
   ):
-    raise ValueError("P3 T assistant evaluation 只能写入 PAPER namespace")
+    raise ValueError("T assistant evaluation requires PAPER or LIVE namespace")
   return environment
 
 
