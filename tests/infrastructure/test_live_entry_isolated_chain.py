@@ -15,12 +15,15 @@ from quantx_engine.t_assistant_live_entry_review import (
 )
 from quantx_engine.t_assistant_live_entry_runtime import TAssistantLiveEntryRuntime
 from quantx_infrastructure.database.relational_base import Base
+from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  AccountExecutionControlEvent,
   AgentDevice,
   AgentReportInbox,
   OrderCorrelation,
   PendingTradeOrder,
+  RuntimeComponentHeartbeat,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
 )
@@ -29,6 +32,7 @@ from quantx_infrastructure.models.auth import (
   AuthUser,
   AuthUserAccountAccess,
 )
+from quantx_infrastructure.models.broker_position_snapshot import BrokerPositionSnapshot
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.t_assistant_execution import (
@@ -53,6 +57,7 @@ from quantx_infrastructure.services.live_position_attribution import (
   LivePositionAttributionService,
 )
 from sqlalchemy import func, select
+from sqlalchemy.orm.attributes import flag_modified
 
 from tests.infrastructure import test_t_allocation_repository as allocation
 from tests.infrastructure import test_t_entry_confirmation as confirmation
@@ -131,6 +136,10 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
           model.__table__
           for model in (
             AccountExecutionControl,
+            AccountExecutionControlEvent,
+            RuntimeComponentHeartbeat,
+            Account,
+            BrokerPositionSnapshot,
             AgentDevice,
             AgentReportInbox,
             OrderCorrelation,
@@ -301,8 +310,6 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       control = await db.get(AccountExecutionControl, "account-1")
       control.authorization_state = "DISABLED"
       control.updated_at = confirmed
-      from sqlalchemy.orm.attributes import flag_modified
-
       flag_modified(control, "updated_at")
     elif fault == "approval":
       challenge = await db.get(TradeConfirmationChallenge, "challenge-1")
@@ -443,6 +450,7 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   from quantx_infrastructure.services import (
     auto_exit_plan_service,
     order_service,
+    position_service,
     trade_service,
   )
 
@@ -460,6 +468,78 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   monkeypatch.setattr(order_service, "get_async_db", isolated_db)
   monkeypatch.setattr(trade_service, "get_async_db", isolated_db)
   monkeypatch.setattr(auto_exit_plan_service, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(position_service, "get_async_db", isolated_db)
+  monkeypatch.setattr(
+    position_service, "utcnow", lambda: confirmed.replace(tzinfo=None)
+  )
+
+  async def converge_snapshot(snapshot_id, sequence, volume, orders, trades):
+    from copy import deepcopy
+
+    snapshot_payload = deepcopy(payload)
+    snapshot_payload.pop("snapshot_hash", None)
+    snapshot_payload.update(
+      snapshot_id=snapshot_id,
+      source_sequence=sequence,
+      source_event_at=confirmed.isoformat(),
+      unavailable_accounts=[],
+      accounts=[
+        dict(
+          account_id="account-1",
+          cash=10000 - (volume - 1000) * 9.95,
+          total_asset=20000 - (volume - 1000) * 0.05,
+        )
+      ],
+      positions_by_account={
+        "account-1": [
+          dict(
+            stock_code="600000.SH",
+            account_type=2,
+            volume=volume,
+            can_use_volume=1000,
+            frozen_volume=0,
+            yesterday_volume=1000,
+            avg_price=9.9,
+            market_value=volume * 9.9,
+          )
+        ]
+      },
+      orders=orders,
+      trades=trades,
+    )
+    digest = hashlib.sha256(
+      json.dumps(snapshot_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    snapshot_payload["snapshot_hash"] = digest
+    incoming = AgentReportInbox(
+      message_id=snapshot_id,
+      device_id="synthetic",
+      message_type="delta_report",
+      protocol_version=PROTOCOL_VERSION,
+      business_idempotency_key=snapshot_id,
+      raw_payload_hash=digest,
+      payload=snapshot_payload,
+      processing_status="PROCESSED",
+      received_at=confirmed.replace(tzinfo=None),
+      processed_at=confirmed.replace(tzinfo=None),
+    )
+    async with sessions() as db, db.begin():
+      db.add(incoming)
+    await report_processor._process(incoming)
+    await report_processor._process(incoming)  # Identical full generation is a no-op.
+    assert open_service_sessions == 0
+    async with sessions() as db:
+      control = await db.get(AccountExecutionControl, "account-1")
+      assert control.reconcile_status == "READY", control.paused_reason
+      assert control.last_snapshot_id == snapshot_id
+      status = await db.get(BrokerPositionSnapshot, "account-1")
+      assert status.is_complete and status.sequence == sequence
+      holding = await db.scalar(
+        select(Position).where(Position.account_id == "account-1")
+      )
+      assert holding.volume == volume and holding.can_use_volume == 1000
+    return incoming
+
   order_payload = {
     "client_order_id": pending.client_order_id,
     "account_id": "account-1",
@@ -531,30 +611,18 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     db.add(
       AuthUserAccountAccess(user_id="user-1", account_id="account-1", is_default=True)
     )
-    # Explicit synthetic post-fill account projection: today's 100 new shares
-    # remain unsellable, while the 1000-share old inventory is available.
-    db.add(
-      Position(
-        id="post-fill-position",
-        account_id="account-1",
-        account_type="STOCK",
-        stock_code="600000.SH",
-        instrument_name="fixture",
-        volume=1000 + first_filled,
-        can_use_volume=1000,
-        frozen_volume=0,
-        yesterday_volume=1000,
-        avg_price=9.9,
-        market_value=(1000 + first_filled) * 9.9,
-        created_at=confirmed,
-        updated_at=confirmed,
-      )
-    )
     if not replacing:
       source.status = "STOPPED"
       source.completed_at = confirmed
       source.entry_readiness = "BLOCKED"
     await db.commit()
+  await converge_snapshot(
+    "first-position",
+    2,
+    1000 + first_filled,
+    [{**order_payload, "traded_volume": first_filled}],
+    [] if zero_replacement else [report.payload],
+  )
   if not zero_replacement:
     await report_processor._drain_runtime_events()
     await report_processor._stage_runtime_events(report)
@@ -600,7 +668,6 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     from copy import deepcopy
 
     from quantx_engine import t_order_lifecycle, t_trade_runtime
-    from sqlalchemy.orm.attributes import flag_modified
 
     confirmed += timedelta(seconds=31)
     current_ms = int(confirmed.timestamp() * 1000)
@@ -618,53 +685,13 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       ),
     )
     gate = replace(gate, latest_tick=latest)
-    fresh_payload = deepcopy(payload)
-    fresh_payload.pop("snapshot_hash", None)
-    fresh_payload.update(
-      snapshot_id="replacement-account",
-      source_event_at=confirmed.isoformat(),
-      source_sequence=3,
-      unavailable_accounts=[],
-      accounts=[
-        dict(
-          account_id="account-1",
-          cash=10000 if zero_replacement else 9005,
-          total_asset=20000 if zero_replacement else 19995,
-        )
-      ],
-      positions_by_account={
-        "account-1": [
-          dict(stock_code="600000.SH", volume=1000 + first_filled, can_use_volume=1000)
-        ]
-      },
-      orders=[terminal_payload],
-      trades=[] if zero_replacement else [report.payload],
+    proof_snapshot = await converge_snapshot(
+      "replacement-account",
+      3,
+      1000 + first_filled,
+      [terminal_payload],
+      [] if zero_replacement else [report.payload],
     )
-    fresh_hash = hashlib.sha256(
-      json.dumps(fresh_payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    fresh_payload["snapshot_hash"] = fresh_hash
-    async with sessions() as db, db.begin():
-      db.add(
-        AgentReportInbox(
-          message_id="replacement-account",
-          protocol_version=PROTOCOL_VERSION,
-          device_id="synthetic",
-          message_type="delta_report",
-          raw_payload_hash=fresh_hash,
-          business_idempotency_key="replacement-account",
-          payload=fresh_payload,
-          processing_status="PROCESSED",
-          received_at=confirmed.replace(tzinfo=None),
-          processed_at=confirmed.replace(tzinfo=None),
-        )
-      )
-      control = await db.get(AccountExecutionControl, "account-1")
-      control.last_snapshot_id = "replacement-account"
-      control.last_snapshot_hash = fresh_hash
-      control.last_snapshot_at = confirmed.replace(tzinfo=None)
-      control.updated_at = confirmed.replace(tzinfo=None)
-      flag_modified(control, "updated_at")
     if zero_replacement:
       async with sessions() as db:
         proof_snapshot = await db.get(AgentReportInbox, "replacement-account")
@@ -791,9 +818,13 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     ).hexdigest()
     async with sessions() as db, db.begin():
       db.add(second_fill)
-      holding = await db.get(Position, "post-fill-position")
-      holding.volume = 1000 + initial_volume
-      holding.market_value = holding.volume * float(second.limit_price)
+    await converge_snapshot(
+      "second-position",
+      5,
+      1000 + initial_volume,
+      [terminal_payload, {**second_order, "traded_volume": 100}],
+      ([report.payload] if not zero_replacement else []) + [second_fill.payload],
+    )
     for _ in range(2):
       await report_processor._process(second_fill)
       await report_processor._stage_runtime_events(second_fill)
@@ -870,7 +901,10 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   async with sessions() as db:
     last = await db.get(PendingTradeOrder, pending.client_order_id)
     intent = await db.get(TradeIntentRecord, "intent-0")
-    assert last.request_metadata["t_order_lifecycle_finished"] is True
+    assert last.request_metadata.get("t_order_lifecycle_finished") is True, [
+      (x.client_order_id, x.status, x.status_reason)
+      for x in await db.scalars(select(PendingTradeOrder))
+    ]
     assert intent.status == "FILLED" and intent.executed_volume == initial_volume
     finals = list(
       await db.scalars(

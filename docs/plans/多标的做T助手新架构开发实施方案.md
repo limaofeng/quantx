@@ -938,8 +938,18 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   129 项回报、生命周期、确认预审、风险复核、组合与隔离整链验证通过，Ruff 通过；证据
   `.codex_screenshots/p6-live-zero-replacement-regression.log`。仍采用合成券商/行情/持仓边界
   与隔离 SQLite，未验证 Windows 实盘或 PostgreSQL 并发锁序。
+- 入场后持仓快照已接入实际收敛：整链不再直接写入后续 Position 或手动更新续单账户检查点，
+  改由持久化的合成完整快照调用实际 report processor、PositionService 的 begin/prepare/
+  finalize、账户对账与退出授权重算；新增当日持仓不可卖，旧仓可卖量保持 1000。
+  零成交/部分成交续单均覆盖快照重复处理、成交不重复计量、退出保护及意图最终收敛。
+  修复后续快照的精确撤单重放抹掉原零成交证明，client 与 broker 两种定位均验证；正成交
+  或缺少累计成交数不命中忽略分支。修复三个完整持仓快照方法提前返回未及时关闭数据库
+  会话的问题，重复快照结束后无遗留服务会话。132 项相关测试通过，Ruff 通过；证据
+  `.codex_screenshots/p6-live-position-regression.log`、
+  `.codex_screenshots/p6-position-service-regression.log`。初始确认基线仍为合成种子，未覆盖
+  设备网络 ingress/inbox worker、真实行情/券商或 PostgreSQL 并发；不代替实盘验收。
 - 剩余开发顺序：
-  实际持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

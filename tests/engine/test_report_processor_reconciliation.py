@@ -924,6 +924,10 @@ async def test_clean_snapshot_rolls_controlled_window_binding_and_keeps_buy_gate
     events = (await db.execute(select(AccountExecutionControlEvent))).scalars().all()
     assert events == []
 
+    # This SQLite test exercises window binding, with no broker dispatch.
+    from quantx_contracts import runtime_environment
+    monkeypatch.setattr(runtime_environment, "live_runtime_allowed", lambda _environment: True)
+
     authorized = await TradeCommandService(db)._require_manual_live_authorization(
       "account-1",
       risk_reducing=False,

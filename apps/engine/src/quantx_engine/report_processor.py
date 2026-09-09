@@ -1040,6 +1040,48 @@ async def _invalidate_monitor_snapshot_zero_fill_proof(
   )
 
 
+async def _is_exact_t_entry_zero_fill_replay(
+  db,
+  pending,
+  *,
+  status: str,
+  cumulative_filled_volume: Optional[int],
+) -> bool:
+  """An exact terminal replay cannot erase a verified attempt's zero proof."""
+  if (
+    pending.owner_type != ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
+    or pending.environment != "LIVE"
+    or pending.side != "BUY"
+    or pending.t_trade_role != "ENTRY"
+    or pending.status != "RECONCILED_ZERO_FILL"
+    or cumulative_filled_volume != 0
+  ):
+    return False
+  events = await db.scalars(
+    select(StrategyRuntimeEvent).where(
+      StrategyRuntimeEvent.client_order_id == pending.client_order_id,
+      StrategyRuntimeEvent.broker_order_id == pending.broker_order_id,
+      StrategyRuntimeEvent.owner_type == pending.owner_type,
+      StrategyRuntimeEvent.owner_id == pending.owner_id,
+      StrategyRuntimeEvent.environment == pending.environment,
+      StrategyRuntimeEvent.event_type == "ORDER",
+    )
+  )
+  for event in events:
+    report = dict(dict(event.payload or {}).get("report") or {})
+    proof = dict(report.get("zero_fill_reconciliation") or {})
+    if (
+      report.get("effective_order_status") == "RECONCILED_ZERO_FILL"
+      and proof.get("source") == "QMT_PROTOCOL_1_2_FULL_SNAPSHOT"
+      and proof.get("expected_filled_volume") == 0
+      and proof.get("received_execution_volume") == 0
+      and _normalized_order_status(proof.get("broker_terminal_status"))
+      == _normalized_order_status(status)
+    ):
+      return True
+  return False
+
+
 async def _update_pending(
   client_order_id: Optional[str],
   *,
@@ -1078,13 +1120,20 @@ async def _update_pending(
       # handling, so leave the pending row untouched.
       return PendingOrderUpdate(False)
     is_exit_plan_sell = durable_exit_binding
-    if (
-      not execution_evidence
-      and is_exit_plan_sell
-      and await is_exact_finalized_exit_order_replay(
+    if not execution_evidence and (
+      (
+        is_exit_plan_sell
+        and await is_exact_finalized_exit_order_replay(
+          db,
+          client_order_id=str(pending.client_order_id or ""),
+          evidence_status=status,
+          cumulative_filled_volume=cumulative_filled_volume,
+        )
+      )
+      or await _is_exact_t_entry_zero_fill_replay(
         db,
-        client_order_id=str(pending.client_order_id or ""),
-        evidence_status=status,
+        pending,
+        status=status,
         cumulative_filled_volume=cumulative_filled_volume,
       )
     ):
@@ -1244,13 +1293,20 @@ async def _update_pending_by_broker(
       # Do not let a metadata-only owner witness select a different lifecycle
       # when the report arrived without its client order id.
       return PendingOrderUpdate(False)
-    if (
-      durable_exit_binding
-      and not execution_evidence
-      and await is_exact_finalized_exit_order_replay(
+    if not execution_evidence and (
+      (
+        durable_exit_binding
+        and await is_exact_finalized_exit_order_replay(
+          db,
+          client_order_id=str(pending.client_order_id or ""),
+          evidence_status=status,
+          cumulative_filled_volume=cumulative_filled_volume,
+        )
+      )
+      or await _is_exact_t_entry_zero_fill_replay(
         db,
-        client_order_id=str(pending.client_order_id or ""),
-        evidence_status=status,
+        pending,
+        status=status,
         cumulative_filled_volume=cumulative_filled_volume,
       )
     ):

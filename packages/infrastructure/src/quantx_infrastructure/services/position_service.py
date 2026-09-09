@@ -4,6 +4,7 @@
 """
 
 import logging
+from contextlib import aclosing
 from datetime import datetime, timedelta
 from hashlib import md5
 from typing import Any, Dict, List, Optional
@@ -202,49 +203,50 @@ class PositionService:
       raise ValueError("持仓快照序列无效")
     normalized_reported_at = to_naive_utc(reported_at)
 
-    async for db in get_async_db():
-      status = await db.get(
-        BrokerPositionSnapshot,
-        normalized_account,
-        with_for_update=True,
-      )
-      if status is not None:
-        stored_sequence = int(status.sequence or 0)
-        if incoming_sequence < stored_sequence:
-          return {
-            **status.to_dict(),
-            "applied": False,
-            "reason": "STALE_SEQUENCE",
-          }
-        if (
-          incoming_sequence == stored_sequence
-          and not _is_resumable_full_snapshot_attempt(status)
-        ):
-          return {
-            **status.to_dict(),
-            "applied": False,
-            "reason": "STALE_SEQUENCE",
-          }
+    async with aclosing(get_async_db()) as database_sessions:
+      async for db in database_sessions:
+        status = await db.get(
+          BrokerPositionSnapshot,
+          normalized_account,
+          with_for_update=True,
+        )
+        if status is not None:
+          stored_sequence = int(status.sequence or 0)
+          if incoming_sequence < stored_sequence:
+            return {
+              **status.to_dict(),
+              "applied": False,
+              "reason": "STALE_SEQUENCE",
+            }
+          if (
+            incoming_sequence == stored_sequence
+            and not _is_resumable_full_snapshot_attempt(status)
+          ):
+            return {
+              **status.to_dict(),
+              "applied": False,
+              "reason": "STALE_SEQUENCE",
+            }
 
-      snapshot = status or BrokerPositionSnapshot(
-        account_id=normalized_account,
-        sequence=0,
-        source="MINIQMT",
-        is_complete=False,
-      )
-      snapshot.sequence = incoming_sequence
-      snapshot.source = str(source or "MINIQMT")
-      snapshot.reported_at = normalized_reported_at
-      snapshot.received_at = utcnow()
-      snapshot.is_complete = False
-      snapshot.last_error = "SNAPSHOT_APPLY_IN_PROGRESS"
-      await db.merge(snapshot)
-      await db.commit()
-      return {
-        **snapshot.to_dict(),
-        "applied": True,
-        "reason": "STARTED",
-      }
+        snapshot = status or BrokerPositionSnapshot(
+          account_id=normalized_account,
+          sequence=0,
+          source="MINIQMT",
+          is_complete=False,
+        )
+        snapshot.sequence = incoming_sequence
+        snapshot.source = str(source or "MINIQMT")
+        snapshot.reported_at = normalized_reported_at
+        snapshot.received_at = utcnow()
+        snapshot.is_complete = False
+        snapshot.last_error = "SNAPSHOT_APPLY_IN_PROGRESS"
+        await db.merge(snapshot)
+        await db.commit()
+        return {
+          **snapshot.to_dict(),
+          "applied": True,
+          "reason": "STARTED",
+        }
     raise RuntimeError("持仓快照数据库不可用")
 
   async def prepare_full_snapshot(
@@ -275,55 +277,56 @@ class PositionService:
       item.stock_code: item for item in converted if int(item.volume or 0) > 0
     }
 
-    async for db in get_async_db():
-      status = await db.get(BrokerPositionSnapshot, normalized_account)
-      if status:
-        stored_sequence = int(status.sequence or 0)
-        incoming_sequence = int(sequence)
-        if incoming_sequence < stored_sequence:
-          return {
-            **status.to_dict(),
-            "applied": False,
-            "reason": "STALE_SEQUENCE",
-          }
-        if incoming_sequence == stored_sequence:
-          if not _is_resumable_full_snapshot_attempt(status):
+    async with aclosing(get_async_db()) as database_sessions:
+      async for db in database_sessions:
+        status = await db.get(BrokerPositionSnapshot, normalized_account)
+        if status:
+          stored_sequence = int(status.sequence or 0)
+          incoming_sequence = int(sequence)
+          if incoming_sequence < stored_sequence:
             return {
               **status.to_dict(),
               "applied": False,
               "reason": "STALE_SEQUENCE",
             }
-      result = await db.execute(
-        select(Position).where(Position.account_id == normalized_account)
-      )
-      existing = {item.stock_code: item for item in result.scalars().all()}
-      cycle_service = ClosedPositionCycleService()
-      for code, item in existing.items():
-        if code not in incoming:
-          await cycle_service.record_position_closed(
-            db,
-            item,
-            closed_at=normalized_reported_at,
-            source=str(source or "MINIQMT"),
-          )
-          await db.delete(item)
-      for item in incoming.values():
-        await db.merge(item)
-      snapshot = status or BrokerPositionSnapshot(account_id=normalized_account)
-      snapshot.sequence = int(sequence)
-      snapshot.source = str(source or "MINIQMT")
-      snapshot.reported_at = normalized_reported_at
-      snapshot.received_at = utcnow()
-      snapshot.position_count = len(incoming)
-      snapshot.is_complete = False
-      snapshot.last_error = "SNAPSHOT_APPLY_IN_PROGRESS"
-      await db.merge(snapshot)
-      await db.commit()
-      return {
-        **snapshot.to_dict(),
-        "applied": True,
-        "reason": "PREPARED",
-      }
+          if incoming_sequence == stored_sequence:
+            if not _is_resumable_full_snapshot_attempt(status):
+              return {
+                **status.to_dict(),
+                "applied": False,
+                "reason": "STALE_SEQUENCE",
+              }
+        result = await db.execute(
+          select(Position).where(Position.account_id == normalized_account)
+        )
+        existing = {item.stock_code: item for item in result.scalars().all()}
+        cycle_service = ClosedPositionCycleService()
+        for code, item in existing.items():
+          if code not in incoming:
+            await cycle_service.record_position_closed(
+              db,
+              item,
+              closed_at=normalized_reported_at,
+              source=str(source or "MINIQMT"),
+            )
+            await db.delete(item)
+        for item in incoming.values():
+          await db.merge(item)
+        snapshot = status or BrokerPositionSnapshot(account_id=normalized_account)
+        snapshot.sequence = int(sequence)
+        snapshot.source = str(source or "MINIQMT")
+        snapshot.reported_at = normalized_reported_at
+        snapshot.received_at = utcnow()
+        snapshot.position_count = len(incoming)
+        snapshot.is_complete = False
+        snapshot.last_error = "SNAPSHOT_APPLY_IN_PROGRESS"
+        await db.merge(snapshot)
+        await db.commit()
+        return {
+          **snapshot.to_dict(),
+          "applied": True,
+          "reason": "PREPARED",
+        }
     raise RuntimeError("持仓快照数据库不可用")
 
   async def finalize_full_snapshot(
@@ -340,29 +343,30 @@ class PositionService:
     if not normalized_account:
       raise ValueError("持仓快照缺少账户")
     normalized_reported_at = to_naive_utc(reported_at)
-    async for db in get_async_db():
-      status = await db.get(BrokerPositionSnapshot, normalized_account)
-      if status is None or int(status.sequence or 0) != int(sequence):
-        if status is None:
-          return {
-            "account_id": normalized_account,
-            "applied": False,
-            "reason": "STALE_SEQUENCE",
-          }
-        return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
-      if (
-        status.is_complete
-        or str(status.last_error or "") != "SNAPSHOT_APPLY_IN_PROGRESS"
-      ):
-        return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
-      status.source = str(source or status.source or "MINIQMT")
-      status.reported_at = normalized_reported_at
-      status.received_at = utcnow()
-      status.is_complete = True
-      status.last_error = None
-      await db.merge(status)
-      await db.commit()
-      return {**status.to_dict(), "applied": True, "reason": "APPLIED"}
+    async with aclosing(get_async_db()) as database_sessions:
+      async for db in database_sessions:
+        status = await db.get(BrokerPositionSnapshot, normalized_account)
+        if status is None or int(status.sequence or 0) != int(sequence):
+          if status is None:
+            return {
+              "account_id": normalized_account,
+              "applied": False,
+              "reason": "STALE_SEQUENCE",
+            }
+          return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
+        if (
+          status.is_complete
+          or str(status.last_error or "") != "SNAPSHOT_APPLY_IN_PROGRESS"
+        ):
+          return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
+        status.source = str(source or status.source or "MINIQMT")
+        status.reported_at = normalized_reported_at
+        status.received_at = utcnow()
+        status.is_complete = True
+        status.last_error = None
+        await db.merge(status)
+        await db.commit()
+        return {**status.to_dict(), "applied": True, "reason": "APPLIED"}
     raise RuntimeError("持仓快照数据库不可用")
 
   async def apply_position_delta(self, position: Any, account_id: str) -> None:

@@ -118,3 +118,45 @@ async def test_independent_entry_snapshot_proof(monkeypatch, fault):
         )
   finally:
     await engine.dispose()
+
+
+@pytest.mark.parametrize("by_broker", [False, True])
+@pytest.mark.parametrize("filled", [0, 1, None])
+@pytest.mark.asyncio
+async def test_zero_fill_replay_requires_exact_terminal_counter(
+  monkeypatch, by_broker, filled
+):
+  engine, sessions = await _database(monkeypatch)
+  snapshot = _snapshot_report(terminal_status="CANCELLED", snapshot_id="zero-replay")
+  await _seed_managed_order(
+    sessions,
+    terminal_status="CANCELLED",
+    snapshot=snapshot,
+    independent=True,
+  )
+  try:
+    await report_processor._stage_runtime_events(snapshot)
+    kwargs = dict(
+      status="CANCELLED",
+      reason="replayed broker evidence",
+      source_sequence=11,
+      cumulative_filled_volume=filled,
+    )
+    result = (
+      await report_processor._update_pending_by_broker("9001", **kwargs)
+      if by_broker
+      else await report_processor._update_pending(
+        "client-1", broker_order_id="9001", **kwargs
+      )
+    )
+    async with sessions() as db:
+      pending = await db.get(PendingTradeOrder, "client-1")
+      assert pending.last_source_sequence == 11
+      assert pending.status == (
+        "RECONCILED_ZERO_FILL"
+        if filled == 0
+        else "CANCELLED"
+      )
+      assert result.accepted is (filled != 0)
+  finally:
+    await engine.dispose()
