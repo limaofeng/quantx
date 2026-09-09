@@ -10980,7 +10980,9 @@ class StrategyExecutor:
     if runtime.context.mode != StrategyRunMode.LIVE or not self._uses_t_trade_opportunity_runtime(runtime):
       return
     self._clear_t_trade_intent_emission_snapshot(runtime)
-    from quantx_infrastructure.services.t_legacy_drain_guard import legacy_t_entry_is_draining
+    from quantx_infrastructure.services.t_legacy_drain_guard import (
+      legacy_t_entry_is_draining,
+    )
 
     account_id = str(dict(runtime.context.parameters or {}).get("account_id") or "").strip()
     async with AsyncSessionLocal() as db, db.begin():

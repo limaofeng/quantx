@@ -4480,7 +4480,9 @@ class TradeCommandService:
       and owner_type == ExecutionOwnerType.STRATEGY_RUN.value
       and normalized_side == "BUY"
     ):
-      from quantx_infrastructure.services.t_legacy_drain_guard import legacy_t_entry_is_draining
+      from quantx_infrastructure.services.t_legacy_drain_guard import (
+        legacy_t_entry_is_draining,
+      )
 
       if await legacy_t_entry_is_draining(
         self.db, account_id=str(account_id), run_id=owner_id, lock_head=True,
