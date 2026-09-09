@@ -428,3 +428,62 @@ def read_backtest_evaluation_evidence(directory, *, expected_report_hash):
     if set(material["cases"]) != set(frozen["scenarios"]):
       raise ValueError("BACKTEST_EVALUATION_SCENARIOS_CONFLICT")
   return {"evaluation": evaluation, "report": report}
+
+
+def verify_backtest_admission_conclusion(
+  directory, *, expected_report_hash, expected_policy_hash
+):
+  """Recompute the frozen-policy conclusion, without approving a LIVE release.
+
+  Hashes identify externally reviewed artifacts. This checks reported metrics,
+  not their derivation from broker facts; that remains a separate evidence gate.
+  """
+  evidence = read_backtest_evaluation_evidence(
+    directory, expected_report_hash=expected_report_hash
+  )
+  frozen = evidence["evaluation"]["material"]
+  report = evidence["report"]["material"]
+  if (
+    frozen["policy"] is None
+    or not isinstance(expected_policy_hash, str)
+    or stable_manifest_hash(frozen["policy"]) != expected_policy_hash
+  ):
+    raise ValueError("BACKTEST_ADMISSION_REVIEWED_POLICY_REQUIRED")
+  policy = BacktestAdmissionPolicy(**frozen["policy"])
+  if set(policy.scenario_thresholds) != set(frozen["scenarios"]):
+    raise ValueError("BACKTEST_POLICY_SCENARIO_MISMATCH")
+  if report["strategy_admission"] == "DATA_BLOCKED":
+    raise ValueError("BACKTEST_ADMISSION_DATA_BLOCKED")
+  failures = []
+  for scenario, case in report["cases"].items():
+    metrics = case["metrics"]
+    counts = [metrics["trading_days"], metrics["closed_batches"]]
+    groups = metrics["groups"]
+    if not isinstance(groups, dict) or not groups:
+      raise ValueError("BACKTEST_ADMISSION_GROUPS_REQUIRED")
+    counts.extend(group["closed"] for group in groups.values())
+    numbers = [
+      metrics[key]
+      for key in (
+        "incremental_return",
+        "incremental_max_drawdown",
+        "worst_group_return",
+        "worst_group_drawdown",
+      )
+    ]
+    if any(type(n) is not int or n < 0 for n in counts) or any(
+      type(n) not in {int, float} or not isfinite(n) for n in numbers
+    ):
+      raise ValueError("BACKTEST_ADMISSION_METRICS_INVALID")
+    reasons = admission_reasons(metrics, policy=policy, scenario=scenario)
+    if reasons:
+      failures.append({"scenario": scenario, "reasons": reasons})
+  expected_status = "FAIL" if failures else "PASS"
+  if (
+    report["strategy_admission"] != expected_status
+    or report["p6_allowed"] is not (not failures)
+    or sorted(report["failures"], key=lambda item: item["scenario"])
+    != sorted(failures, key=lambda item: item["scenario"])
+  ):
+    raise ValueError("BACKTEST_ADMISSION_CONCLUSION_CONFLICT")
+  return evidence

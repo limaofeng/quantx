@@ -685,6 +685,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   此入口只验证文件关联，不把自声明 hash 当作授权，不替代运行事实与正式阈值审批。
   评估/覆盖 21 项测试通过，无 policy 的实际合成比较读取补验 1 项通过，Ruff 通过。
   证据 `.codex_screenshots/p6-evaluation-evidence.xml`、`p6-evaluation-unconfirmed.log`。
+- 正式结论复核入口已实现：要求外部审核的报告 hash 与 policy hash，重建冻结准入策略，
+  按各场景报告指标重新计算失败原因并严格核对 PASS/FAIL、p6_allowed 和原因集合。
+  拒绝 DATA_BLOCKED、缺失已审核 policy、非法样本数量及非有限指标；场景序列化排序不改变结论。
+  17 项定向测试通过，含真实合成比较生成的 PASS/FAIL、多场景与修改后重新哈希的矛盾报告，
+  证据 `.codex_screenshots/p6-admission-conclusion.xml`，Ruff 通过。
+  仅复核“报告指标→冻结阈值→结论”，尚不证明指标与 broker 事实一致，不据此创建发布审批。
 - 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

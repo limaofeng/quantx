@@ -130,3 +130,74 @@ async def test_report_links_frozen_inputs_and_qualification(tmp_path, damage):
     )
     assert result["report"]["material"]["strategy_admission"] == "DATA_BLOCKED"
     assert result["report"]["material"]["evidence"]["admission_policy_hash"]
+
+
+@pytest.mark.parametrize("damage", [None, "pass_flag", "reasons", "policy", "count"])
+async def test_frozen_policy_conclusion_is_recomputed(tmp_path, damage):
+  from dataclasses import replace
+
+  frozen_policy = replace(
+    policy(minute_coverage=0.001),
+    scenario_thresholds={"base": (1.0, 0.001, 1.0, 0.001)},
+  )
+  directory, _ = await evaluation.evaluate_backtest_comparison(
+    request=runtime(request_only=True),
+    events=ticks(),
+    scenarios={"base": 0.0},
+    code_manifest={"fixture": "v1"},
+    root=tmp_path,
+    policy=frozen_policy,
+  )
+  path = directory / "report.json"
+  report = json.loads(path.read_text())
+  policy_hash = report["material"]["evidence"]["admission_policy_hash"]
+  assert report["material"]["strategy_admission"] == "FAIL"
+  if damage == "pass_flag":
+    report["material"].update(strategy_admission="PASS", p6_allowed=True, failures=[])
+  elif damage == "reasons":
+    report["material"]["failures"] = []
+  elif damage == "policy":
+    policy_hash = "0" * 64
+  elif damage == "count":
+    report["material"]["cases"]["base"]["metrics"]["closed_batches"] = True
+  # Even a freshly hashed inconsistent report must not pass conclusion validation.
+  report["hash"] = evaluation.stable_manifest_hash(report["material"])
+  path.write_text(json.dumps(report))
+  if damage:
+    with pytest.raises(ValueError, match="BACKTEST_ADMISSION_"):
+      evaluation.verify_backtest_admission_conclusion(
+        directory, expected_report_hash=report["hash"], expected_policy_hash=policy_hash
+      )
+  else:
+    result = evaluation.verify_backtest_admission_conclusion(
+      directory, expected_report_hash=report["hash"], expected_policy_hash=policy_hash
+    )
+    assert result["report"]["material"]["p6_allowed"] is False
+
+
+@pytest.mark.parametrize("minimum_return", [-1.0, 1.0])
+async def test_conclusion_handles_multiple_scenarios_in_original_order(
+  tmp_path, minimum_return
+):
+  from dataclasses import replace
+
+  approved = replace(
+    policy(minute_coverage=0.001),
+    scenario_thresholds={name: (minimum_return, 1.0, -1.0, 1.0) for name in ("z", "a")},
+    return_comparisons={name: "GTE" for name in ("z", "a")},
+  )
+  directory, report = await evaluation.evaluate_backtest_comparison(
+    request=runtime(request_only=True),
+    events=ticks(),
+    scenarios={"z": 0.0, "a": 0.0},
+    code_manifest={"fixture": "v1"},
+    root=tmp_path,
+    policy=approved,
+  )
+  saved = json.loads((directory / "report.json").read_text())
+  checked = evaluation.verify_backtest_admission_conclusion(
+    directory,
+    expected_report_hash=saved["hash"],
+    expected_policy_hash=report["evidence"]["admission_policy_hash"],
+  )
+  assert checked["report"]["material"]["p6_allowed"] is (minimum_return < 0)
