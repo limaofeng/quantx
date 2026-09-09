@@ -22,6 +22,36 @@ from quantx_infrastructure.training_process_evidence import (
 from quantx_trainer.service_status import service_status
 
 
+def stop_service(config, config_path: Path, *, stop_seconds=30.0):
+  from quantx_trainer.admission import set_admission
+  from quantx_trainer.service_stop import request_stop
+
+  config_path = config_path.resolve(strict=True)
+  root = config.state_root / "service-launches"
+  reject_links(root)
+  root.mkdir(parents=True, exist_ok=True)
+  with publication_lock(root):
+    set_admission(config.state_root / "control", draining=True)
+    status = service_status(config.state_root, config_path)
+    pending = {"service": "STOP_PENDING", "execution_state": "NOT_INSPECTED"}
+    if status["service"] == "OFFLINE":
+      return status if _previous_state(root) == "EXITED" else pending
+    if status["service"] != "ALIVE":
+      return pending
+    instance = status["instance_id"]
+    request_stop(config.state_root / "service", instance)
+    deadline = time.monotonic() + stop_seconds
+    while True:
+      status = service_status(config.state_root, config_path)
+      if status["service"] == "OFFLINE":
+        return status
+      if status.get("instance_id", instance) != instance:
+        return pending
+      if time.monotonic() >= deadline:
+        return pending
+      time.sleep(0.1)
+
+
 def _write(path: Path, value):
   reject_links(path)
   with path.open("x", encoding="utf-8") as stream:

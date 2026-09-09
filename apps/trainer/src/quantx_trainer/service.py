@@ -3,6 +3,7 @@
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 from quantx_infrastructure.training_bundle_store import publication_lock, reject_links
@@ -56,6 +57,7 @@ def serve(config, config_path: Path) -> None:
   """Hold one local service lease; never inherit production/Python settings."""
   from quantx_trainer.preflight import preflight
   from quantx_trainer.service_status import ServiceReporter
+  from quantx_trainer.service_stop import stop_requested
 
   config_path = config_path.resolve(strict=True)
   root = config.state_root / "service"
@@ -90,9 +92,15 @@ def serve(config, config_path: Path) -> None:
 
       async def run():
         async def heartbeat():
+          next_heartbeat = time.monotonic() + 10
           while True:
-            await asyncio.sleep(10)
-            reporter.write()
+            if stop_requested(root, reporter.identity["instance_id"]):
+              reporter.write("STOPPING")
+              return
+            if time.monotonic() >= next_heartbeat:
+              reporter.write()
+              next_heartbeat = time.monotonic() + 10
+            await asyncio.sleep(1)
 
         async def work():
           await preflight(config)

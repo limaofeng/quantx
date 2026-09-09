@@ -28,12 +28,16 @@ import sys,time
 from pathlib import Path
 sys.path.insert(0, sys.argv.pop())
 from quantx_trainer.service_status import ServiceReporter
+from quantx_trainer.service_stop import stop_requested
 from quantx_infrastructure.training_bundle_store import publication_lock
 root = Path(sys.argv[1]) / 'service'
 root.mkdir(parents=True, exist_ok=True)
 with publication_lock(root):
-  ServiceReporter(root, Path(sys.argv[2])).write('PREFLIGHT')
-  time.sleep(30)
+  reporter = ServiceReporter(root, Path(sys.argv[2]))
+  reporter.write('PREFLIGHT')
+  deadline = time.monotonic() + 30
+  while time.monotonic() < deadline and not stop_requested(root, reporter.identity['instance_id']):
+    time.sleep(0.05)
 """
 
   def spawn(command, **kwargs):
@@ -72,6 +76,8 @@ with publication_lock(root):
     assert "private" not in (root / owner / "request.json").read_text()
     evidence = json.loads((root / owner / "process.json").read_text())
     assert evidence["pid"] == processes[0].pid
+    assert launcher.stop_service(config, path, stop_seconds=5)["service"] == "OFFLINE"
+    assert processes[0].wait(timeout=5) == 0
   finally:
     for process in processes:
       if process.poll() is None:

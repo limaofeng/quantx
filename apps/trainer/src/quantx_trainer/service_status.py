@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import time
 import uuid
 from pathlib import Path
@@ -16,7 +17,7 @@ from quantx_infrastructure.training_bundle_store import (
   reject_links,
 )
 
-PHASES = {"PREFLIGHT", "REGISTERING", "WORKER_LOOP", "EXITING"}
+PHASES = {"PREFLIGHT", "REGISTERING", "WORKER_LOOP", "STOPPING", "EXITING"}
 
 
 class ServiceReporter:
@@ -89,6 +90,8 @@ def service_status(state_root: Path, config_path: Path) -> dict[str, str]:
       or value.get("config_sha256")
       != hashlib.sha256(config_path.read_bytes()).hexdigest()
       or value.get("phase") not in PHASES
+      or not isinstance(value.get("instance_id"), str)
+      or not re.fullmatch(r"[a-f0-9]{32}", value["instance_id"])
       or type(value.get("pid")) is not int
       or type(value.get("updated_at")) not in {int, float}
     ):
@@ -101,7 +104,12 @@ def service_status(state_root: Path, config_path: Path) -> dict[str, str]:
     age = time.time() - value["updated_at"]
     if not 0 <= age <= 30:
       return {**result, "service": "STALE"}
-    return {**result, "service": "ALIVE", "phase": value["phase"]}
+    return {
+      **result,
+      "service": "ALIVE",
+      "phase": value["phase"],
+      "instance_id": value["instance_id"],
+    }
   except (
     OSError,
     ValueError,

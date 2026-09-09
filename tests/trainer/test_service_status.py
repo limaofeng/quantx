@@ -58,6 +58,7 @@ def test_service_lease_and_live_identity_are_both_required(tmp_path):
     assert service_status(tmp_path, config) == {
       "service": "ALIVE",
       "phase": "PREFLIGHT",
+      "instance_id": reporter.identity["instance_id"],
       "execution_state": "NOT_INSPECTED",
     }
     reporter.write("WORKER_LOOP")
