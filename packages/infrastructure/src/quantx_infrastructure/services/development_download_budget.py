@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+import httpx
 from sqlalchemy import text
 
 MAX_DOWNLOAD_ATTEMPTS = 512
@@ -17,11 +18,69 @@ class DeliveryDownloadBudgetExhausted(ValueError):
     super().__init__("DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED")
 
 
+class DeliveryRemoteUnavailable(ValueError):
+  def __init__(self, delivery_id):
+    self.delivery_id = delivery_id
+    super().__init__("DELIVERY_REMOTE_UNAVAILABLE")
+
+
 class DevelopmentDownloadBudget:
   def __init__(self, session_factory, delivery_id, *, owner=None):
     self.session_factory = session_factory
     self.delivery_id = delivery_id
     self.owner = owner
+
+  async def schedule(self, action="read"):
+    changes = {
+      "read": None,
+      "submitted": "remote_submitted=true",
+      "expired": "reason_code='DELIVERY_REMOTE_EXPIRED'",
+      "pending": "next_probe_at=clock_timestamp()+INTERVAL '60 seconds', "
+      "wait_reason='DELIVERY_SOURCE_PENDING',transient_failures=0",
+      "failed": "next_probe_at=clock_timestamp()+make_interval(secs => "
+      "LEAST(900,30 * power(2,transient_failures))::double precision), "
+      "transient_failures=LEAST(6,transient_failures+1),wait_reason='DELIVERY_REMOTE_UNAVAILABLE'",
+      "ready": "wait_reason=NULL,next_probe_at=clock_timestamp()",
+    }
+    if action not in changes:
+      raise ValueError("invalid delivery schedule action")
+    async with self.session_factory() as db:
+      if self.owner is not None:
+        await self.owner._guard_ingestion_owner(db)
+      await db.execute(
+        text("""
+        INSERT INTO development_data_download_budget(delivery_id) VALUES (:id)
+        ON CONFLICT(delivery_id) DO NOTHING
+      """),
+        {"id": self.delivery_id},
+      )
+      if changes[action] is not None:
+        await db.execute(
+          text(
+            "UPDATE development_data_download_budget SET "
+            + changes[action]
+            + ",updated_at=clock_timestamp() WHERE delivery_id=:id"
+          ),
+          {"id": self.delivery_id},
+        )
+      row = (
+        (
+          await db.execute(
+            text("""
+        SELECT remote_submitted,next_probe_at,wait_reason,reason_code,
+          next_probe_at <= clock_timestamp() AS due
+        FROM development_data_download_budget WHERE delivery_id=:id
+      """),
+            {"id": self.delivery_id},
+          )
+        )
+        .mappings()
+        .one()
+      )
+      if self.owner is not None:
+        await self.owner._guard_ingestion_owner(db)
+      await db.commit()
+    return dict(row)
 
   async def reserve(self, maximum_bytes):
     if (
@@ -94,5 +153,14 @@ class DevelopmentDownloadBudget:
   @asynccontextmanager
   async def attempt(self, maximum_bytes):
     await self.reserve(maximum_bytes)
-    async with asyncio.timeout(DOWNLOAD_ATTEMPT_SECONDS):
-      yield
+    try:
+      async with asyncio.timeout(DOWNLOAD_ATTEMPT_SECONDS):
+        yield
+    except (httpx.TransportError, TimeoutError) as exc:
+      await self.schedule("failed")
+      raise DeliveryRemoteUnavailable(self.delivery_id) from exc
+    except httpx.HTTPStatusError as exc:
+      if exc.response.status_code == 429 or exc.response.status_code >= 500:
+        await self.schedule("failed")
+        raise DeliveryRemoteUnavailable(self.delivery_id) from exc
+      raise

@@ -11,6 +11,9 @@ import pytest
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from quantx_infrastructure.services import development_delivery_manifest as delivery
 from quantx_infrastructure.services import development_history_import as importer
+from quantx_infrastructure.services.development_download_budget import (
+  DeliveryRemoteUnavailable,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -128,6 +131,7 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
   identity = "b" * 64
   original = manifest()
   remote = copy.deepcopy(original)
+  remote_state = ["READY"]
   calls = []
   async with store.engine.begin() as connection:
     await connection.execute(
@@ -159,7 +163,7 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
     if "/chunks/" in request.url.path:
       raise httpx.ConnectError("offline", request=request)
     return httpx.Response(
-      200, json={"id": identity, "state": "READY", "manifest": remote}
+      200, json={"id": identity, "state": remote_state[0], "manifest": remote}
     )
 
   client_class = httpx.AsyncClient
@@ -179,12 +183,22 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
   monkeypatch.setenv("QUANTX_MARKET_DATA_TOKEN", "test")
   monkeypatch.setenv("QUANTX_DATA_EXPORT_ROOT", str(tmp_path))
   for _ in range(2):
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(DeliveryRemoteUnavailable):
       await importer._import_partition_owned(REQUEST)
-    async with store.engine.connect() as connection:
+    async with store.engine.begin() as connection:
       assert (
         await connection.scalar(text("SELECT manifest FROM development_data_export"))
         == original
+      )
+    before = len(calls)
+    pending = await importer._import_partition_owned(REQUEST)
+    assert pending["reason"] == "DELIVERY_REMOTE_UNAVAILABLE"
+    assert len(calls) == before
+    async with store.engine.begin() as connection:
+      await connection.execute(
+        text(
+          "UPDATE development_data_download_budget SET next_probe_at=clock_timestamp()"
+        )
       )
   assert not list(tmp_path.iterdir())
   remote["reference"] = {"changed": True}
@@ -192,6 +206,13 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
   with pytest.raises(ValueError, match="DELIVERY_VERSION_CONFLICT"):
     await importer._import_partition_owned(REQUEST)
   assert sum("/chunks/" in path for path in calls) == 2
+  assert calls.count("/market-data/v1/history") == 1
+  remote_state[0] = "EXPIRED"
+  blocked = await importer._import_partition_owned(REQUEST)
+  assert blocked["reason"] == "DELIVERY_REMOTE_EXPIRED"
+  call_count = len(calls)
+  assert await importer._import_partition_owned(REQUEST) == blocked
+  assert len(calls) == call_count
   async with store.engine.connect() as connection:
     assert (
       await connection.scalar(text("SELECT manifest FROM development_data_export"))

@@ -29,6 +29,7 @@ from quantx_infrastructure.services.development_delivery_manifest import (
 )
 from quantx_infrastructure.services.development_download_budget import (
   DeliveryDownloadBudgetExhausted,
+  DeliveryRemoteUnavailable,
   DevelopmentDownloadBudget,
 )
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
@@ -76,6 +77,12 @@ async def import_partition(request: HistoryPartitionRequest) -> dict:
         "status": "BLOCKED",
         "reason": "DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED",
       }
+    except DeliveryRemoteUnavailable as exc:
+      return {
+        "id": exc.delivery_id,
+        "status": "WAITING_SOURCE",
+        "reason": "DELIVERY_REMOTE_UNAVAILABLE",
+      }
     finally:
       await db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
 
@@ -88,23 +95,33 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
   if local["state"] == "LOCAL_VERIFIED":
     return local["manifest"]
   budget = DevelopmentDownloadBudget(AsyncSessionLocal, identity)
+  schedule = await budget.schedule()
+  if schedule["reason_code"]:
+    return {"id": identity, "status": "BLOCKED", "reason": schedule["reason_code"]}
+  if not schedule["due"]:
+    return {"id": identity, "status": "WAITING_SOURCE", "reason": schedule["wait_reason"]}
   base = os.environ["QUANTX_MARKET_DATA_URL"].rstrip("/")
   headers = {"Authorization": f"Bearer {os.environ['QUANTX_MARKET_DATA_TOKEN']}"}
   async with httpx.AsyncClient(
     base_url=base, headers=headers, timeout=30, trust_env=False
   ) as client:
-    async with budget.attempt(MAX_DELIVERY_METADATA_BYTES):
-      response = await read_delivery_metadata(
-        client, "POST", "/market-data/v1/history", json=request.model_dump(mode="json")
-      )
-    if response["id"] != identity:
-      raise ValueError("Remote request identity mismatch")
+    if not schedule["remote_submitted"]:
+      async with budget.attempt(MAX_DELIVERY_METADATA_BYTES):
+        response = await read_delivery_metadata(
+          client, "POST", "/market-data/v1/history", json=request.model_dump(mode="json")
+        )
+      if response["id"] != identity:
+        raise ValueError("Remote request identity mismatch")
+      await budget.schedule("submitted")
     async with budget.attempt(MAX_DELIVERY_METADATA_BYTES):
       remote = await read_delivery_metadata(
         client, "GET", f"/market-data/v1/history/{identity}"
       )
     if remote.get("id") != identity:
       raise ValueError("Remote request identity mismatch")
+    if remote["state"] == "EXPIRED":
+      await budget.schedule("expired")
+      return {"id": identity, "status": "BLOCKED", "reason": "DELIVERY_REMOTE_EXPIRED"}
     if remote["state"] != "READY":
       if remote["state"] == "INCOMPLETE":
         async with AsyncSessionLocal() as db:
@@ -115,11 +132,14 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
             {"id": identity},
           )
           await db.commit()
+      elif remote["state"] in {"QUEUED", "WAITING_SOURCE"}:
+        await budget.schedule("pending")
       return {"status": remote["state"], "id": identity, "reason": remote.get("error")}
     manifest = remote["manifest"]
     async with AsyncSessionLocal() as db:
       await pin_delivery_manifest(db, identity, request, manifest)
       await db.commit()
+    await budget.schedule("ready")
     export_root().mkdir(parents=True, exist_ok=True)
     for item in manifest["chunks"]:
       digest = item["checksum_sha256"]
@@ -337,7 +357,7 @@ async def request_remote_history(
         "status": "failed",
         "reason": "DEVELOPMENT_SOURCE_INCOMPLETE"
         if any(p["status"] == "INCOMPLETE" for p in partition_status.values())
-        else "DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED",
+        else next(p["reason"] for p in partition_status.values() if p["status"] == "BLOCKED"),
         "request_id": identity,
         **progress,
       }

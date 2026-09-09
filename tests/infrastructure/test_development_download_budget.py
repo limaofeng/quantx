@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -39,6 +40,18 @@ async def install_budget_schema(engine):
       migration.upgrade()
 
     await connection.run_sync(upgrade)
+    schedule_path = path.with_name("20260910_0079_development_delivery_schedule.py")
+    schedule_spec = importlib.util.spec_from_file_location(
+      "delivery_schedule_migration", schedule_path
+    )
+    schedule_migration = importlib.util.module_from_spec(schedule_spec)
+    schedule_spec.loader.exec_module(schedule_migration)
+
+    def upgrade_schedule(sync_connection):
+      schedule_migration.op = Operations(MigrationContext.configure(sync_connection))
+      schedule_migration.upgrade()
+
+    await connection.run_sync(upgrade_schedule)
   return migration
 
 
@@ -146,11 +159,12 @@ async def test_successor_preserves_budget_and_old_owner_cannot_reserve(download)
 async def test_total_attempt_deadline_covers_body_consumption(download, monkeypatch):
   first, _, factory = download
   monkeypatch.setattr(budgets, "DOWNLOAD_ATTEMPT_SECONDS", 1)
-  with pytest.raises(TimeoutError):
+  with pytest.raises(budgets.DeliveryRemoteUnavailable) as error:
     async with budgets.DevelopmentDownloadBudget(
       factory, "delivery", owner=first
     ).attempt(100):
       await asyncio.sleep(2)
+  assert isinstance(error.value.__cause__, TimeoutError)
   assert (await snapshot(first.engine))["reserved_seconds"] == 1
 
 
@@ -168,3 +182,63 @@ async def test_downgrade_refuses_to_erase_reserved_work(download):
     with pytest.raises(RuntimeError, match="cannot remove persisted download budgets"):
       await connection.run_sync(downgrade)
   assert (await snapshot(first.engine))["attempts"] == 1
+
+
+async def test_submission_and_wait_survive_restart_without_budget_use(download):
+  first, second, factory = download
+  budget = budgets.DevelopmentDownloadBudget(factory, "delivery", owner=first)
+  assert (await budget.schedule())["due"]
+  await budget.schedule("submitted")
+  pending = await budget.schedule("pending")
+  assert not pending["due"]
+  await first.release()
+  assert await second.acquire()
+  with pytest.raises(RuntimeError, match="lease was lost"):
+    await budget.schedule("ready")
+  state = await budgets.DevelopmentDownloadBudget(
+    factory, "delivery", owner=second
+  ).schedule()
+  assert state["remote_submitted"]
+  assert state["next_probe_at"] == pending["next_probe_at"]
+  assert state["wait_reason"] == "DELIVERY_SOURCE_PENDING"
+  assert (await snapshot(first.engine))["attempts"] == 0
+
+
+async def test_network_failure_backoff_grows_and_caps_without_reset_on_metadata_ready(
+  download,
+):
+  first, _, factory = download
+  for expected in (30, 60, 120, 240, 480, 900, 900):
+    budget = budgets.DevelopmentDownloadBudget(factory, "delivery", owner=first)
+    await budget.schedule("failed")
+    async with first.engine.connect() as connection:
+      seconds = await connection.scalar(
+        text("""
+        SELECT extract(epoch FROM next_probe_at-clock_timestamp())
+        FROM development_data_download_budget WHERE delivery_id='delivery'
+      """)
+      )
+    assert expected - 2 <= seconds <= expected
+    # A metadata response is not proof that the subsequent body download works.
+    await budget.schedule("ready")
+  assert (await snapshot(first.engine))["transient_failures"] == 6
+
+
+@pytest.mark.parametrize("status", [429, 503, 401])
+async def test_only_transient_http_statuses_schedule_retry(download, status):
+  first, _, factory = download
+  budget = budgets.DevelopmentDownloadBudget(factory, "delivery", owner=first)
+  transport = httpx.MockTransport(lambda request: httpx.Response(status))
+  expected = (
+    httpx.HTTPStatusError if status == 401 else budgets.DeliveryRemoteUnavailable
+  )
+  async with httpx.AsyncClient(transport=transport) as client:
+    with pytest.raises(expected):
+      async with budget.attempt(100):
+        response = await client.get("http://test/status")
+        response.raise_for_status()
+  state = await budget.schedule()
+  assert state["due"] is (status == 401)
+  assert state["wait_reason"] == (
+    None if status == 401 else "DELIVERY_REMOTE_UNAVAILABLE"
+  )
