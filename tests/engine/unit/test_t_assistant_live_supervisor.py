@@ -300,3 +300,40 @@ async def test_running_market_identity_change_revokes_ready_without_symbol_tick(
     assert row.status == "RUNNING" and row.entry_readiness == "DEGRADED"
     assert row.entry_readiness_reasons
     assert await db.scalar(select(func.count(TradeCommandOutbox.message_id))) == 0
+
+
+async def test_committed_ready_cycle_dispatches_allocation_and_market_failure_revokes(sessions):
+  from types import SimpleNamespace
+  from unittest.mock import AsyncMock
+
+  from quantx_infrastructure.repositories.t_assistant_execution_repository import (
+    TAssistantExecutionRepository,
+  )
+
+  key = await seed(sessions)
+  hub = FakeWholeQuoteHub()
+  supervisor = TAssistantLiveSupervisor(quote_hub=hub, session_factory=sessions, clock=lambda: NOW)
+  await supervisor.start()
+  await supervisor.reconcile(execution_id=key, universe=UNIVERSE, legacy_active=False)
+  async with sessions() as db, db.begin():
+    row = await db.get(TAssistantExecutionRecord, key)
+    row.status, row.started_at = "RUNNING", NOW
+    row.entry_readiness, row.entry_readiness_reasons = "READY", []
+    row.state_version += 1
+    await db.flush()
+    supervisor._bindings[key].execution = await TAssistantExecutionRepository(db).get_domain(key)
+  supervisor._bindings[key].ready_market_identity = (hub.stream_id, str(hub.generation))
+  supervisor._bindings[key].rewarm.clear()
+  supervisor.runtime.run_cycle = AsyncMock(return_value=SimpleNamespace(committed=True, cycle_id="cycle"))
+  supervisor._try_activate = AsyncMock()
+  dispatch = AsyncMock(side_effect=ValueError("LIVE_ALLOCATION_MARKET_CHANGED"))
+  supervisor.allocation_runtime.dispatch = dispatch
+  with pytest.raises(ValueError, match="MARKET_CHANGED"):
+    await hub.emit(1)
+  dispatch.assert_awaited_once()
+  assert dispatch.await_args.kwargs["execution_id"] == key
+  assert key not in supervisor._bindings
+  async with sessions() as db:
+    row = await db.get(TAssistantExecutionRecord, key)
+    assert row.entry_readiness == "DEGRADED"
+  await supervisor.stop()

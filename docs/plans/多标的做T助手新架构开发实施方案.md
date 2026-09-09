@@ -793,8 +793,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   扩大回归修复准入凭据写入触发 ORM updated_at 导致经济水位变化的问题，保留原经济事实时间，
   批次保留准入时间；11 项账户准入测试通过，独立提交 `49bc8e4b`。
   证据 `.codex_screenshots/p6-{live-allocation,allocation-*}*`。协调器尚未注册 Engine 调度。
+- LIVE 分配已注册到 supervisor 已提交周期后：仅 READY 执行调度待分配周期，锁定 head/
+  execution 后调用真实协调器；分配事务提交前再次复核行情 stream/generation 和新鲜度。
+  估值期间行情变化整体回滚，supervisor 撤销 READY 并解绑，成功后重投不重复分配。
+  33 项联合测试通过，补充 supervisor 异常门后 14 项通过；分配测试使用固定账户 cut，
+  不冒充券商整链验收。证据 `.codex_screenshots/p6-live-allocation-{dispatch,supervisor}-test.log`。
+  当前仍止于 AWAITING_APPROVAL，未创建真实订单。
 - 剩余开发顺序：
-  LIVE 分配调度/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

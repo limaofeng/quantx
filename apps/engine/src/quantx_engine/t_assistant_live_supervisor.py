@@ -49,6 +49,7 @@ from .instrument_universe_provider import InstrumentUniverseSnapshot
 from .t_assistant_candidate_controls import read_candidate_controls
 from .t_assistant_decision_runtime import TAssistantLiveDecisionRuntime
 from .t_assistant_live_admission import canary_instrument_codes
+from .t_assistant_live_allocation_runtime import TAssistantLiveAllocationRuntime
 from .t_assistant_live_drain import drain_live_entry_work
 from .t_assistant_live_readiness import activate_live_canary_ready
 from .t_assistant_paper_shadow_supervisor import _accepted_tick, _market_gate_context
@@ -91,6 +92,7 @@ class TAssistantLiveSupervisor:
     self.runtime = TAssistantLiveDecisionRuntime(
       session_factory=session_factory, clock=clock
     )
+    self.allocation_runtime = TAssistantLiveAllocationRuntime(session_factory=session_factory, clock=clock)
     self.readiness_provider = readiness_provider
     self.market_marks = LiveTMarketMarkReader(quote_hub)
     self._lock = asyncio.Lock()
@@ -524,6 +526,20 @@ class TAssistantLiveSupervisor:
           )
           if self.last_results[key].committed:
             await self._try_activate(binding, self.last_results[key].cycle_id, capture)
-        except Exception:
-          self._unbind(key)
+            if binding.execution.readiness.readiness.value == "READY":
+              def validate_allocation_market():
+                if (not self.hub.is_ready or self.hub.stream_id != capture.stream_id
+                  or str(self.hub.generation) != capture.continuity_generation
+                  or not 0 <= (self.clock() - capture.captured_at).total_seconds() < 90):
+                  raise ValueError("LIVE_ALLOCATION_MARKET_CHANGED")
+              await self.allocation_runtime.dispatch(
+                execution_id=key, market_mark_reader=self.market_marks,
+                validate_market=validate_allocation_market,
+              )
+        except Exception as exc:
+          try:
+            if isinstance(exc, ValueError) and str(exc) == "LIVE_ALLOCATION_MARKET_CHANGED":
+              await self._warming_reason(binding, "LIVE_READY_MARKET_CHANGED", self.clock())
+          finally:
+            self._unbind(key)
           raise
