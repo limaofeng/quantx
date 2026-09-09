@@ -17,7 +17,7 @@ QuantX 提供完整的 GraphQL API，支持策略管理、市场数据查询、�
 
 ### 接口地址
 - **开发环境**: `http://localhost:8000/graphql`
-- **生产环境**: `https://api.quantx.com/graphql`
+- **生产环境**: `http://127.0.0.1:8080/graphql`
 
 ### 特性支持
 - ✅ **查询优化**: DataLoader 批量查询

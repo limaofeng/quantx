@@ -2,7 +2,7 @@
 
 QuantX 原生 iOS 客户端最低支持 iOS 17，定位为个人 A 股量化移动控制中心。主导航按用户任务组织为“今日 / 行情 / 交易 / 量化 / 资产”，设置从今日或资产页的账户入口进入。当前具备登录、Keychain 恢复、Token 刷新、后台隐私遮蔽、账户与持仓、证券搜索、自选、实时行情、K 线、五档盘口、委托成交、策略、做T助手和打板助手。所有页面只展示真实服务端数据；缺少安全接口或权限时明确显示不可用，不生成模拟账户事实或假成交。
 
-移动端不会直接访问 QMT。助手买入确认继续使用独立 `trade:approve` 权限、短时服务端预览及 Face ID/Touch ID；确认只表示意图重新进入统一交易域与风控链路。手动交易只允许接入独立 `trade:manual` 两阶段契约，绝不调用遗留 `placeOrder` 绕过预览。委托投递、券商受理与成交严格区分，最终事实只认 QMT Agent 回报经 Engine 持久化和收敛后的结果。Debug 可连接配置的私网 HTTP/WS 开发服务；Staging 与 Release 仍只允许 HTTPS/WSS。
+移动端不会直接访问 QMT。助手买入确认继续使用独立 `trade:approve` 权限、短时服务端预览及 Face ID/Touch ID；确认只表示意图重新进入统一交易域与风控链路。手动交易只允许接入独立 `trade:manual` 两阶段契约，绝不调用遗留 `placeOrder` 绕过预览。委托投递、券商受理与成交严格区分，最终事实只认 QMT Agent 回报经 Engine 持久化和收敛后的结果。Debug 可连接配置的私网 HTTP/WS 开发服务；Release 仍只允许 HTTPS/WSS。
 
 原生登录只提交用户名、密码和设备名。服务端从用户账户授权关系实时解析唯一账户，不在设备会话或 Token 中重复保存账户，并把用户权限收缩到 iOS v1 能力白名单：`portfolio:read`、`market:read`、`orders:read`、`strategy:read`、`system-status:read`、`watchlist:write`、`trade:manual`、`trade:approve`、`liquidation:control`、`strategy:control`、`t-trade:control`、`limit-up:control`、`notification:manage`。响应中的 `authorizedAccountIds` 必须恰好包含一个账户，`permissions` 不得包含 `mutation:write`、`trade:direct` 或 `assistant:*`。
 
@@ -49,7 +49,7 @@ xcodebuild -project QuantX.xcodeproj -scheme QuantXRealBackendUI \
   -only-testing:QuantXUITests/RealBackendUITests test
 ```
 
-日常 `QuantX` Scheme 会安全跳过以上两项真实后端测试。只有显式选择真实后端 Scheme 时，测试运行器才会注入临时会话；该启动入口仅编译进 Debug 构建，不写入 Keychain，也不进入 Staging/Release 包。
+日常 `QuantX` Scheme 会安全跳过以上两项真实后端测试。只有显式选择真实后端 Scheme 时，测试运行器才会注入临时会话；该启动入口仅编译进 Debug 构建，不写入 Keychain，也不进入 Release 包。
 
 深色/浅色和 Dynamic Type 无障碍矩阵使用真实模拟器系统设置运行。先从 `xcrun simctl list devices available` 获取 UDID，再执行：
 
@@ -79,7 +79,7 @@ cd apps/ios
 
 脚本只执行无凭证只读探测，不停止 8080 监听进程，也不修改配置。它会核对健康状态、认证路由、公开 OpenAPI 的会话字段，以及 GraphQL HTTP/`graphql-transport-ws` 匿名访问默认拒绝；RFC1918 与 localhost 候选地址会绕过系统 HTTP 代理，避免把代理错误页误判成后端响应。摘要分别给出 `codegen`、`account_data` 和 `testflight` 状态：全部就绪返回 0，存在阻断返回 2，参数无效返回 64。
 
-Debug 构建不再以 TLS 部署验收作为真实数据联调的前置条件；只要私网后端提供认证契约和账户只读权限，即可通过 HTTP/WS 加载真实数据。`account_data` 与 `testflight` 摘要仍用于判断 Staging/Release 发布就绪度，不会阻止 Debug 联调。
+Debug 构建不再以 TLS 部署验收作为真实数据联调的前置条件；只要私网后端提供认证契约和账户只读权限，即可通过 HTTP/WS 加载真实数据。`account_data` 与 `testflight` 摘要仍用于判断 Release 发布就绪度，不会阻止 Debug 联调。
 
 GraphQL Schema 与 Swift 类型使用 Apollo CLI 生成：
 
@@ -94,10 +94,10 @@ Apollo codegen 直接读取同一 monorepo 中发布的 `apps/docs/public/contra
 ## 配置边界
 
 - `Config/Debug.xcconfig` 指向 `http://192.168.5.6:8080/`，启用真实账户数据；明文 ATS 例外只在 Debug Info.plist 中生效。
-- Staging 与 Release 必须替换成真实的 `HTTPS/WSS` 私网入口；占位域名不会连接任何服务。
+- Release 必须替换成真实的 `HTTPS/WSS` 私网入口；占位域名不会连接任何服务。
 - `.xcconfig` 只能放非敏感设置。Token 只允许进入 Keychain，不能写入仓库、日志或 UserDefaults。
-- Debug 默认将 `QUANTX_ACCOUNT_DATA_ENABLED` 设为 `YES`；Staging/Release 是否启用仍由各自部署验收决定。
-- `SessionClient` 仅在 Debug 环境允许通过配置的 HTTP 地址登录；Staging 与 Release 仍拒绝非 HTTPS 认证地址。
+- Debug 默认将 `QUANTX_ACCOUNT_DATA_ENABLED` 设为 `YES`；Release 是否启用仍由各自部署验收决定。
+- `SessionClient` 仅在 Debug 环境允许通过配置的 HTTP 地址登录；Release 仍拒绝非 HTTPS 认证地址。
 - 登录、刷新和当前会话响应都以 `user.authorizedAccountIds` 和 `user.permissions` 为唯一账户与能力契约。App 要求账户列表恰好只有一个，并只按 `permissions` 控制 Repository 与 UI；刷新只允许权限缩减，缩减后对应数据仓库与操作入口立即关闭。
 - Keychain 只保存 Access/Refresh Token、到期时间与设备会话 ID。唯一账户和会话权限不持久化，冷启动通过 `GET /auth/session` 重新恢复；登出即清除令牌、内存账户/权限、Apollo 缓存与订阅。
 - 账户摘要、组合汇总和每条持仓会再次进行客户端 `accountId` 范围一致性校验；发现跨账户数据时整页拒绝展示。
@@ -116,13 +116,14 @@ Apollo codegen 直接读取同一 monorepo 中发布的 `apps/docs/public/contra
 
 ### 本机签名与环境覆盖
 
+部署只分开发与生产：Debug 对应开发，Release 对应生产。
+
 不要直接把 Apple Team ID 或真实私网域名写进仓库配置。按目标环境复制示例文件：
 
 ```bash
 cd apps/ios/Config
 cp Debug.local.xcconfig.example Debug.local.xcconfig
-cp Staging.local.xcconfig.example Staging.local.xcconfig
 cp Release.local.xcconfig.example Release.local.xcconfig
 ```
 
-只编辑需要使用的 `.local.xcconfig`。这些文件已被 Git 忽略，并在对应环境配置末尾通过可选 include 加载。Staging 的账户数据开关只有在 `readiness-check.sh https://实际后端` 验证通过后才能改为 `YES`；Debug 默认启用当前私网 HTTP/WS 后端的真实只读数据。
+只编辑需要使用的 `.local.xcconfig`。这些文件已被 Git 忽略，并在对应环境配置末尾通过可选 include 加载。Release 的账户数据开关只有在 `readiness-check.sh https://实际后端` 验证通过后才能改为 `YES`；Debug 默认启用当前私网 HTTP/WS 后端的真实只读数据。

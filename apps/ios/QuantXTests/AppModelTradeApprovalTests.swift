@@ -150,7 +150,7 @@ final class AppModelTradeApprovalTests: XCTestCase {
     )
     return AppModel(
       configuration: APIConfiguration(
-        environment: .staging,
+        environment: .production,
         graphQLHTTPURL: URL(string: "https://quantx.test/graphql")!,
         graphQLWebSocketURL: URL(string: "wss://quantx.test/graphql")!,
         healthURL: URL(string: "https://quantx.test/health")!,

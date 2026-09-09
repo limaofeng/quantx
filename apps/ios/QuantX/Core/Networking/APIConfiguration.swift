@@ -3,13 +3,11 @@ import Foundation
 struct APIConfiguration: Equatable, Sendable {
   enum Environment: String, Sendable {
     case debug
-    case staging
     case production
 
     var displayName: String {
       switch self {
       case .debug: "开发"
-      case .staging: "预发布"
       case .production: "生产"
       }
     }

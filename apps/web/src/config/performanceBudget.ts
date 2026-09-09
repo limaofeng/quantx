@@ -28,15 +28,6 @@ const PERFORMANCE_BUDGETS: Record<string, PerformanceBudgetConfig> = {
     TTFB: 1000, // 1秒内首字节响应
   },
 
-  // 测试环境 - 接近生产的预算
-  staging: {
-    CLS: 0.1, // Google 建议的良好标准
-    FCP: 1800,
-    INP: 200,
-    LCP: 2500,
-    TTFB: 800,
-  },
-
   // 生产环境 - 严格的性能预算
   production: {
     CLS: 0.1, // Google 建议的良好标准
