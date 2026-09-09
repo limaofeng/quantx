@@ -993,7 +993,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   清单→确认→排空整链及原清单/排空、命令边界共 **25 项通过**，Ruff 通过；证据
   `.codex_screenshots/p6-legacy-inventory-command.log` 和
   `.codex_screenshots/p6-legacy-inventory-command-boundaries.log`。
-  尚需公开 GraphQL/UI 维护入口、排空后终结/解除旧绑定的整链；不开放新源准入。
+  公开 GraphQL 已提供准备清单、预览/消费维护确认和结果查询，均限定 native 与
+  t-trade:control/trade:approve；完成结果核对原用户、设备及持久化清单/排空审计，
+  不凭消息箱 result 宣告成功。查询文档、操作权限和已提交 schema 快照原子更新。
+  API 相关 **8 项通过**；契约快照同步后额外契约回归 **8 passed/1 failed**，唯一失败
+  为 HEAD 原有 `Query.historyDownloadSettings` 缺少 description，与维护接口无关。
+  经统一入口刷新本机 dev/full/paper 后，Caddy health/live 与新类型 introspection 通过；
+  实际 `127.0.0.1:8080/graphql` codegen、根 check/lint/test:run/build 通过，Web **895 项通过**。
+  证据 `.codex_screenshots/p6-legacy-public-schema.log`、`p6-legacy-client-contracts-final.log`、
+  `p6-legacy-codegen.log`、`p6-legacy-web-{check,lint,tests,build}.log`；未执行维护 mutation 或真实交易。
+  尚需可操作维护界面、排空后终结/解除旧绑定的整链；不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

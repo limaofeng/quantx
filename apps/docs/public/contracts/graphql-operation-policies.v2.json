@@ -376,6 +376,17 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "confirmTAssistantLegacyDrain": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "confirmTAssistantLiveEntry": {
         "audiences": [
           "web",
@@ -716,6 +727,17 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "prepareTAssistantLegacyInventory": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "previewAccountExecutionControl": {
         "audiences": [
           "web",
@@ -816,6 +838,17 @@
         ],
         "requiredPermissions": [
           "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewTAssistantLegacyDrain": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
           "trade:approve"
         ],
         "risk": "TRADING_WRITE",
@@ -3008,6 +3041,17 @@
         ],
         "requiredPermissions": [
           "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tAssistantLegacyMaintenanceOperation": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
         ],
         "risk": "READ",
         "stability": "supported"

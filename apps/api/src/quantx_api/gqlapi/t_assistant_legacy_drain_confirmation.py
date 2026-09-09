@@ -259,3 +259,96 @@ async def enqueue_legacy_inventory(db, *, principal, request_id, request, now):
   )
   await db.flush()
   return request_id
+
+
+async def read_legacy_maintenance_operation(db, *, principal, account_id, command_id):
+  """Only durable, scope-checked evidence is returned as a completed operation."""
+  from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+  from quantx_infrastructure.services.t_legacy_drain_guard import (
+    legacy_t_drain_event_id,
+  )
+
+  _require_native_control_principal(principal, account_id)
+  current = await TTradeControlChallengeService._lock_current_principal(
+    db, principal, account_id
+  )
+  command = await db.get(EngineCommandOutbox, command_id)
+  if command is None:
+    return {"command_id": command_id, "status": "NOT_FOUND", "evidence": None}
+  payload = dict(command.payload or {})
+  if command.command_type == "T_ASSISTANT_PREPARE_LEGACY_INVENTORY":
+    if (
+      payload.get("actor_id") != current.user_id
+      or payload.get("account_id") != account_id
+    ):
+      raise ValueError("LEGACY_T_MAINTENANCE_SCOPE_CONFLICT")
+    event = await db.get(TTradeRolloutEvent, f"legacy-inventory:{command_id}")
+    evidence = None
+    if event is not None:
+      manifest = dict(event.details.get("manifest") or {})
+      if (
+        event.event_type != "LEGACY_T_OBLIGATION_INVENTORY_FROZEN"
+        or event.account_id != account_id
+        or event.actor_user_id != current.user_id
+        or manifest.get("run_id") != command.aggregate_id
+        or any(
+          manifest.get(key) != payload.get(key)
+          for key in ("account_id", "config_id", "run_id")
+        )
+        or manifest.get("head_version") != payload.get("expected_head_version")
+        or event.details.get("manifest_hash") != stable_manifest_hash(manifest)
+      ):
+        raise ValueError("LEGACY_T_MAINTENANCE_EVIDENCE_CONFLICT")
+      evidence = {"inventory_operation_id": event.event_id, **event.details}
+  elif command.command_type == COMMAND:
+    challenge = await db.get(TradeConfirmationChallenge, payload.get("challenge_id"))
+    if (
+      challenge is None
+      or challenge.action != ACTION
+      or challenge.account_id != account_id
+      or challenge.user_id != current.user_id
+      or challenge.device_session_id != current.device_session_id
+      or challenge.consumed_at is None
+      or (challenge.result_reference or {}).get("engine_command", {}).get("message_id")
+      != command_id
+      or command.aggregate_id != challenge.payload.get("run_id")
+      or set(payload) != {"challenge_id"}
+      or not secrets.compare_digest(
+        str(challenge.payload_fingerprint or ""),
+        signed_payload_fingerprint(challenge.payload),
+      )
+    ):
+      raise ValueError("LEGACY_T_MAINTENANCE_SCOPE_CONFLICT")
+    event = await db.get(
+      TTradeRolloutEvent, legacy_t_drain_event_id(command.aggregate_id)
+    )
+    evidence = None
+    if event is not None:
+      request = challenge.payload
+      expected = {
+        "config_id": request["config_id"],
+        "run_id": request["run_id"],
+        "expected_head_version": request["expected_head_version"],
+        "inventory_operation_id": request["inventory_operation_id"],
+        "inventory_hash": request["expected_inventory_hash"],
+      }
+      if (
+        event.event_type != "LEGACY_T_DRAIN_STARTED"
+        or event.next_stage != "DRAINING"
+        or event.account_id != account_id
+        or event.actor_user_id != current.user_id
+        or event.details.get("run_id") != command.aggregate_id
+        or event.details.get("request") != expected
+      ):
+        raise ValueError("LEGACY_T_MAINTENANCE_EVIDENCE_CONFLICT")
+      evidence = dict(event.details)
+  else:
+    raise ValueError("LEGACY_T_MAINTENANCE_COMMAND_INVALID")
+  status = command.processing_status
+  if status == "SUCCEEDED" and evidence is None:
+    raise ValueError("LEGACY_T_MAINTENANCE_EVIDENCE_REQUIRED")
+  return {
+    "command_id": command_id,
+    "status": status,
+    "evidence": evidence if status == "SUCCEEDED" else None,
+  }

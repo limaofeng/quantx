@@ -82,7 +82,9 @@ mutation Portfolio_ConfirmTAssistantLiveEntry(
   }
 }
 
-mutation Portfolio_PreviewTAssistantLiveRelease($request: TAssistantReleaseRequest!) {
+mutation Portfolio_PreviewTAssistantLiveRelease(
+  $request: TAssistantReleaseRequest!
+) {
   previewTAssistantLiveRelease(request: $request) {
     success
     code
@@ -103,8 +105,14 @@ mutation Portfolio_PreviewTAssistantLiveRelease($request: TAssistantReleaseReque
   }
 }
 
-mutation Portfolio_ConfirmTAssistantLiveRelease($challengeId: String!, $confirmationToken: String!) {
-  confirmTAssistantLiveRelease(challengeId: $challengeId, confirmationToken: $confirmationToken) {
+mutation Portfolio_ConfirmTAssistantLiveRelease(
+  $challengeId: String!
+  $confirmationToken: String!
+) {
+  confirmTAssistantLiveRelease(
+    challengeId: $challengeId
+    confirmationToken: $confirmationToken
+  ) {
     success
     code
     message
@@ -129,5 +137,59 @@ query TAssistantLiveReleaseOperations($accountId: String!, $limit: Int!) {
     accountId
     configVersionId
     createdAt
+  }
+}
+
+mutation Portfolio_PrepareTAssistantLegacyInventory(
+  $requestId: String!
+  $request: TAssistantLegacyInventoryRequest!
+) {
+  prepareTAssistantLegacyInventory(requestId: $requestId, request: $request) {
+    success
+    code
+    message
+    engineCommandId
+  }
+}
+mutation Portfolio_PreviewTAssistantLegacyDrain(
+  $request: TAssistantLegacyDrainRequest!
+) {
+  previewTAssistantLegacyDrain(request: $request) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      expiresAt
+      request
+    }
+  }
+}
+mutation Portfolio_ConfirmTAssistantLegacyDrain(
+  $challengeId: String!
+  $confirmationToken: String!
+) {
+  confirmTAssistantLegacyDrain(
+    challengeId: $challengeId
+    confirmationToken: $confirmationToken
+  ) {
+    success
+    code
+    message
+    engineCommandId
+  }
+}
+query Portfolio_TAssistantLegacyMaintenanceOperation(
+  $accountId: String!
+  $commandId: String!
+) {
+  tAssistantLegacyMaintenanceOperation(
+    accountId: $accountId
+    commandId: $commandId
+  ) {
+    commandId
+    status
+    evidence
   }
 }

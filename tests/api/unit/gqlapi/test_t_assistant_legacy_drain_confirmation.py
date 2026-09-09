@@ -87,7 +87,37 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
     assert inventory == await command_processor._dispatch(
       claimed[1], claimed[2], command_id=claimed[0]
     )
+    # Command success alone cannot prove a reviewed inventory exists.
+    async with sessions() as db, db.begin():
+      command = await db.get(EngineCommandOutbox, preparation_id)
+      command.processing_status = "SUCCEEDED"
+      from quantx_infrastructure.models.agent_runtime import TTradeRolloutEvent
+
+      event = await db.get(TTradeRolloutEvent, inventory["inventory_operation_id"])
+      saved = event.details
+      event.details = {**saved, "manifest_hash": "0" * 64}
+    async with sessions() as db, db.begin():
+      with pytest.raises(ValueError, match="EVIDENCE_CONFLICT"):
+        await api.read_legacy_maintenance_operation(
+          db,
+          principal=principal,
+          account_id="account-1",
+          command_id=preparation_id,
+        )
+    async with sessions() as db, db.begin():
+      (
+        await db.get(TTradeRolloutEvent, inventory["inventory_operation_id"])
+      ).details = saved
     await command_processor._complete(preparation_id, result=inventory)
+    async with sessions() as db, db.begin():
+      status = await api.read_legacy_maintenance_operation(
+        db,
+        principal=principal,
+        account_id="account-1",
+        command_id=preparation_id,
+      )
+      assert status["status"] == "SUCCEEDED"
+      assert status["evidence"]["manifest_hash"] == inventory["manifest_hash"]
     request.update(
       inventory_operation_id=inventory["inventory_operation_id"],
       expected_inventory_hash=inventory["manifest_hash"],
@@ -144,6 +174,24 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
       api.COMMAND, {"challenge_id": issued["challenge_id"]}, command_id=identity
     )
     assert result["success"] and result["cancelled_intent_ids"] == ["unsubmitted"]
+    async with sessions() as db, db.begin():
+      status = await api.read_legacy_maintenance_operation(
+        db,
+        principal=principal,
+        account_id="account-1",
+        command_id=identity,
+      )
+      assert status["status"] == "PENDING" and status["evidence"] is None
+    await command_processor._complete(identity, result=result)
+    async with sessions() as db, db.begin():
+      status = await api.read_legacy_maintenance_operation(
+        db,
+        principal=principal,
+        account_id="account-1",
+        command_id=identity,
+      )
+      assert status["status"] == "SUCCEEDED"
+      assert status["evidence"]["cancelled_intent_ids"] == ["unsubmitted"]
     assert await consume() == identity
     async with sessions() as db:
       head = await db.get(TTradeGlobalConfig, "head")

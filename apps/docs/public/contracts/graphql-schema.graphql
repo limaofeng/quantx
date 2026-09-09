@@ -4146,6 +4146,15 @@ type Mutation {
   """消费原设备凭据，将同一 ENTRY 交给 Engine 重新分配；不表示成交"""
   confirmTAssistantLiveEntry(accountId: String!, executionId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
 
+  """准备旧做 T 义务清单供复核，不停止入场、不解除绑定"""
+  prepareTAssistantLegacyInventory(requestId: String!, request: TAssistantLegacyInventoryRequest!): TAssistantLegacyMaintenanceResult!
+
+  """预览绑定已复核义务清单和维护窗口的排空确认"""
+  previewTAssistantLegacyDrain(request: TAssistantLegacyDrainRequest!): TAssistantLegacyMaintenanceResult!
+
+  """消费原设备维护凭据，交由 Engine 停止旧执行的新入场"""
+  confirmTAssistantLegacyDrain(challengeId: String!, confirmationToken: String!): TAssistantLegacyMaintenanceResult!
+
   """上报做 T V3 客户端固定低基数刷新遥测"""
   recordTTradeClientTelemetry(input: TTradeClientTelemetryInput!): TTradeClientTelemetryResult!
 
@@ -5221,6 +5230,9 @@ type Query {
 
   """当前独立 LIVE 做 T 执行的人工确认队列"""
   tAssistantLiveApprovalQueue(accountId: String!): TAssistantLiveApprovalQueue!
+
+  """读取维护命令及持久化审计；入队不代表排空完成"""
+  tAssistantLegacyMaintenanceOperation(accountId: String!, commandId: String!): TAssistantLegacyMaintenanceOperation!
 
   """按精确回测版本读取真实机会事件，不从审计推导信号"""
   tTradeReplaySignalEvaluations(runId: String!, backtestId: String!, filters: TTradeReplaySignalFilterInput = null, first: Int! = 50, after: String = null): TTradeReplaySignalPage!
@@ -7397,6 +7409,45 @@ type Subscription {
 
   """订阅策略运行实例的 K线 数据"""
   strategyKlines(runId: String!, periods: [String!] = null): StrategyKLineData!
+}
+
+type TAssistantLegacyDrainPreview {
+  challengeId: String!
+  confirmationToken: String!
+  expiresAt: DateTime!
+  request: JSON!
+}
+
+input TAssistantLegacyDrainRequest {
+  accountId: String!
+  configId: String!
+  runId: String!
+  expectedHeadVersion: Int!
+  inventoryOperationId: String!
+  expectedInventoryHash: String!
+  windowStart: DateTime!
+  windowEnd: DateTime!
+}
+
+input TAssistantLegacyInventoryRequest {
+  accountId: String!
+  configId: String!
+  runId: String!
+  expectedHeadVersion: Int!
+}
+
+type TAssistantLegacyMaintenanceOperation {
+  commandId: String!
+  status: String!
+  evidence: JSON
+}
+
+type TAssistantLegacyMaintenanceResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  engineCommandId: String
+  preview: TAssistantLegacyDrainPreview
 }
 
 type TAssistantLiveApprovalQueue {

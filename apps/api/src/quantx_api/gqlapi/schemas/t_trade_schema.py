@@ -76,8 +76,9 @@ from ..types.trading_safety_types import (
   AccountSafetyHistory,
   AccountSafetyHistoryRange,
 )
+from .t_assistant_legacy_schema import TAssistantLegacyMutation, TAssistantLegacyQuery
+from .t_assistant_live_schema import TAssistantLiveMutation, TAssistantLiveQuery
 from .t_assistant_paper_schema import TAssistantPaperQuery
-from .t_assistant_live_schema import TAssistantLiveQuery, TAssistantLiveMutation
 
 
 async def _t_trade_execution_binding(
@@ -106,7 +107,7 @@ async def _t_trade_execution_binding(
 
 
 @strawberry.type(description="持仓做 T 查询")
-class TTradeQuery(TAssistantPaperQuery, TAssistantLiveQuery):
+class TTradeQuery(TAssistantPaperQuery, TAssistantLiveQuery, TAssistantLegacyQuery):
   @strawberry.field(description="按精确回测版本读取真实机会事件，不从审计推导信号")
   async def t_trade_replay_signal_evaluations(
     self, info: strawberry.types.Info, run_id: str, backtest_id: str,
@@ -377,7 +378,7 @@ class TTradeQuery(TAssistantPaperQuery, TAssistantLiveQuery):
 
 
 @strawberry.type(description="持仓做 T 操作")
-class TTradeMutation(TAssistantLiveMutation):
+class TTradeMutation(TAssistantLiveMutation, TAssistantLegacyMutation):
   @strawberry.mutation(description="上报做 T V3 客户端固定低基数刷新遥测")
   async def record_t_trade_client_telemetry(
     self,

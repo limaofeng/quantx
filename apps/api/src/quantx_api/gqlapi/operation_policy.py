@@ -562,7 +562,23 @@ _POLICIES[_release_operations_key] = replace(
   _POLICIES[_release_operations_key], required_permissions=("t-trade:control", "trade:approve")
 )
 
+_register(
+  "Mutation", "t-trade:control",
+  {"prepareTAssistantLegacyInventory", "previewTAssistantLegacyDrain", "confirmTAssistantLegacyDrain"},
+  audiences=("native",), risk="TRADING_WRITE",
+)
+_register(
+  "Query", "t-trade:control", {"tAssistantLegacyMaintenanceOperation"}, audiences=("native",),
+)
+_legacy_operation_key = ("Query", normalize_field_name("tAssistantLegacyMaintenanceOperation"))
+_POLICIES[_legacy_operation_key] = replace(
+  _POLICIES[_legacy_operation_key], required_permissions=("t-trade:control", "trade:approve")
+)
+
 _TRADE_APPROVAL_FIELDS = {
+  "prepareTAssistantLegacyInventory",
+  "previewTAssistantLegacyDrain",
+  "confirmTAssistantLegacyDrain",
   "previewTAssistantLiveRelease",
   "confirmTAssistantLiveRelease",
   "confirmAccountExecutionControl",
