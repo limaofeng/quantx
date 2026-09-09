@@ -709,6 +709,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   返回绑定报告/policy/evaluation/目标配置 hash 的材料；不自行写审批或创建执行。
   7 项合成评估整链测试通过，涵盖目标参数/额度/门/范围/授权漂移，Ruff 通过。
   证据 `.codex_screenshots/p6-release-evidence.xml`。审核身份与维护窗口的审批持久化仍待接入。
+- 发布审批持久化服务已实现：完整 P5/配置绑定核验放在线程中执行，事务锁定 head/source，
+  检查账户、head CAS、原 PAPER 配置和无既有 LIVE source；记录审核人/引用、报告/policy/
+  evaluation/目标配置 hash、名单、额度与维护窗口。审批本身不创建执行或修改 LIVE 开关。
+  同一审批键只接受原材料；精确重试可在窗口结束/执行已创建后返回，审计失败回滚。
+  合成评估→真实隔离审批记录→现有命令创建 WARMING 整链及负例共 31 项通过，Ruff 通过。
+  证据 `.codex_screenshots/p6-release-approval.xml`。公开端身份认证与二次确认仍未接入，
+  actor 和 review_reference 由未来受信调用方提供，本服务不将普通参数视作用户实际授权。
 - 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
