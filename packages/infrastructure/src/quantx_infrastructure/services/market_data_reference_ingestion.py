@@ -463,6 +463,17 @@ async def ingest_uploaded_reference_request(store, request_id, *, progress=None)
   if progress.state["phase"] == "VALIDATE":
     await progress.apply("advance", phase="WRITE")
   if progress.state["phase"] == "READBACK":
+    if payload["operation"] == "financial_data":
+      frames, _ = _normalize_financial_records(records, payload)
+      proofs = (
+        progress.state["write_result"]
+        .get("replacement_audit", {})
+        .get("statement_verification")
+      )
+      async with store.engine.connect() as connection:
+        await FinancialService(db_session=connection).verify_persisted_financial_data(
+          frames, proofs
+        )
     return progress.state["write_result"]
 
   async def persist(db):

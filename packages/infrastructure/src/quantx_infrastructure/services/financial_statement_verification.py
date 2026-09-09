@@ -8,6 +8,41 @@ from sqlalchemy import Numeric, select, tuple_
 from .market_data_ingestion_progress import evidence_hash
 
 
+def _content_hash(rows):
+  def canonical(value):
+    if isinstance(value, Decimal):
+      return "0" if value.is_zero() else str(value.normalize())
+    return str(value) if isinstance(value, date) else value
+
+  return evidence_hash(
+    [{name: canonical(value) for name, value in row.items()} for row in rows]
+  )
+
+
+async def read_statement_proof(db, model, rows, *, chunk_size):
+  """Recompute the committed proof without rewriting or accepting a newer value."""
+  digests = []
+  count = 0
+  for offset in range(0, len(rows), chunk_size):
+    chunk = rows[offset : offset + chunk_size]
+    fields = sorted(set().union(*(row.keys() for row in chunk)))
+    keys = [(row["stock_code"], row["report_date"]) for row in chunk]
+    query = (
+      select(*(model.__table__.c[name] for name in fields))
+      .where(tuple_(model.stock_code, model.report_date).in_(keys))
+      .order_by(model.stock_code, model.report_date)
+      .limit(len(chunk) + 1)
+    )
+    actual = [dict(row) for row in (await db.execute(query)).mappings()]
+    digests.append(_content_hash(actual))
+    count += len(actual)
+  return {
+    "schema_version": 1,
+    "rows_verified": count,
+    "mapped_content_sha256": evidence_hash(digests),
+  }
+
+
 async def verified_statement_upsert(db, model, rows, *, upsert, chunk_size):
   keys = [(row["stock_code"], row["report_date"]) for row in rows]
   if len(keys) != len(set(keys)):
@@ -50,16 +85,7 @@ async def verified_statement_upsert(db, model, rows, *, upsert, chunk_size):
     if written != len(chunk) or actual != expected:
       raise RuntimeError("financial statement persistence content mismatch")
 
-    def serializable(values):
-      return [
-        {
-          name: str(value) if isinstance(value, (Decimal, date)) else value
-          for name, value in row.items()
-        }
-        for row in values
-      ]
-
-    digests.append(evidence_hash(serializable(expected)))
+    digests.append(_content_hash(expected))
     count += len(actual)
   return {
     "schema_version": 1,

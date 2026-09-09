@@ -23,6 +23,7 @@ from quantx_infrastructure.services.financial_report_date import (
   normalize_financial_report_date,
 )
 from quantx_infrastructure.services.financial_statement_verification import (
+  read_statement_proof,
   verified_statement_upsert,
 )
 from quantx_infrastructure.services.market_data_ingestion_progress import evidence_hash
@@ -331,6 +332,32 @@ class FinancialService:
       "statement_rows_by_code": statement_rows_by_code,
       "metric_rows_by_code": dict(metric_result.get("metric_rows_by_code") or {}),
     }
+
+  async def verify_persisted_financial_data(self, financial_data_map, proofs):
+    if self.db_session is None:
+      raise RuntimeError("financial recovery verification requires a database session")
+    models = {
+      "Balance": FinancialBalanceSheet,
+      "Income": FinancialIncomeStatement,
+      "CashFlow": FinancialCashFlow,
+      "Capital": FinancialCapital,
+    }
+    if not isinstance(proofs, dict) or set(proofs) != set(models):
+      raise RuntimeError("financial recovery proof scope mismatch")
+    for table, model in models.items():
+      rows = []
+      for code, tables in financial_data_map.items():
+        frame = tables.get(table)
+        if frame is not None and not frame.empty:
+          rows.extend(self._records_for_table(code, table, frame))
+      actual = await read_statement_proof(
+        self.db_session,
+        model,
+        rows,
+        chunk_size=self.UPSERT_CHUNK_SIZE,
+      )
+      if actual != proofs[table]:
+        raise RuntimeError("financial recovery persisted content changed")
 
   async def save_batch_financial_data(
     self,
