@@ -104,9 +104,15 @@ class CollectionExecution:
     self.journal.begin_collection_execution(
       permit, device_id=self.device_id, now=self.clock()
     )
-    artifact = self.artifacts.seal(
-      permit.unit, collect(), reserve=self.reserve, release=self.release
-    )
+    records = iter(collect())
+    try:
+      artifact = self.artifacts.seal(
+        permit.unit, records, reserve=self.reserve, release=self.release
+      )
+    finally:
+      close = getattr(records, "close", None)
+      if callable(close):
+        close()
     self.journal.record_collection_artifact(
       permit_id=str(permit.permit_id), artifacts=self.artifacts, artifact=artifact
     )

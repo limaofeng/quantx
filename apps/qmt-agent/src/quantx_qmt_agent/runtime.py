@@ -66,6 +66,7 @@ from .historical_worker import (
 from .history_jobs import retained_history_bytes
 from .history_timing import record_history_timing
 from .journal import LocalJournal
+from .native_unit_ipc import NativeUnitIPCStuck, iter_native_unit
 from .whole_market_capture import (
   MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
   CapturedMarketEvent,
@@ -5987,6 +5988,30 @@ class AgentRuntime:
       if self._history_workload != "idle":
         self._history_workload = "idle"
         self._history_workload_reason = ""
+
+  def _collect_history_unit_sync(self, permit, payload):
+    """Executor-thread iterator; preserve child isolation and the shared native lock."""
+    if not self._historical_worker_lock.locked():
+      raise RuntimeError("history unit requires the shared native lock")
+    kind_reader = getattr(self.broker, "historical_market_data_worker_kind", None)
+    if not callable(kind_reader) or kind_reader() != XTDATA_HISTORICAL_WORKER_KIND:
+      raise ValueError("history unit requires the isolated XTData adapter")
+    self._ensure_historical_worker_sync(XTDATA_HISTORICAL_WORKER_KIND)
+    complete = False
+    try:
+      yield from iter_native_unit(
+        self._historical_worker_connection, permit, payload,
+        timeout=HISTORICAL_WORK_UNIT_TIMEOUT_SECONDS,
+        abort=lambda: self._shutdown_historical_worker_sync(graceful=False),
+      )
+      complete = True
+    except NativeUnitIPCStuck as exc:
+      raise _FatalMarketDataPreparationError(str(exc)) from exc
+    finally:
+      if not complete:
+        # A partial artifact or lost response is not evidence of native exit.
+        # Join/terminate before the executor can release its native lock.
+        self._shutdown_historical_worker_sync(graceful=False)
 
   def _ensure_historical_worker_sync(self, worker_kind: str) -> None:
     process = self._historical_worker_process

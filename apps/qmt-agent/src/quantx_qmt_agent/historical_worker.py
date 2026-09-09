@@ -35,6 +35,7 @@ from .broker import (
   validate_market_data_request,
 )
 from .history_timing import history_unit, record_history_timing
+from .native_unit_ipc import serve_native_unit
 
 XTDATA_HISTORICAL_WORKER_KIND = "xtdata"
 HISTORICAL_CHECKPOINT = object()
@@ -531,6 +532,11 @@ def run_historical_market_data_worker(
         return
       request_id = str(message.get("request_id") or "")
       try:
+        if message.get("type") == "collect_unit":
+          if active:
+            raise ValueError("native unit cannot overlap legacy preparation")
+          serve_native_unit(connection, broker, message)
+          continue
         if message.get("type") == "prepare":
           if request_id in active or len(active) >= 4:
             raise ValueError("historical worker request capacity or identity conflict")

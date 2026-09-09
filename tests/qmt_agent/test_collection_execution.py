@@ -438,3 +438,26 @@ async def test_server_started_without_local_receipt_never_recollects(execution):
   finish.assert_not_awaited()
   collect.assert_not_called()
   assert not runner.journal.collection_permit_received(permit)
+
+
+async def test_artifact_failure_closes_native_iterator_under_lock(execution):
+  runner, permit = execution
+  closed = []
+
+  def records():
+    try:
+      yield {"value": "x" * 2000}
+    finally:
+      assert runner.native_lock.locked()
+      closed.append(True)
+
+  with pytest.raises(ValueError, match="oversized"):
+    await runner.execute(
+      permit,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=AsyncMock(),
+      collect=records,
+    )
+  assert closed == [True]
