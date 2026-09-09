@@ -74,6 +74,11 @@ class LocalJournal:
           byte_count INTEGER NOT NULL CHECK(byte_count > 0),
           record_count INTEGER NOT NULL CHECK(record_count >= 0)
         );
+        CREATE TABLE IF NOT EXISTS history_collection_executions (
+          unit_id TEXT PRIMARY KEY,
+          permit_id TEXT NOT NULL UNIQUE,
+          started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS journal_metadata (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -231,6 +236,65 @@ class LocalJournal:
     with self.lock:
       self._refresh_size_cache()
     return existing is None
+
+  def collection_execution_started(self, permit: CollectionPermit) -> bool:
+    """Read original execution identity without renewing its start authorization."""
+    with self.lock:
+      row = self.connection.execute(
+        "SELECT e.permit_id,r.permit_sha256 FROM history_collection_executions e "
+        "JOIN history_collection_receipts r ON r.permit_id=e.permit_id "
+        "WHERE e.unit_id=?",
+        (permit.unit.unit_id,),
+      ).fetchone()
+    if row is None:
+      return False
+    if (
+      row["permit_id"] != str(permit.permit_id)
+      or row["permit_sha256"] != payload_hash(permit.model_dump(mode="json"))
+    ):
+      raise ValueError("collection execution belongs to another authorization")
+    return True
+
+  def begin_collection_execution(
+    self, permit: CollectionPermit, *, device_id: str, now: datetime | None = None
+  ) -> None:
+    """Persist uncertainty before native entry, after the server confirms START.
+
+    The caller must never invoke the native function after a duplicate marker.
+    Neither an expired grant nor a new owner clears an existing execution fact.
+    """
+    with self.lock, self.connection:
+      self.connection.execute("BEGIN IMMEDIATE")
+      row = self.connection.execute(
+        "SELECT permit_sha256 FROM history_collection_receipts WHERE permit_id=?",
+        (str(permit.permit_id),),
+      ).fetchone()
+      if row is None or row["permit_sha256"] != payload_hash(
+        permit.model_dump(mode="json")
+      ):
+        raise ValueError("collection execution requires its original permit receipt")
+      epoch = self.connection.execute(
+        "SELECT value FROM journal_metadata WHERE key=?",
+        ("history_owner_epoch:" + str(permit.device_id),),
+      ).fetchone()
+      permit.validate_start(
+        device_id=device_id,
+        unit=permit.unit,
+        now=now,
+        minimum_epoch=int(epoch["value"]) if epoch is not None else 0,
+      )
+      existing = self.connection.execute(
+        "SELECT permit_id FROM history_collection_executions WHERE unit_id=?",
+        (permit.unit.unit_id,),
+      ).fetchone()
+      if existing is not None:
+        raise ValueError("collection execution has already entered native work")
+      self.connection.execute(
+        "INSERT INTO history_collection_executions(unit_id,permit_id) VALUES (?,?)",
+        (permit.unit.unit_id, str(permit.permit_id)),
+      )
+    with self.lock:
+      self._refresh_size_cache()
 
   def record_collection_artifact(self, *, permit_id: str, artifacts, artifact) -> bool:
     """Bind verified bytes to a received permit, without claiming upload success."""
