@@ -17,6 +17,10 @@ from quantx_infrastructure.services.research_preparation import (
   reject_links,
   root,
 )
+from quantx_infrastructure.training_dataset_store import (
+  certification_values,
+  resolve_dataset_directory,
+)
 
 from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
   daily_market_data_sync_flow,
@@ -25,7 +29,6 @@ from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
 from quantx_worker.prefector.flows.stock_selection_training_flow import (
   _full_live_runtime,
   is_critical_trading_window,
-  resolve_dataset_directory,
 )
 
 
@@ -159,6 +162,15 @@ async def perform(job, directory):
     refreshed["download_result"] = result["download_result"]
     result = refreshed
   failed = job.kind in {"CERTIFY", "GPU"} and result.get("ready") is not True
+  if job.kind == "CERTIFY" and not failed:
+    version = job.request["dataset_version"]
+    if result.get("dataset_version") != version:
+      raise ValueError("Research certification returned another dataset identity")
+    values = await asyncio.to_thread(
+      certification_values, dataset_version=version, manifest_sha256=result["manifest_sha256"],
+    )
+    async with AsyncSessionLocal() as db:
+      await StockSelectionTrainingRepository(db).certify_dataset(values)
   await update_job(
     job.job_id,
     status="FAILED" if failed else "SUCCEEDED",

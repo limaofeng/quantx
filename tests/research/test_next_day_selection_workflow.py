@@ -366,9 +366,6 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
     (staging / "features" / "part.parquet").write_bytes(b"temporary")
     return panel, pd.DatetimeIndex(panel["event_date"].unique()), {"kind": "test"}
 
-  async def certify(values):
-    captured.update(values)
-
   monkeypatch.setattr(training, "_source_panel", source_panel)
   monkeypatch.setattr(
     dataset_module,
@@ -389,7 +386,6 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
       config_path,
       dataset_version="certified-v1",
       output_root=tmp_path / "datasets",
-      repository_certifier=certify,
     )
   )
   manifest = dataset_module.load_certified_dataset_manifest(output)
@@ -403,7 +399,10 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
   assert manifest["training_panel_sha256"] == file_sha256(
     output / "training-panel.parquet"
   )
-  assert tuple(captured) == dataset_module._CERTIFICATION_FIELDS
+  from quantx_infrastructure.training_dataset_store import certification_values
+
+  captured = certification_values(dataset_version="certified-v1", manifest_sha256=manifest["manifest_sha256"], root=tmp_path / "datasets")
+  assert captured["quality_summary"] == manifest["quality"]
   assert captured["manifest_sha256"] == manifest["manifest_sha256"]
   first_bytes = (output / "manifest.json").read_bytes()
   retried = asyncio.run(
@@ -411,7 +410,6 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
       config_path,
       dataset_version="certified-v1",
       output_root=tmp_path / "datasets",
-      repository_certifier=certify,
     )
   )
   assert retried == output
@@ -423,8 +421,7 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
         config_path,
         dataset_version="certified-v1",
         output_root=tmp_path / "datasets",
-        repository_certifier=certify,
-      )
+        )
     )
   assert (output / "manifest.json").read_bytes() == first_bytes
 
@@ -446,7 +443,7 @@ def test_failed_published_dataset_cleanup_accepts_matching_manifest_with_extras(
   assert not directory.exists()
 
 
-def test_dataset_certification_db_failure_removes_new_directory(
+def test_dataset_file_certification_never_imports_database_registration(
   monkeypatch, tmp_path: Path
 ) -> None:
   ready_root = tmp_path / "ready"
@@ -457,8 +454,14 @@ def test_dataset_certification_db_failure_removes_new_directory(
   async def source_panel(config, staging):
     return panel, pd.DatetimeIndex(panel["event_date"].unique()), {"kind": "test"}
 
-  async def fail_certification(values):
-    raise RuntimeError("database unavailable")
+  import builtins
+
+  original_import = builtins.__import__
+
+  def without_registration(name, *args, **kwargs):
+    if name in {"quantx_infrastructure.database.relational_connection", "quantx_infrastructure.repositories.stock_selection_training_repository"}:
+      raise AssertionError("Research attempted database registration")
+    return original_import(name, *args, **kwargs)
 
   monkeypatch.setattr(training, "_source_panel", source_panel)
   monkeypatch.setattr(
@@ -466,7 +469,7 @@ def test_dataset_certification_db_failure_removes_new_directory(
     "prepare_training_panel",
     lambda raw, calendar, config: (panel, {"complete": True, "coverage": 1.0}),
   )
-  monkeypatch.setattr(dataset_module, "_certify_repository", fail_certification)
+  monkeypatch.setattr(builtins, "__import__", without_registration)
   import yaml
 
   config_path = tmp_path / "config.yaml"
@@ -476,15 +479,14 @@ def test_dataset_certification_db_failure_removes_new_directory(
   config_payload.pop("coordinate_hash")
   config_payload.pop("environment_requirement_hash")
   yaml.safe_dump(config_payload, config_path.open("w", encoding="utf-8"))
-  with pytest.raises(RuntimeError, match="database unavailable"):
-    asyncio.run(
-      dataset_module.certify_next_day_selection_dataset(
-        config_path,
-        dataset_version="db-failure",
-        output_root=tmp_path / "datasets",
-      )
+  output = asyncio.run(
+    dataset_module.certify_next_day_selection_dataset(
+      config_path,
+      dataset_version="new-v1",
+      output_root=tmp_path / "datasets",
     )
-  assert not (tmp_path / "datasets" / "db-failure").exists()
+  )
+  assert dataset_module.load_certified_dataset_manifest(output)["status"] == "CERTIFIED"
 
 
 def test_isolated_request_file_rejects_non_finite_json(tmp_path: Path) -> None:

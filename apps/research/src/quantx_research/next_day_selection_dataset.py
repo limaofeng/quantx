@@ -7,7 +7,6 @@ resulting directory and never reaches back to a database or QMT source.
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import re
@@ -78,24 +77,6 @@ _MANIFEST_FIELDS = frozenset(
     "created_at",
     "manifest_sha256",
   }
-)
-_CERTIFICATION_FIELDS = (
-  "dataset_version",
-  "status",
-  "source_kind",
-  "source_reference",
-  "date_start",
-  "date_end",
-  "universe_spec",
-  "indicator_version",
-  "factor_set_version",
-  "factor_set_hash",
-  "label_version",
-  "manifest_sha256",
-  "sample_count",
-  "stock_count",
-  "trading_day_count",
-  "quality_summary",
 )
 
 
@@ -388,20 +369,6 @@ def _manifest_without_file_hash(
   return evidence
 
 
-async def _certify_repository(values: dict[str, Any]) -> Any:
-  """Persist the exact certification projection in the DB source of truth."""
-
-  from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
-  from quantx_infrastructure.repositories.stock_selection_training_repository import (
-    StockSelectionTrainingRepository,
-  )
-  async with AsyncSessionLocal() as session:
-    result = StockSelectionTrainingRepository(session).certify_dataset(values)
-    if inspect.isawaitable(result):
-      result = await result
-    return result
-
-
 def _remove_published_dataset_if_exact(directory: Path, manifest_sha256: str) -> None:
   """Remove only a newly published directory whose immutable evidence matches."""
 
@@ -430,7 +397,6 @@ async def certify_next_day_selection_dataset(
   dataset_version: str,
   market_data_archive: str | Path | None = None,
   output_root: str | Path | None = None,
-  repository_certifier: Any | None = None,
 ) -> Path:
   """Build and certify one immutable ready-to-train panel."""
 
@@ -500,28 +466,6 @@ async def certify_next_day_selection_dataset(
       manifest["manifest_sha256"] = fingerprint(manifest)
     write_json(staging / _MANIFEST_NAME, manifest)
 
-    values = {
-      "dataset_version": version,
-      "status": "CERTIFIED",
-      "source_kind": "VERIFIED_PANEL",
-      "source_reference": version,
-      "date_start": manifest["date_start"],
-      "date_end": manifest["date_end"],
-      "universe_spec": manifest["universe_spec"],
-      "indicator_version": INDICATOR_VERSION,
-      "factor_set_version": FACTOR_SET_VERSION,
-      "factor_set_hash": FACTOR_SET_HASH,
-      "label_version": LABEL_VERSION,
-      "manifest_sha256": manifest["manifest_sha256"],
-      "sample_count": quality["sample_count"],
-      "stock_count": quality["stock_count"],
-      "trading_day_count": quality["trading_day_count"],
-      "quality_summary": quality,
-    }
-    if tuple(values) != _CERTIFICATION_FIELDS:
-      raise AssertionError("认证仓储字段发生漂移")
-
-    certifier = repository_certifier or _certify_repository
     existing = False
     if directory.exists():
       _reject_symlink_components(directory)
@@ -540,7 +484,7 @@ async def certify_next_day_selection_dataset(
         ):
           raise ValueError("同 dataset_version 已存在不同证据，拒绝覆盖")
         # Verify every immutable file before treating the existing directory
-        # as an idempotent retry.  The DB certification is still reasserted.
+        # as an idempotent file-generation retry.
         verified_existing = load_certified_dataset_manifest(directory)
         if verified_existing.get("manifest_sha256") != manifest["manifest_sha256"]:
           raise ValueError("同版本认证数据集证据哈希不匹配")
@@ -550,9 +494,8 @@ async def certify_next_day_selection_dataset(
           raise ValueError("同 dataset_version 目录已有不同证据，拒绝覆盖")
 
     if not existing:
-      # Publish the fully materialized directory before the DB call.  This
-      # makes the directory move atomic and lets a failed DB transaction clean
-      # up only the exact evidence just published by this invocation.
+      # Publish only the fully materialized directory. Registration or transfer
+      # failure in the supervisor must not delete these reusable artifacts.
       _reject_symlink_components(staging)
       _reject_symlink_components(directory)
       _reject_symlink_components(directory.parent)
@@ -565,25 +508,15 @@ async def certify_next_day_selection_dataset(
         _remove_published_dataset_if_exact(directory, manifest["manifest_sha256"])
         raise
 
-    try:
-      result = certifier(values)
-      if inspect.isawaitable(result):
-        await result
-    except BaseException:
-      if not existing:
-        _remove_published_dataset_if_exact(directory, manifest["manifest_sha256"])
-      raise
-
-    # A successful DB certification must leave a readable immutable directory.
+    # Filesystem publication is complete; the supervisor owns DB registration.
     verified_final = load_certified_dataset_manifest(directory)
     if verified_final.get("manifest_sha256") != manifest["manifest_sha256"]:
-      raise ValueError("DB 认证成功后目录证据不可读或哈希不匹配")
+      raise ValueError("认证目录证据不可读或哈希不匹配")
     return directory
-  except BaseException:
-    # Do not leave partial dataset artifacts on failure.  Existing certified
-    # evidence is never touched.
+  finally:
+    # Clean scratch data on failure and on idempotent reuse alike. Published
+    # immutable evidence remains available for supervisor registration retries.
     _safe_remove_tree(staging)
-    raise
 
 
 def load_certified_dataset_manifest(directory: str | Path) -> dict[str, Any]:

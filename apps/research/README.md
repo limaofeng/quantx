@@ -136,20 +136,24 @@ attempt 收敛为 `failed`，硬终止留下的 stale lease 则由下一次恢�
 `spec_hash`、`coordinate_hash` 和 `environment_requirement_hash` 必须来自已接受的
 数据库锁定请求，Research 不会从本地配置重新计算它们：
 
+`certify` 生成完整、不可变的数据集文件。研究准备任务的监督端读取并核验版本、manifest 与文件哈希后，才登记为控制面可用的数据集；登记失败时保留文件供重试。Research 文件生成入口不再接受数据库登记回调。
+
+以下为 Windows 独立训练环境示例，Conda 安装路径替换为实际部署值；macOS 开发 Research 使用 `quantx` 环境。
+
 ```powershell
-uv run --frozen quantx-research certify-next-day-selection-dataset `
+conda run -n quantx-train quantx-research certify-next-day-selection-dataset `
   --config apps/research/configs/next_day_selection_v1.yaml `
   --dataset-version next-day-selection-v1
 
 .\ops\windows\build-lightgbm-opencl-wheel.ps1 `
   -SourceDirectory F:\src\LightGBM `
-  -OutputDirectory F:\src\LightGBM\dist -Python .venv\Scripts\python.exe
+  -OutputDirectory F:\src\LightGBM\dist -Python C:\Miniconda3\envs\quantx-train\python.exe
 
-uv run --frozen quantx-research qualify-lightgbm-gpu `
+conda run -n quantx-train quantx-research qualify-lightgbm-gpu `
   --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
   --build-evidence F:\src\LightGBM\dist\lightgbm-opencl-build-evidence.json
 
-uv run --frozen quantx-research train-next-day-selection `
+conda run -n quantx-train quantx-research train-next-day-selection `
   --config apps/research/configs/next_day_selection_v1.yaml `
   --run-kind DEVELOPMENT `
   --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
@@ -159,7 +163,7 @@ uv run --frozen quantx-research train-next-day-selection `
   --coordinate-hash <64-lowercase-hex> `
   --environment-requirement-hash <64-lowercase-hex>
 
-uv run --frozen quantx-research train-next-day-selection `
+conda run -n quantx-train quantx-research train-next-day-selection `
   --config apps/research/configs/next_day_selection_v1.yaml `
   --run-kind FINAL_EVALUATION `
   --dataset-dir .runtime\research-datasets\next-day-selection-v1 `

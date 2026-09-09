@@ -10,8 +10,63 @@ from types import SimpleNamespace
 
 import pytest
 
+dataset_store = import_module("quantx_infrastructure.training_dataset_store")
+
 flow_module = import_module("quantx_worker.prefector.flows.stock_selection_training_flow")
 research_job = import_module("quantx_research.next_day_selection_job")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "database", "file"])
+async def test_supervisor_registers_only_verified_certification_and_keeps_files(monkeypatch, tmp_path, fault):
+  from contextlib import asynccontextmanager
+
+  from quantx_infrastructure.training_dataset_store import certification_values
+  from quantx_worker.prefector.flows import research_preparation_flow as preparation
+
+  root = tmp_path.resolve()
+  _dataset(root)
+  manifest = json.loads((root / "dataset-v1" / "manifest.json").read_text())
+  registered, updates = [], []
+
+  @asynccontextmanager
+  async def session():
+    yield object()
+
+  class Repository:
+    def __init__(self, db):
+      pass
+
+    async def certify_dataset(self, values):
+      registered.append(values)
+      if fault == "database":
+        raise RuntimeError("database unavailable")
+
+  async def research(job, directory):
+    return {"ready": True, "dataset_version": "dataset-v1", "manifest_sha256": manifest["manifest_sha256"]}
+
+  async def update(job_id, **values):
+    updates.append(values)
+
+  monkeypatch.setattr(preparation, "AsyncSessionLocal", session)
+  monkeypatch.setattr(preparation, "StockSelectionTrainingRepository", Repository)
+  monkeypatch.setattr(preparation, "run_research", research)
+  monkeypatch.setattr(preparation, "update_job", update)
+  monkeypatch.setattr(preparation, "certification_values", lambda **kwargs: certification_values(root=root, **kwargs))
+  if fault == "file":
+    (root / "dataset-v1" / "training-panel.parquet").write_bytes(b"tampered")
+  job = SimpleNamespace(job_id="job-1", kind="CERTIFY", request={"dataset_version": "dataset-v1"})
+  if fault:
+    with pytest.raises((RuntimeError, ValueError)):
+      await preparation.perform(job, root)
+    assert not any(update.get("status") == "SUCCEEDED" for update in updates)
+  else:
+    await preparation.perform(job, root)
+    assert updates[-1]["status"] == "SUCCEEDED"
+  assert len(registered) == (0 if fault == "file" else 1)
+  if registered:
+    assert registered[0]["manifest_sha256"] == manifest["manifest_sha256"]
+  assert (root / "dataset-v1" / "manifest.json").is_file()
 
 
 class TradingDates:
@@ -65,7 +120,7 @@ def _dataset(root: Path) -> tuple[dict, dict]:
     },
     "quality": quality_payload,
   }
-  evidence["manifest_sha256"] = flow_module._manifest_evidence_sha256(evidence)
+  evidence["manifest_sha256"] = dataset_store._manifest_evidence_sha256(evidence)
   manifest.write_text(json.dumps(evidence), encoding="utf-8")
   dataset = {
     "dataset_version": "dataset-v1",

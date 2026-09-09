@@ -5,6 +5,8 @@
 
 目前提供本地配置校验、开发控制面只读预检及已退出执行的制品恢复回传入口。尚未迁移 Worker 调度、启用训练部署或完成 Windows/GPU 验收，不能将预检通过视为服务 ready。
 
+数据认证已拆分为 Research 生成不可变文件、监督端核验并登记两步。公共目录校验与认证字段投影位于 `quantx_infrastructure.training_dataset_store`；当前准备任务仍由 Worker 监督，后续 Trainer 复用同一验证边界。数据库登记失败保留生成文件，文件校验失败则拒绝登记。
+
 ## Conda 环境安装
 
 Windows 独立训练代码目录中执行：
