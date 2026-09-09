@@ -36,6 +36,7 @@ async def test_retained_request_to_native_file_and_http_upload(
   tmp_path, lose_finish, lose_complete
 ):
   runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._history_resource_block_reason = lambda: ""
   runtime.configuration = SimpleNamespace(
     device_id=str(uuid4()), api_url="https://history.test"
   )
@@ -139,6 +140,13 @@ async def test_retained_request_to_native_file_and_http_upload(
     try:
       await runtime._handle_history_work(request)
       grant = HistoryGrant(permit=permit, state="ISSUED", unit_payload=unit_payload)
+      runtime._history_resource_block_reason = lambda: "TRADE_COMMAND_PENDING"
+      with pytest.raises(RuntimeError, match="paused before START"):
+        await runtime._handle_history_work(grant)
+      assert not events
+      assert not runtime.journal.collection_execution_started(permit)
+      assert runtime._history_workload_reason == "TRADE_COMMAND_PENDING"
+      runtime._history_resource_block_reason = lambda: ""
       if lose_finish:
         with pytest.raises(httpx.ReadError):
           await runtime._handle_history_work(grant)
@@ -217,6 +225,7 @@ async def test_failed_native_is_confirmed_or_recovered_without_history_delivery(
   from quantx_qmt_agent.history_pipeline import HistoryPipeline
 
   runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._history_resource_block_reason = lambda: ""
   runtime.configuration = SimpleNamespace(
     device_id=str(uuid4()), api_url="https://history.test"
   )

@@ -322,6 +322,9 @@ async def test_account_wait_keeps_history_transport_and_workload_guards(
 
   try:
     assert runtime._history_qos_block_reason() == reason
+    assert runtime._history_resource_block_reason() == (
+      "" if blocked_by in {"control", "heartbeat"} else reason
+    )
   finally:
     if blocked_by == "snapshot":
       runtime._full_snapshot_lock.release()

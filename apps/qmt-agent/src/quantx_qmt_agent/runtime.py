@@ -6240,6 +6240,23 @@ class AgentRuntime:
   def _history_qos_block_reason(self) -> str:
     if not getattr(self, "_control_session_authenticated", False):
       return "CONTROL_CONNECTION_UNHEALTHY"
+    reason = self._history_resource_block_reason()
+    if reason:
+      return reason
+    now = time.monotonic()
+    heartbeat_sent = getattr(self, "_heartbeat_sent_monotonic", {})
+    if heartbeat_sent and now - min(heartbeat_sent.values()) > (
+      HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS
+    ):
+      return "CONTROL_HEARTBEAT_DELAYED"
+    if getattr(self, "_control_heartbeat_ack_latency_seconds", 0.0) > (
+      HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS
+    ):
+      return "CONTROL_HEARTBEAT_DELAYED"
+    return ""
+
+  def _history_resource_block_reason(self) -> str:
+    """Local trading/realtime protection shared by the independent history path."""
     if str(getattr(self, "_market_stream_status", "OFFLINE")).upper() != "READY":
       return "MARKET_STREAM_NOT_READY"
     native_reset = getattr(self, "_whole_market_native_reset", None)
@@ -6303,15 +6320,6 @@ class AgentRuntime:
     if int(journal_stats.get("pending_reports") or 0) > 0:
       return "BROKER_REPORT_PENDING"
     now = time.monotonic()
-    heartbeat_sent = getattr(self, "_heartbeat_sent_monotonic", {})
-    if heartbeat_sent and now - min(heartbeat_sent.values()) > (
-      HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS
-    ):
-      return "CONTROL_HEARTBEAT_DELAYED"
-    if getattr(self, "_control_heartbeat_ack_latency_seconds", 0.0) > (
-      HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS
-    ):
-      return "CONTROL_HEARTBEAT_DELAYED"
     pending_market_ack = getattr(
       self,
       "_market_stream_pending_ack_monotonic",

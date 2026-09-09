@@ -307,7 +307,14 @@ class HistoryPipeline:
       budget = await join_history_thread(self._budget)
       if budget.max_bytes <= 0:
         raise ValueError("history spool capacity unavailable before START")
+      reason = runtime._history_resource_block_reason()
+      if reason:
+        runtime._history_workload = "paused"
+        runtime._history_workload_reason = reason
+        raise RuntimeError("history collection paused before START: " + reason)
       await self.receipts.start(permit)
+      runtime._history_workload = "running"
+      runtime._history_workload_reason = ""
 
     execution = CollectionExecution(
       device_id=runtime.configuration.device_id,
@@ -332,3 +339,7 @@ class HistoryPipeline:
       )
     except CollectionFailed:
       self.active.pop(message.permit.unit.request_id, None)
+    finally:
+      if getattr(runtime, "_history_workload", "") == "running":
+        runtime._history_workload = "idle"
+        runtime._history_workload_reason = ""
