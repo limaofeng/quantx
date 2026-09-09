@@ -47,7 +47,7 @@ def buckets():
   }
 
 
-async def publish_snapshot(db, stamp, *, total=1000, free=1000):
+async def publish_snapshot(db, stamp, *, total=1000, free=1000, orders=None):
   payload = dict(
     snapshot_id=stamp.isoformat(),
     source_event_at=stamp.isoformat(),
@@ -56,7 +56,7 @@ async def publish_snapshot(db, stamp, *, total=1000, free=1000):
     positions_by_account={
       "account": [dict(stock_code=CODE, volume=total, can_use_volume=free)]
     },
-    orders=[],
+    orders=orders or [],
     trades=[],
     section_completeness_by_account={
       "account": dict.fromkeys(("account", "positions", "orders", "trades"), True)
@@ -169,12 +169,12 @@ async def read(db):
   )
 
 
-async def add_buy(db):
+async def add_buy(db, *, owner_id="source", requested_volume=100, status="FILLED", orders=None):
   at = NOW - timedelta(seconds=10)
   base = dict(
     account_id="account",
     owner_type="T_ASSISTANT_EXECUTION",
-    owner_id="source",
+    owner_id=owner_id,
     environment="LIVE",
     broker_order_id="101",
     bucket="swing",
@@ -192,8 +192,8 @@ async def add_buy(db):
       side="BUY",
       order_type="LIMIT",
       limit_price="10",
-      volume=100,
-      status="FILLED",
+      volume=requested_volume,
+      status=status,
       **base,
     )
   )
@@ -234,7 +234,7 @@ async def add_buy(db):
       client_order_id="client",
       broker_order_id="101",
       owner_type="T_ASSISTANT_EXECUTION",
-      owner_id="source",
+      owner_id=owner_id,
       environment="LIVE",
       event_type="TRADE",
       application_status="APPLIED",
@@ -251,7 +251,7 @@ async def add_buy(db):
       applied_at=NOW,
     )
   )
-  await publish_snapshot(db, NOW, total=1100)
+  await publish_snapshot(db, NOW, total=1100, orders=orders)
 
 
 async def test_seed_is_explicit_append_only_idempotent_and_reusable_after_source_stops(
