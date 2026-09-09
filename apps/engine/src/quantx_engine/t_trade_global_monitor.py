@@ -497,6 +497,27 @@ class TTradeGlobalMonitorService:
       await self._record_reconcile_result(config.id, errors)
       return await self.get_monitor(account_id)
 
+    if str(config.mode).lower() == "live":
+      try:
+        draining = await self._legacy_config_is_draining(config)
+      except Exception as exc:
+        draining = True
+        errors.append(f"旧做 T 排空标记读取失败: {type(exc).__name__}")
+      if draining:
+        errors.append("LEGACY_T_ENTRY_DRAINING：旧做 T 已停止新入场，保留原执行及退出义务")
+        run_ids = {config.strategy_run_id} if config.strategy_run_id else set()
+        try:
+          run_ids.update(await self.session_service.list_active_account_run_ids(account_id))
+        except Exception as exc:
+          errors.append(f"排空实例扫描失败: {type(exc).__name__}")
+        for run_id in sorted(run_ids):
+          try:
+            await self.session_service.block_account_strategy_entries(run_id, reason="LEGACY_T_ENTRY_DRAINING")
+          except Exception as exc:
+            errors.append(f"排空实例入场失效失败: {type(exc).__name__}")
+        await self._record_reconcile_result(config.id, errors)
+        return await self.get_monitor(account_id)
+
     sessions: List[Dict[str, Any]] = []
     coordination_blocked = False
     try:
@@ -917,6 +938,18 @@ class TTradeGlobalMonitorService:
     async for db in get_async_db():
       return await TTradeGlobalConfigRepository(db).find_by_account(account_id)
     return None
+
+  async def _legacy_config_is_draining(self, config) -> bool:
+    from quantx_infrastructure.services.t_legacy_drain_guard import (
+      legacy_t_config_is_draining,
+    )
+
+    async for db in get_async_db():
+      async with db.begin():
+        return await legacy_t_config_is_draining(
+          db, account_id=config.account_id, config_id=config.id
+        )
+    raise RuntimeError("旧做 T 排空标记数据库会话不可用")
 
   async def _load_instrument_names(self, stock_codes: List[str]) -> Dict[str, str]:
     """Load missing display names from the local instrument master in one query."""

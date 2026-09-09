@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_engine.t_assistant_legacy_drain import begin_legacy_t_drain
@@ -18,6 +19,7 @@ from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.t_legacy_drain_guard import (
+  legacy_t_config_is_draining,
   legacy_t_entry_is_draining,
 )
 from sqlalchemy import ARRAY, JSON, MetaData, insert
@@ -106,6 +108,145 @@ async def seed_legacy_drain(monkeypatch, damage=None):
       now=now,
     )
   return engine, sessions, now, digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["bound", "unbound", "corrupt"])
+async def test_durable_drain_prevents_monitor_recreation_without_sessions(
+  monkeypatch, state
+):
+  from quantx_engine import t_trade_global_monitor as module
+
+  engine, sessions, now, digest = await seed_legacy_drain(monkeypatch)
+  try:
+    async with sessions() as db, db.begin():
+      await begin_legacy_t_drain(
+        db,
+        config_id="head",
+        run_id="plan-1",
+        expected_head_version=1,
+        inventory_operation_id="inventory",
+        expected_inventory_hash=digest,
+        actor_id="user-1",
+        now=now,
+      )
+      head = await db.get(TTradeGlobalConfig, "head")
+      if state == "unbound":
+        head.strategy_run_id = None
+      if state == "corrupt":
+        marker = await db.get(TTradeRolloutEvent, "legacy-t-drain:plan-1")
+        marker.details = {"run_id": "plan-1", "request": {}}
+
+    async def database():
+      async with sessions() as db:
+        yield db
+
+    monkeypatch.setattr(module, "get_async_db", database)
+    service = module.TTradeGlobalMonitorService()
+    service._load_config = AsyncMock(return_value=head)
+    service.position_service.read_validated_snapshot_and_positions = AsyncMock(
+      return_value=({}, [])
+    )
+    service.session_service.list_active_account_run_ids = AsyncMock(return_value=[])
+    service.session_service.get_run_sessions = AsyncMock(return_value=[])
+    service.session_service.block_account_strategy_entries = AsyncMock()
+    service.session_service.start_account_strategy = AsyncMock()
+    service.session_service.stop_account_strategy = AsyncMock()
+    service._record_reconcile_result = AsyncMock()
+    service.get_monitor = AsyncMock(return_value={})
+    await service.reconcile_account("account-1")
+    service.session_service.start_account_strategy.assert_not_awaited()
+    service.session_service.stop_account_strategy.assert_not_awaited()
+    service.session_service.get_run_sessions.assert_not_awaited()
+    assert head.strategy_run_id == (None if state == "unbound" else "plan-1")
+    assert any(
+      "LEGACY_T_ENTRY_DRAINING" in error
+      for error in service._record_reconcile_result.await_args.args[1]
+    )
+    if state != "unbound":
+      service.session_service.block_account_strategy_entries.assert_awaited_once_with(
+        "plan-1", reason="LEGACY_T_ENTRY_DRAINING"
+      )
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_strategy", [False, True])
+async def test_replacement_identity_cannot_bypass_account_legacy_fence(
+  monkeypatch, other_strategy
+):
+  engine, sessions, now, digest = await seed_legacy_drain(monkeypatch)
+  try:
+    async with sessions() as db, db.begin():
+      await begin_legacy_t_drain(
+        db,
+        config_id="head",
+        run_id="plan-1",
+        expected_head_version=1,
+        inventory_operation_id="inventory",
+        expected_inventory_hash=digest,
+        actor_id="user-1",
+        now=now,
+      )
+      # Simulate a racing recreation with a different durable run identity.
+      metadata = MetaData()
+      table = StrategyRun.__table__.to_metadata(metadata)
+      for column in table.columns:
+        if isinstance(column.type, ARRAY):
+          column.type = JSON()
+      await db.execute(
+        insert(table).values(
+          id="replacement",
+          name="replacement",
+          strategy_id=1,
+          parameters={"account_id": "account-1"},
+          mode=StrategyRunMode.LIVE,
+          status=StrategyRunStatus.RUNNING,
+        )
+      )
+      if other_strategy:
+        (await db.get(Strategy, 1)).class_name = "UnrelatedStrategy"
+        await db.flush()
+      assert await legacy_t_config_is_draining(
+        db, account_id="account-1", config_id="head"
+      )
+      assert await legacy_t_entry_is_draining(
+        db, account_id="account-1", run_id="replacement", lock_head=True
+      ) is (not other_strategy)
+      if not other_strategy:
+        from decimal import Decimal
+
+        from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+        from quantx_infrastructure.services.trade_command_service import (
+          AgentUnavailableError,
+          TradeCommandService,
+        )
+
+        service = TradeCommandService(db)
+        service._require_live_authorization = AsyncMock(
+          side_effect=AssertionError("must block before device authorization")
+        )
+        with pytest.raises(AgentUnavailableError, match="LEGACY_T_ENTRY_DRAINING"):
+          await service.enqueue_order_for_account(
+            account_id="account-1",
+            instrument_code="600000.SH",
+            side="BUY",
+            order_type="FIX_PRICE",
+            limit_price=Decimal("10"),
+            volume=100,
+            execution_ref=ExecutionOwnerRef("STRATEGY_RUN", "replacement"),
+            environment=ExecutionEnvironment.LIVE,
+            idempotency_key="replacement-buy",
+            strategy_run_id="replacement",
+            strategy_order_id="new-order",
+            intent_id="new-intent",
+            batch_id="new-batch",
+            t_trade_role="",
+          )
+        service._require_live_authorization.assert_not_awaited()
+  finally:
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
