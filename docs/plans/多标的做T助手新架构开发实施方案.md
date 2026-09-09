@@ -555,16 +555,24 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   故障回滚、重启重试、scope/时间异常与 RECONCILE_REQUIRED 保持阻断已覆盖。
 - 0060 补齐 pending/correlation 的 T owner 身份形状：必须有 intent，不能伪造 StrategyRun
   或 strategy order。保留旧 owner 约束，无数据重写。业务库尚未应用此迁移。
+- 新 T schema 2 确认信封已绑定原 execution、候选/policy/schema 和退出模板/保护量；
+  已消费确认→累计真实成交见证→精确退出授权的隔离链通过。来源已 STOPPED 仍可保护退出；
+  source/schema/candidate 漂移拒绝。legacy 原 schema 1 信封维持其原义务，不对新 owner 回退。
+- 退出授权派生、账户锁顺序、PAPER receipt、API 授权四文件 **73 项通过**；API SQLite/假设备
+  fixture 显式模拟 Windows 平台判据，解决原用例在 macOS 先被平台门阻断的问题，生产
+  平台门及真实交易开关未修改。此范围没有进行真实交易或完整 LIVE 入场整链验证。
 - 验证：Conda `quantx` 下 live-drain、exit/entry command dispatch、execution owner persistence
   四文件 **72 项通过**，JUnit `.codex_screenshots/p6-live-drain-unit.xml`；
   `QUANTX_RUN_MIGRATION_GATE=true` 下 `test_t_assistant_order_identity_migration.py`
   **1 项通过**，真实 PostgreSQL 随机 schema、旧约束→0060、合法/非法 owner 形状、事务
   回滚及 schema 删除确认。此证据不替代完整迁移链、生产并发或实盘验收。
-- 剩余开发顺序：LIVE 分配意图 schema/事务守卫→独立 T 设备确认绑定→LIVE 组合事实读取、
+- 剩余开发顺序：LIVE 分配意图 schema/事务守卫→独立 T 确认预览/消费接线→LIVE 组合事实读取、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor→P7 新故障/性能→P8。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、服务启停、E2E 或真实订单。
+  排空基础提交 `6ec95815`；模型草案 `9062cd8f`；退出授权基础与
+  `feat(trading): bind T execution confirmations to exit protection` 同提交。
 
 交接基线（P3 收尾时）：**P0—P3 已完成；P2/P3 代码、隔离迁移、实际业务库 0050 和清空功能数据后的 Windows 运行验收已完成。当批止于 P3。当前 P4 进展见本节末检查点。** P1 原子切换后，Agent 控制协议为 `1.2`；
 `ExecutionOwnerRef` 已贯穿 intent、pending、correlation、outbox、runtime event 和 ExitPlan

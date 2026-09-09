@@ -199,6 +199,15 @@ def _plan_state(*, auto_exit_authorized: bool = False) -> dict:
 
 @pytest.fixture
 async def authorization_database(monkeypatch, request):
+  from quantx_contracts import runtime_environment
+
+  runtime_gate = runtime_environment.live_runtime_allowed
+  # SQLite + fake device fixture models Windows command gates on every test host.
+  # Production code and its platform policy remain unchanged.
+  monkeypatch.setattr(
+    runtime_environment, "live_runtime_allowed",
+    lambda environment: runtime_gate(environment, platform="win32"),
+  )
   execution_environment = (
     "PAPER"
     if getattr(request.node, "originalname", request.node.name)

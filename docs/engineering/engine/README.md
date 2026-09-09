@@ -46,6 +46,10 @@ P6 隔离开发提供 `T_ASSISTANT_DRAIN_ENTRY` Engine 命令（`execution_id`�
 STOPPED 或 successor READY。scope、时间或命令关联异常使整帧回滚并报错。
 该命令尚未接 Web，不能用于 legacy StrategyRun；新 T LIVE 入场 handler 仍未开放。
 
+P6 的独立源退出确认支持 schema 2，精确绑定 execution、候选及退出范围。成交后公共
+授权派生和账户锁支持该源，终态 source 不影响退出；PAPER 仍只锁自身模拟账户。
+设备预览/确认、LIVE 分配和新 owner 入场回报 handler 尚需接线，不能据此发布实盘执行。
+
 `TAssistantPaperEntryRuntime` 使用 point-in-time 组合快照完成 allocation，再按公共 admission
 rank 逐项复核最新 Tick、Sizer、Risk 和 Capacity；分配、准入和订单在同一事务提交。
 原始 TTL 维护单独提交，不依赖新鲜行情，也不被后续派单失败回滚。PAPER 事实由隔离账本和

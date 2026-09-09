@@ -95,6 +95,14 @@ T+1 置换不得是系统隐式默认行为。卖出意图会携带
 确认上限，但不得延长授权有效期。模板变化、超量成交、授权过期或外部导入的
 入场没有原确认信封时，退出计划必须等待单独人工授权。
 
+独立 `T_ASSISTANT_EXECUTION` 的退出确认信封使用 schema 2，绑定 source execution ref、
+LIVE 环境、candidate id/fingerprint、policy/feature schema 和精确退出模板/保护量，不携带
+虚构的 `strategy_run_id`。source execution 的不可变身份关联冻结配置；确认后的重新分配
+不得替换这些身份。legacy StrategyRun 的 schema 1 原确认仅按其原身份继续验证，服务端
+根据真实 owner 选择格式，不对新 owner 回退到旧信封；P7 排空收尾时再清理 legacy 路径。
+源执行停止不撤销已成交计划的合法保护；LIVE 退出仍竞争同一账户持仓锁，不能借用 PAPER
+账本或复制保护义务。以上授权基础已隔离验证，尚不表示新 owner 的 LIVE 入场已开放。
+
 做 T 保护退出固定使用 `TExitOrderPolicy.v1`：只允许 `FIX_PRICE`，以 BID1 为
 参考，最多向下 30bps，并受价格 tick、跌停价和适用的价格笼子下界约束。单笔
 委托 30 秒、总退出窗口 90 秒，最多 replace 2 次；撤单未确认或订单结果未知时
