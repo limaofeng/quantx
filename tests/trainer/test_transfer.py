@@ -5,7 +5,7 @@ import socket
 import threading
 from dataclasses import replace
 from pathlib import PurePosixPath
-from time import monotonic
+from time import monotonic, sleep
 
 import paramiko
 import pytest
@@ -200,6 +200,18 @@ def test_authentication_failure_is_redacted(server):
     with open_store(replace(config, username="wrong-private-identity")):
       pytest.fail("unapproved identity accepted")
   assert authentications == ["wrong-private-identity"]
+
+
+def test_active_transfer_cancellation_closes_the_authenticated_channel(server):
+  config, root, authentications = server
+  cancel = threading.Event()
+  with open_store(config, cancel=cancel) as store:
+    channel = store.datasets.client.get_channel()
+    cancel.set()
+    deadline = monotonic() + 2
+    while not channel.closed and monotonic() < deadline:
+      sleep(0.01)
+    assert channel.closed
 
 
 @pytest.mark.parametrize("change", ["unknown", "rotated"])

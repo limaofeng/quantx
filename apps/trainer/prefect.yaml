@@ -1,0 +1,28 @@
+name: quantx-trainer
+deployments:
+  - name: stock-selection-training-dispatch
+    entrypoint: apps/trainer/src/quantx_trainer/training_flow.py:stock_selection_training_dispatch_flow
+    parameters:
+      config_path: "{{ $QUANTX_TRAINER_CONFIG }}"
+    work_pool:
+      name: quantx-train-pool
+      work_queue_name: default
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+    schedules:
+      - cron: '* * * * *'
+        timezone: Asia/Shanghai
+  - name: stock-selection-training-capability
+    entrypoint: apps/trainer/src/quantx_trainer/training_flow.py:stock_selection_training_capability_flow
+    parameters:
+      config_path: "{{ $QUANTX_TRAINER_CONFIG }}"
+    work_pool:
+      name: quantx-train-pool
+      work_queue_name: default
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+    schedules:
+      - cron: '* * * * *'
+        timezone: Asia/Shanghai

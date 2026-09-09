@@ -108,11 +108,26 @@ class TrainingStore:
 
 
 @contextmanager
-def open_store(config: TransferConfig):
+def open_store(config: TransferConfig, *, cancel: threading.Event | None = None):
   """Use one dedicated key and known-hosts file; never ambient SSH credentials."""
   client = paramiko.SSHClient()
   channel = None
+  closed = threading.Event()
+
+  def watch_cancel():
+    assert cancel is not None
+    while not closed.wait(0.1):
+      if cancel.is_set():
+        with suppress(Exception):
+          client.close()
+
+  watcher = None
+  if cancel is not None:
+    watcher = threading.Thread(target=watch_cancel, daemon=True)
+    watcher.start()
   try:
+    if cancel is not None and cancel.is_set():
+      raise BundleTransferError("TRAINER_SFTP_CANCELLED")
     reject_links(config.known_hosts)
     reject_links(config.private_key)
     client.load_host_keys(str(config.known_hosts))
@@ -148,11 +163,14 @@ def open_store(config: TransferConfig):
   except Exception:
     raise BundleTransferError("TRAINER_SFTP_CHANNEL_FAILED") from None
   finally:
+    closed.set()
     with suppress(Exception):
       if channel is not None:
         channel.close()
     with suppress(Exception):
       client.close()
+    if watcher is not None:
+      watcher.join(timeout=1)
 
 
 def _open_sftp(client, timeout_seconds: int):

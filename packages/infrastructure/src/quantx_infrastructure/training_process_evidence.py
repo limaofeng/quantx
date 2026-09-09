@@ -175,3 +175,18 @@ def inspect_execution(
     return _identity_state(value)
   except Exception:
     return "UNKNOWN"
+
+
+def local_success_recorded(path: Path, *, run_id: str, owner: str, request: Path) -> bool:
+  """Current supervisor may publish its recorded, successfully exited child."""
+  try:
+    value = _read(path, run_id, owner, request)
+    supervisor = value.get("supervisor")
+    return (
+      isinstance(supervisor, dict) and supervisor.get("pid") == os.getpid()
+      and _identity_state(supervisor) == "LIVE"
+      and value["state"] == "EXITED" and type(value.get("returncode")) is int
+      and value["returncode"] == 0
+    )
+  except Exception:
+    return False

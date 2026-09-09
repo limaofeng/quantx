@@ -11,24 +11,20 @@ import re
 import subprocess
 import sys
 import uuid
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any, Mapping
-from zoneinfo import ZoneInfo
 
 from prefect import flow, get_run_logger
-from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.repositories.stock_selection_training_repository import (
   StockSelectionTrainingRepository,
   TrainingStateConflict,
 )
-from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 from quantx_infrastructure.training_dataset_store import (
   _is_link_or_junction,
   _json_read,
   _reject_symlink_components,
-  _repo_root,
   _sha256_file,
   _to_json,
   _value,
@@ -45,9 +41,13 @@ from quantx_infrastructure.training_result import (
   safe_public_details as _safe_public_details,
 )
 
-SHANGHAI = ZoneInfo("Asia/Shanghai")
-CRITICAL_WINDOW_START = time(9, 15)
-CRITICAL_WINDOW_END = time(16, 30)
+from quantx_trainer.publication import (
+  PublicationError,
+  publish_generated_result,
+  publish_result,
+)
+from quantx_trainer.runtime import current_config, training_session
+
 RESEARCH_DATASETS_ENV = "QUANTX_RESEARCH_DATASETS_ROOT"
 RESEARCH_RUNS_ENV = "QUANTX_RESEARCH_RUNS_ROOT"
 CONTROL_DIRECTORY_NAME = "stock-selection-training-control"
@@ -56,31 +56,24 @@ _SAFE_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$")
 _processes: dict[str, Any] = {}
 
 
-def research_runs_root() -> Path:
-  """Return the private Research artifact root used by isolated jobs."""
+def _repo_root() -> Path:
+  return current_config().code_root
 
-  configured = os.environ.get(RESEARCH_RUNS_ENV, "").strip()
-  root = Path(configured).expanduser() if configured else _repo_root() / ".runtime" / "research-runs"
-  return root.absolute()
+
+def research_datasets_root() -> Path:
+  return current_config().state_root / "datasets"
+
+
+def research_runs_root() -> Path:
+  return current_config().state_root / "runs"
 
 
 def control_root() -> Path:
-  return (_repo_root() / ".runtime" / CONTROL_DIRECTORY_NAME).absolute()
+  return current_config().state_root / "control"
 
 
 def _now() -> datetime:
   return datetime.now(timezone.utc)
-
-
-def _aware_shanghai(value: datetime | None) -> datetime:
-  current = value or datetime.now(timezone.utc)
-  if current.tzinfo is None:
-    current = current.replace(tzinfo=timezone.utc)
-  return current.astimezone(SHANGHAI)
-
-
-async def _maybe_await(value: Any) -> Any:
-  return await value if hasattr(value, "__await__") else value
 
 
 def _research_cli_command() -> list[str]:
@@ -113,6 +106,7 @@ def _probe_capability() -> dict[str, Any]:
       capture_output=True,
       text=True,
       timeout=10,
+      env=current_config().research_environment(os.environ),
       encoding="utf-8",
       errors="replace",
     )
@@ -125,26 +119,6 @@ def _probe_capability() -> dict[str, Any]:
   except (TypeError, ValueError, json.JSONDecodeError):
     return unavailable
   return dict(value) if isinstance(value, Mapping) else unavailable
-
-
-def _full_live_runtime() -> bool:
-  profile = os.environ.get("RUNTIME_PROFILE", "")
-  mode = os.environ.get("QMT_AGENT_MODE", "")
-  return profile.strip().lower() == "full" and mode.strip().lower() == "live"
-
-
-async def is_critical_trading_window(
-  now: datetime | None = None,
-  *,
-  trading_dates: Any | None = None,
-) -> bool:
-  """Return true only for an actual Shanghai trading day in 09:15–16:30."""
-
-  local = _aware_shanghai(now)
-  if not (CRITICAL_WINDOW_START <= local.time() <= CRITICAL_WINDOW_END):
-    return False
-  helper = trading_dates or TradingDateHelper()
-  return bool(await _maybe_await(helper.is_trading_date("SH", local.date())))
 
 
 def find_research_run_directory(
@@ -568,6 +542,7 @@ def _spawn_process(request_path: Path, control_directory: Path) -> Any:
       stderr=stderr,
       creationflags=creationflags,
       close_fds=os.name != "nt",
+      env=current_config().research_environment(os.environ),
     )
   except BaseException:
     stdout.close()
@@ -704,11 +679,19 @@ async def recover_lost_training_runs(repository: Any, *, now: datetime | None = 
     )
     if state != "EXITED":
       continue
+    manifest_path = research_runs_root() / run_id / "manifest.json"
+    if manifest_path.is_file() and _json_read(manifest_path).get("status") == "SUCCEEDED":
+      try:
+        await publish_result(current_config(), repository, run_id=run_id, owner=owner)
+        lost.append(run_id)
+      except PublicationError:
+        pass  # Preserve completed computation until transfer/registration can resume.
+      continue
     try:
       await repository.fail_run(
         run_id,
         expected_flow_run_id=str(_value(row, "prefect_flow_run_id", "") or ""),
-        error_code="WORKER_PROCESS_LOST",
+        error_code="TRAINER_PROCESS_LOST",
         error_message="recorded research process has exited; execution evidence retained",
         environment_evidence=_value(row, "environment_evidence", {}) or {},
         metrics_summary=_value(row, "metrics_summary", {}) or {},
@@ -737,7 +720,7 @@ async def _run_claimed_job(
   child_started = False
   try:
     control_directory = _control_directory(run_id)
-    files = resolve_dataset_directory(dataset)
+    files = resolve_dataset_directory(dataset, root=research_datasets_root())
     run_kind = str(_value(run, "run_kind", "")).upper()
     if run_kind not in {"DEVELOPMENT", "FINAL_EVALUATION"}:
       raise ValueError("training run_kind is invalid")
@@ -861,20 +844,11 @@ async def _run_claimed_job(
       stable_key = _stable_research_run_key(result)
       supplied_key = str(result.get("run_key") or "").strip().lower()
       if _HEX_RE.fullmatch(manifest) and stable_key and (not supplied_key or supplied_key == stable_key):
-        environment = _safe_public_details(result.get("environment_evidence") or {})
-        metrics = result.get("metrics_summary") or {}
-        gates = result.get("gate_summary") or {}
-        await repository.complete_run(
-          run_id,
-          expected_flow_run_id=execution_owner,
-          run_key=stable_key,
-          artifact_manifest_sha256=manifest,
-          environment_evidence=environment,
-          metrics_summary=metrics if isinstance(metrics, Mapping) else {},
-          gate_summary=gates if isinstance(gates, Mapping) else {},
-          completed_at=_now(),
-        )
-        return {"run_id": run_id, "status": "SUCCEEDED", "run_key": stable_key}
+        try:
+          published = await publish_generated_result(current_config(), repository, run_id=run_id, owner=execution_owner)
+        except PublicationError as exc:
+          return {"run_id": run_id, "status": "RUNNING", "reason": str(exc)}
+        return {**published, "run_key": stable_key}
       error_code = "INVALID_SUCCESS_MANIFEST"
     else:
       error_code = str(result.get("error_code") or "RESEARCH_PROCESS_FAILED")[:64]
@@ -908,7 +882,7 @@ async def _run_claimed_job(
       await repository.fail_run(
         run_id,
         expected_flow_run_id=execution_owner,
-        error_code="WORKER_DISPATCH_FAILED" if child_started else "TRAINING_EVIDENCE_INVALID",
+        error_code="TRAINER_DISPATCH_FAILED" if child_started else "TRAINING_EVIDENCE_INVALID",
         error_message=_redact_sensitive_text(
           (
             _tail_logs(control_directory) if control_directory is not None else ""
@@ -922,7 +896,7 @@ async def _run_claimed_job(
     return {
       "run_id": run_id,
       "status": "FAILED",
-      "error_code": "WORKER_DISPATCH_FAILED" if child_started else "TRAINING_EVIDENCE_INVALID",
+      "error_code": "TRAINER_DISPATCH_FAILED" if child_started else "TRAINING_EVIDENCE_INVALID",
     }
   finally:
     _processes.pop(run_id, None)
@@ -944,27 +918,19 @@ async def _run_claimed_job(
 async def stock_selection_training_dispatch_flow(
   now: datetime | None = None,
   *,
+  config_path: str,
   poll_interval_seconds: float = 0.25,
-  trading_dates: Any | None = None,
   prefect_flow_run_id: str = "",
 ) -> dict[str, Any]:
-  logger = get_run_logger()
-  timestamp = now or _now()
-  probe = await asyncio.to_thread(_probe_capability)
-  heartbeat_status, heartbeat_details = _probe_details(probe)
-  if probe.get("probe_failed") or probe.get("cpu_available") is not True:
-    return {"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"}
-  async with AsyncSessionLocal() as db:
+  async with training_session(config_path) as db:
+    logger = get_run_logger()
+    timestamp = now or _now()
     repository = StockSelectionTrainingRepository(db)
-    if _full_live_runtime() and await is_critical_trading_window(
-      timestamp, trading_dates=trading_dates
-    ):
-      return {
-        "status": "QUEUED",
-        "reason": "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW",
-        "capability": heartbeat_details,
-      }
     lost = await recover_lost_training_runs(repository, now=timestamp)
+    probe = await asyncio.to_thread(_probe_capability)
+    heartbeat_status, heartbeat_details = _probe_details(probe)
+    if probe.get("probe_failed") or probe.get("cpu_available") is not True:
+      return {"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"}
     flow_id = (
       prefect_flow_run_id
       or os.environ.get("PREFECT_FLOW_RUN_ID", "")
@@ -1012,25 +978,22 @@ async def stock_selection_training_dispatch_flow(
 
 
 @flow(name="stock-selection-training-capability", retries=0)
-async def stock_selection_training_capability_flow() -> dict[str, Any]:
+async def stock_selection_training_capability_flow(config_path: str) -> dict[str, Any]:
   """Only periodic capability writer; never claims or waits for training."""
-  probe = await asyncio.to_thread(_probe_capability)
-  if probe.get("probe_failed") or not isinstance(probe.get("cpu_available"), bool):
-    raise RuntimeError("Research 能力探测未返回有效结果；保留上次成功心跳")
-  status, details = _probe_details(probe)
-  async with AsyncSessionLocal() as db:
+  async with training_session(config_path) as db:
+    probe = await asyncio.to_thread(_probe_capability)
+    if probe.get("probe_failed") or not isinstance(probe.get("cpu_available"), bool):
+      raise RuntimeError("Research 能力探测未返回有效结果；保留上次成功心跳")
+    status, details = _probe_details(probe)
     await StockSelectionTrainingRepository(db).upsert_capability_heartbeat(
       status=status, details=details, now=_now()
     )
-  return details
+    return details
 
 
 __all__ = [
   "CONTROL_DIRECTORY_NAME",
-  "CRITICAL_WINDOW_END",
-  "CRITICAL_WINDOW_START",
   "find_research_run_directory",
-  "is_critical_trading_window",
   "recover_lost_training_runs",
   "resolve_dataset_directory",
   "stock_selection_training_dispatch_flow",

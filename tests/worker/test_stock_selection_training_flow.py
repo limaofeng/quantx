@@ -10,9 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
+preparation_window = import_module("quantx_infrastructure.services.research_preparation_window")
+
 dataset_store = import_module("quantx_infrastructure.training_dataset_store")
 
-flow_module = import_module("quantx_worker.prefector.flows.stock_selection_training_flow")
+flow_module = import_module("quantx_trainer.training_flow")
 research_job = import_module("quantx_research.next_day_selection_job")
 
 
@@ -67,6 +69,12 @@ async def test_supervisor_registers_only_verified_certification_and_keeps_files(
   if registered:
     assert registered[0]["manifest_sha256"] == manifest["manifest_sha256"]
   assert (root / "dataset-v1" / "manifest.json").is_file()
+
+
+@pytest.fixture(autouse=True)
+def training_configuration(monkeypatch, tmp_path):
+  config = SimpleNamespace(code_root=Path(__file__).resolve().parents[2], state_root=tmp_path, research_environment=lambda ambient: {})
+  monkeypatch.setattr(flow_module, "current_config", lambda: config)
 
 
 class TradingDates:
@@ -205,13 +213,13 @@ def _spec() -> dict:
 
 @pytest.mark.asyncio
 async def test_trading_window_uses_trading_calendar_and_weekend_is_safe() -> None:
-  assert await flow_module.is_critical_trading_window(
+  assert await preparation_window.is_critical_trading_window(
     datetime(2026, 9, 4, 1, 30), trading_dates=TradingDates()
   ) is True
-  assert await flow_module.is_critical_trading_window(
+  assert await preparation_window.is_critical_trading_window(
     datetime(2026, 9, 5, 1, 30), trading_dates=TradingDates()
   ) is False
-  assert await flow_module.is_critical_trading_window(
+  assert await preparation_window.is_critical_trading_window(
     datetime(2026, 9, 4, 8, 31), trading_dates=TradingDates()
   ) is False
 
@@ -347,9 +355,9 @@ def test_full_live_runtime_reads_authoritative_launcher_environment(monkeypatch)
   monkeypatch.delenv("ENV", raising=False)
   monkeypatch.setenv("RUNTIME_PROFILE", "full")
   monkeypatch.setenv("QMT_AGENT_MODE", "live")
-  assert flow_module._full_live_runtime() is True
+  assert preparation_window._full_live_runtime() is True
   monkeypatch.setenv("QMT_AGENT_MODE", "data-only")
-  assert flow_module._full_live_runtime() is False
+  assert preparation_window._full_live_runtime() is False
 
 
 def test_parent_research_directory_is_bound_to_run_id_and_stable_key(tmp_path) -> None:

@@ -3,7 +3,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from quantx_worker.prefector.flows import stock_selection_training_flow as flow
+from quantx_trainer import training_flow as flow
+
+
+@pytest.fixture(autouse=True)
+def training_configuration(monkeypatch, tmp_path):
+  monkeypatch.setattr(flow, "current_config", lambda: SimpleNamespace(state_root=tmp_path))
 
 
 @pytest.mark.asyncio
@@ -36,7 +41,7 @@ async def test_lost_owner_stops_child_without_converging_someone_elses_run(
     mark_cancelled=AsyncMock(),
   )
   monkeypatch.setattr(flow, "_control_directory", lambda run_id: tmp_path.resolve())
-  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset: {})
+  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset, **kwargs: {})
   monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
   monkeypatch.setattr(flow, "_spawn_process", lambda *args: process)
   monkeypatch.setattr(flow, "record_spawn", lambda *args, **kwargs: None)
@@ -110,7 +115,7 @@ async def test_silent_research_gets_bounded_heartbeats_and_stops_on_disconnect(
   ticks = iter([0, 0, 9, 10, 10])
   monkeypatch.setattr(flow, "monotonic", lambda: next(ticks))
   monkeypatch.setattr(flow, "_control_directory", lambda run_id: tmp_path.resolve())
-  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset: {})
+  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset, **kwargs: {})
   monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
   monkeypatch.setattr(flow, "_spawn_process", lambda *args: process)
   monkeypatch.setattr(flow, "record_spawn", lambda *args, **kwargs: None)

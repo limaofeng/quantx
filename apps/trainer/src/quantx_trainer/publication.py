@@ -6,12 +6,16 @@ import json
 import os
 import re
 import tempfile
+import threading
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from quantx_contracts.training_bundle import BundleFile, TrainingBundle
 from quantx_infrastructure.training_bundle_store import reject_links, verify_bundle
-from quantx_infrastructure.training_process_evidence import inspect_execution
+from quantx_infrastructure.training_process_evidence import (
+  inspect_execution,
+  local_success_recorded,
+)
 from quantx_infrastructure.training_result import safe_public_details
 
 from quantx_trainer.transfer import TransferConfig, open_store
@@ -130,6 +134,22 @@ def freeze_publication(path: Path, bundle: TrainingBundle, owner: str) -> None:
 
 
 async def publish_result(config, repository, *, run_id: str, owner: str) -> dict:
+  return await _publish_result(
+    config, repository, run_id=run_id, owner=owner, local_supervisor=False
+  )
+
+
+async def publish_generated_result(
+  config, repository, *, run_id: str, owner: str
+) -> dict:
+  return await _publish_result(
+    config, repository, run_id=run_id, owner=owner, local_supervisor=True
+  )
+
+
+async def _publish_result(
+  config, repository, *, run_id: str, owner: str, local_supervisor: bool
+) -> dict:
   """Resume transfer/registration only after the recorded execution has exited."""
   if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run_id) or not owner:
     raise PublicationError("PUBLICATION_IDENTITY_INVALID")
@@ -146,13 +166,14 @@ async def publish_result(config, repository, *, run_id: str, owner: str) -> dict
       ):
         raise PublicationError("PUBLICATION_OWNERSHIP_LOST")
       state = await asyncio.to_thread(
-        inspect_execution,
+        local_success_recorded if local_supervisor else inspect_execution,
         control / "process.json",
         run_id=run_id,
         owner=owner,
         request=control / "request.json",
       )
-      if state != "EXITED":
+      ready = state is True if local_supervisor else state == "EXITED"
+      if not ready:
         raise PublicationError("PUBLICATION_EXECUTION_NOT_STOPPED")
       bundle = await asyncio.to_thread(
         result_bundle, directory, run_id=run_id, run_kind=row.run_kind
@@ -171,12 +192,29 @@ async def publish_result(config, repository, *, run_id: str, owner: str) -> dict
         config.transfer_config, state_root=config.state_root
       )
 
+      cancel = threading.Event()
+
       def upload():
-        with open_store(transfer) as store:
+        with open_store(transfer, cancel=cancel) as store:
           if store.publish(bundle, directory) != bundle.bundle_id:
             raise PublicationError("PUBLICATION_REMOTE_IDENTITY_MISMATCH")
 
-      await asyncio.to_thread(upload)
+      task = asyncio.create_task(asyncio.to_thread(upload))
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        cancel.set()
+        # Keep the publication lock until the network writer is actually done.
+        while not task.done():
+          try:
+            await asyncio.shield(task)
+          except asyncio.CancelledError:
+            continue
+          except Exception:
+            break
+        with suppress(Exception, asyncio.CancelledError):
+          task.result()
+        raise
       await repository.record_artifact_bundle(
         run_id, expected_flow_run_id=owner, bundle=bundle
       )

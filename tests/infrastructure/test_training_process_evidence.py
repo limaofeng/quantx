@@ -131,3 +131,5 @@ def test_immediately_exited_child_can_be_recorded_without_a_live_pid(tmp_path):
   value = json.loads(path.read_text())
   assert value["state"] == "EXITED"
   assert value["returncode"] == 0
+  assert evidence.local_success_recorded(path, **args)
+  assert not evidence.local_success_recorded(path, **{**args, "owner": "another-owner"})

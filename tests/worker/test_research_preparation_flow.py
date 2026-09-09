@@ -3,8 +3,8 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from quantx_trainer import training_flow as training
 from quantx_worker.prefector.flows import research_preparation_flow as preparation
-from quantx_worker.prefector.flows import stock_selection_training_flow as training
 
 
 @pytest.mark.asyncio
@@ -14,7 +14,7 @@ async def test_capability_flow_never_claims_jobs_and_does_not_refresh_failed_pro
   written = []
 
   @asynccontextmanager
-  async def session():
+  async def session(config_path):
     yield object()
 
   class Repo:
@@ -24,19 +24,19 @@ async def test_capability_flow_never_claims_jobs_and_does_not_refresh_failed_pro
     async def upsert_capability_heartbeat(self, **kwargs):
       written.append(kwargs)
 
-  monkeypatch.setattr(training, "AsyncSessionLocal", session)
+  monkeypatch.setattr(training, "training_session", session)
   monkeypatch.setattr(training, "StockSelectionTrainingRepository", Repo)
   monkeypatch.setattr(
     training,
     "_probe_capability",
     lambda: {"cpu_available": True, "status": "GPU_UNAVAILABLE_BUILD"},
   )
-  await training.stock_selection_training_capability_flow.fn()
+  await training.stock_selection_training_capability_flow.fn(config_path="test.toml")
   assert len(written) == 1
   assert written[0]["details"]["cpu_available"] is True
   monkeypatch.setattr(training, "_probe_capability", lambda: {"probe_failed": True})
   with pytest.raises(RuntimeError):
-    await training.stock_selection_training_capability_flow.fn()
+    await training.stock_selection_training_capability_flow.fn(config_path="test.toml")
   assert len(written) == 1
 
 

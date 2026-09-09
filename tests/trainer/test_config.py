@@ -36,6 +36,11 @@ def test_explicit_config_ignores_ambient_production(tmp_path, deployment, monkey
   assert config.environment == "development"
   assert "private" not in repr(config)
   assert config.database_url == deployment["database_url"]
+  environment = config.research_environment({"DATABASE_URL": "production", "SSH_AUTH_SOCK": "agent", "HOME": "home"})
+  assert "DATABASE_URL" not in environment
+  assert "PREFECT_API_URL" not in environment
+  assert "SSH_AUTH_SOCK" not in environment
+  assert environment["ENV"] == "development"
 
 
 @pytest.mark.parametrize("missing", list(TrainerConfig.__dataclass_fields__))

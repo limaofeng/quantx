@@ -2,7 +2,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from quantx_worker.prefector.flows import stock_selection_training_flow as flow
+from quantx_trainer import training_flow as flow
+
+
+@pytest.fixture(autouse=True)
+def training_configuration(monkeypatch, tmp_path):
+  monkeypatch.setattr(flow, "current_config", lambda: SimpleNamespace(state_root=tmp_path))
 
 
 @pytest.mark.asyncio

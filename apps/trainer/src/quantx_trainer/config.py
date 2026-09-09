@@ -178,6 +178,13 @@ class TrainerConfig:
     )
     return result
 
+  def research_environment(self, ambient: Mapping[str, str]) -> dict[str, str]:
+    """Verified-input compute children receive files, never control-plane credentials."""
+    result = self.child_environment(ambient)
+    for key in ("DATABASE_URL", "PREFECT_API_URL", "PREFECT_WORKER_POOL"):
+      result.pop(key)
+    return result
+
 
 def main() -> None:
   parser = argparse.ArgumentParser(

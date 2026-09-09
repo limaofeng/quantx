@@ -17,6 +17,10 @@ from quantx_infrastructure.services.research_preparation import (
   reject_links,
   root,
 )
+from quantx_infrastructure.services.research_preparation_window import (
+  _full_live_runtime,
+  is_critical_trading_window,
+)
 from quantx_infrastructure.training_dataset_store import (
   certification_values,
   resolve_dataset_directory,
@@ -26,10 +30,6 @@ from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
   daily_market_data_sync_flow,
 )
 from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
-from quantx_worker.prefector.flows.stock_selection_training_flow import (
-  _full_live_runtime,
-  is_critical_trading_window,
-)
 
 
 async def update_job(job_id, **values):

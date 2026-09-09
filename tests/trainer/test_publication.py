@@ -1,5 +1,9 @@
+import asyncio
 import hashlib
 import json
+import subprocess
+import sys
+import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -67,7 +71,7 @@ def result(tmp_path, monkeypatch):
   failure = []
 
   @contextmanager
-  def store(config):
+  def store(config, **kwargs):
     def publish(bundle, source):
       uploads.append(bundle.bundle_id)
       if failure:
@@ -194,3 +198,93 @@ def test_publication_command_runs_preflight_before_any_registration(
   assert main.main(command) == 0
   publish.assert_awaited_once_with(config, run_id="run-1", owner="owner")
   assert json.loads(capsys.readouterr().out)["status"] == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ready", [True, False])
+async def test_normal_publication_requires_its_own_completed_child(
+  result, monkeypatch, ready
+):
+  monkeypatch.setattr(
+    publication, "local_success_recorded", lambda *args, **kwargs: ready
+  )
+  if ready:
+    outcome = await publication.publish_generated_result(
+      result.config, result.repository, run_id="run-1", owner="owner"
+    )
+    assert outcome["status"] == "SUCCEEDED"
+  else:
+    with pytest.raises(publication.PublicationError, match="EXECUTION_NOT_STOPPED"):
+      await publication.publish_generated_result(
+        result.config, result.repository, run_id="run-1", owner="owner"
+      )
+    result.repository.complete_run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_network_writer_before_releasing_lock(
+  result, monkeypatch
+):
+  started, exited = threading.Event(), threading.Event()
+
+  @contextmanager
+  def store(config, *, cancel):
+    def publish(bundle, directory):
+      started.set()
+      assert cancel.wait(5)
+      raise OSError("transfer aborted")
+
+    try:
+      yield SimpleNamespace(publish=publish)
+    finally:
+      exited.set()
+
+  monkeypatch.setattr(publication, "open_store", store)
+  task = asyncio.create_task(
+    publication.publish_result(
+      result.config, result.repository, run_id="run-1", owner="owner"
+    )
+  )
+  async with asyncio.timeout(3):
+    while not started.is_set():
+      await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+  assert exited.is_set()
+  result.repository.record_artifact_bundle.assert_not_called()
+  with publication.publication_lock(result.control):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_trainer_normal_flow_publishes_before_success_and_resumes_failed_transfer(
+  result, monkeypatch, interrupted
+):
+  from quantx_trainer import training_flow as flow
+
+  process = subprocess.Popen([sys.executable, "-c", "pass"])
+  process.wait(timeout=5)
+  monkeypatch.setattr(flow, "current_config", lambda: result.config)
+  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda *args, **kwargs: {})
+  monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
+  monkeypatch.setattr(flow, "_spawn_process", lambda *args, **kwargs: process)
+  result.repository.fail_run = AsyncMock()
+  if interrupted:
+    result.failure.append(ConnectionError("disconnected"))
+  outcome = await flow._run_claimed_job(
+    result.repository, result.row, object(), object()
+  )
+  assert outcome["status"] == ("RUNNING" if interrupted else "SUCCEEDED")
+  assert len(result.uploads) == 1
+  result.repository.fail_run.assert_not_called()
+  if interrupted:
+    result.repository.complete_run.assert_not_called()
+    monkeypatch.setattr(flow, "inspect_execution", lambda *args, **kwargs: "EXITED")
+    result.repository.list_runs = AsyncMock(return_value=[result.row])
+    assert await flow.recover_lost_training_runs(result.repository) == ["run-1"]
+    result.repository.fail_run.assert_not_called()
+    assert len(result.uploads) == 2
+  result.repository.record_artifact_bundle.assert_awaited_once()
+  result.repository.complete_run.assert_awaited_once()
