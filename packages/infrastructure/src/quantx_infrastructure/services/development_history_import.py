@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from datetime import date, timedelta
+from uuid import uuid4
 
 import httpx
 from quantx_contracts.data_exchange import HistoryPartitionRequest
@@ -21,6 +22,10 @@ from quantx_infrastructure.services.data_exchange import (
   submit,
 )
 from quantx_infrastructure.services.data_exchange_reference import import_reference
+from quantx_infrastructure.services.development_delivery_manifest import (
+  pin_delivery_manifest,
+  read_delivery_metadata,
+)
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   MAX_TRANSFER_CHUNK_COMPRESSED_BYTES,
   ingest_uploaded_bar_request,
@@ -76,15 +81,16 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
   async with httpx.AsyncClient(
     base_url=base, headers=headers, timeout=30, trust_env=False
   ) as client:
-    response = await client.post(
-      "/market-data/v1/history", json=request.model_dump(mode="json")
+    response = await read_delivery_metadata(
+      client, "POST", "/market-data/v1/history", json=request.model_dump(mode="json")
     )
-    response.raise_for_status()
-    if response.json()["id"] != identity:
+    if response["id"] != identity:
       raise ValueError("Remote request identity mismatch")
-    response = await client.get(f"/market-data/v1/history/{identity}")
-    response.raise_for_status()
-    remote = response.json()
+    remote = await read_delivery_metadata(
+      client, "GET", f"/market-data/v1/history/{identity}"
+    )
+    if remote.get("id") != identity:
+      raise ValueError("Remote request identity mismatch")
     if remote["state"] != "READY":
       if remote["state"] == "INCOMPLETE":
         async with AsyncSessionLocal() as db:
@@ -97,26 +103,17 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
           await db.commit()
       return {"status": remote["state"], "id": identity, "reason": remote.get("error")}
     manifest = remote["manifest"]
-    if manifest["payload"] != request.agent_payload():
-      raise ValueError("Remote request scope mismatch")
-    expected_version = hashlib.sha256(
-      json.dumps(
-        {"chunks": manifest["chunks"], "reference": manifest["reference"]},
-        sort_keys=True,
-      ).encode()
-    ).hexdigest()
-    if manifest.get("version") != 1 or manifest["data_version"] != expected_version:
-      raise ValueError("Invalid remote data version")
-    if not 0 < len(manifest["chunks"]) <= 128:
-      raise ValueError("Invalid remote chunk count")
+    async with AsyncSessionLocal() as db:
+      await pin_delivery_manifest(db, identity, request, manifest)
+      await db.commit()
     export_root().mkdir(parents=True, exist_ok=True)
     for item in manifest["chunks"]:
       digest = item["checksum_sha256"]
       path = content_path(digest)
-      if path.is_file() and path.stat().st_size <= MAX_TRANSFER_CHUNK_COMPRESSED_BYTES:
+      if path.is_file() and path.stat().st_size == item["compressed_bytes"]:
         if hashlib.sha256(path.read_bytes()).hexdigest() == digest:
           continue
-      temporary = path.with_suffix(".part")
+      temporary = path.with_suffix(f".{identity}.{uuid4().hex}.part")
       hasher, size = hashlib.sha256(), 0
       try:
         async with client.stream(
@@ -124,9 +121,11 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
         ) as download:
           download.raise_for_status()
           with temporary.open("wb") as target:
-            async for block in download.aiter_bytes():
+            async for block in download.aiter_bytes(chunk_size=65536):
               size += len(block)
-              if size > MAX_TRANSFER_CHUNK_COMPRESSED_BYTES:
+              if size > min(
+                item["compressed_bytes"], MAX_TRANSFER_CHUNK_COMPRESSED_BYTES
+              ):
                 raise ValueError("Remote chunk exceeds byte budget")
               target.write(block)
               hasher.update(block)
