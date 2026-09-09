@@ -13,7 +13,12 @@ from quantx_infrastructure.training_dataset_store import (
 )
 from quantx_infrastructure.training_host_guard import HostPolicy, host_guard_root
 
-from quantx_trainer.publication import _supervised_io, publication_lock
+from quantx_trainer.publication import (
+  _supervised_io,
+  publication_lock,
+  read_object,
+  result_bundle,
+)
 from quantx_trainer.transfer import TransferConfig, open_store
 
 
@@ -88,9 +93,74 @@ async def load_dataset(config, repository, dataset, *, run_id, owner):
   bundle = TrainingBundle.model_validate(_value(dataset, "source_bundle"))
   if bundle.kind != "DATASET" or bundle.source_id != _value(dataset, "dataset_version"):
     raise ValueError("DATASET_BUNDLE_IDENTITY_MISMATCH")
+
+  def validate(directory, cache, cancel):
+    return resolve_dataset_directory(
+      dataset, root=cache, directory=directory, cancel=cancel
+    )
+
+  return await _load_bundle(
+    config,
+    repository,
+    bundle,
+    run_id=run_id,
+    owner=owner,
+    cache_name="dataset-cache",
+    validate=validate,
+  )
+
+
+async def load_parent_result(config, repository, parent, *, run_id, owner):
+  parent_id = _value(parent, "run_id")
+  bundle = TrainingBundle.model_validate(_value(parent, "artifact_bundle"))
+  if (
+    bundle.kind != "RESULT"
+    or bundle.source_id != parent_id
+    or _value(parent, "status") != "SUCCEEDED"
+    or _value(parent, "run_kind") != "DEVELOPMENT"
+  ):
+    raise ValueError("PARENT_BUNDLE_IDENTITY_MISMATCH")
+  manifest_entry = next(
+    (entry for entry in bundle.files if entry.path == "manifest.json"), None
+  )
+  if manifest_entry is None or manifest_entry.sha256 != _value(
+    parent, "artifact_manifest_sha256"
+  ):
+    raise ValueError("PARENT_MANIFEST_HASH_MISMATCH")
+  stable_key = hashlib.sha256(
+    f"next-day-selection\0v1\0{parent_id}".encode()
+  ).hexdigest()
+  if _value(parent, "run_key") != stable_key:
+    raise ValueError("PARENT_RUN_KEY_MISMATCH")
+
+  def validate(directory, cache, cancel):
+    verified = result_bundle(
+      directory, run_id=parent_id, run_kind="DEVELOPMENT", cancel=cancel
+    )
+    if verified.bundle_id != bundle.bundle_id:
+      raise ValueError("PARENT_RESULT_INVENTORY_MISMATCH")
+    manifest = read_object(directory / "manifest.json")
+    if manifest.get("run_key") is not None and manifest["run_key"] != stable_key:
+      raise ValueError("PARENT_RUN_KEY_MISMATCH")
+    return directory
+
+  return await _load_bundle(
+    config,
+    repository,
+    bundle,
+    run_id=run_id,
+    owner=owner,
+    cache_name="parent-cache",
+    validate=validate,
+  )
+
+
+async def _load_bundle(
+  config, repository, bundle, *, run_id, owner, cache_name, validate
+):
   policy = HostPolicy.load(host_guard_root())
   transfer = TransferConfig.load(config.transfer_config, state_root=config.state_root)
-  cache = config.state_root / "dataset-cache"
+  cache = config.state_root / cache_name
   reject_links(cache)
   cache.mkdir(parents=True, exist_ok=True)
   cancel = threading.Event()
@@ -101,11 +171,9 @@ async def load_dataset(config, repository, dataset, *, run_id, owner):
       directory = store.fetch(
         bundle, cache, minimum_free_bytes=policy.minimum_free_disk_mib * 1024 * 1024
       )
-    return resolve_dataset_directory(
-      dataset, root=cache, directory=directory, cancel=cancel
-    )
+    return validate(directory, cache, cancel)
 
-  lock = config.state_root / "control" / ("dataset-" + bundle.bundle_id)
+  lock = config.state_root / "control" / ("input-" + bundle.bundle_id)
   reject_links(lock)
   lock.mkdir(parents=True, exist_ok=True)
   with publication_lock(lock):

@@ -151,7 +151,8 @@ class _FakeModel:
     Path(path).write_text("fake-lightgbm-text-model", encoding="utf-8")
 
 
-def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("relocate_parent", [False, True])
+def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: Path, relocate_parent) -> None:
   allocate = training.tempfile.mkdtemp
 
   def scratch_directory(*args, **kwargs):
@@ -203,6 +204,11 @@ def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: 
   assert (development / "development-lock.json").is_file()
 
   monkeypatch.setattr(training, "_load_parent_family", lambda parent_dir, family, runtime, preprocessing, calibrators: fit_family(family, {}, pd.DataFrame({"event_date": [pd.Timestamp("2020-01-01")], "label": [0]}), pd.DataFrame({"event_date": [pd.Timestamp("2020-01-01")], "label": [0]}), None, resolved_backend=None))
+  if relocate_parent:
+    cached_parent = tmp_path / "parent-cache" / result_bundle(development, run_id="development", run_kind="DEVELOPMENT").bundle_id
+    cached_parent.parent.mkdir()
+    development.rename(cached_parent)
+    development = cached_parent
   final_spec = {**spec, "run_kind": "FINAL_EVALUATION", "parent_run_directory": str(development)}
   final = asyncio.run(training.execute_next_day_selection_run(run_kind="FINAL_EVALUATION", spec=final_spec, dataset_directory=dataset, output_root=tmp_path / "runs", run_id="final", parent_run_directory=development, frozen_test_access_count=1))
   final_metrics = json.loads((final / "metrics.json").read_text(encoding="utf-8"))

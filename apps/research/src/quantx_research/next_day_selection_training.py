@@ -2016,8 +2016,9 @@ async def execute_next_day_selection_run(
     if parent_manifest.get("status") != "SUCCEEDED" or parent_manifest.get("run_kind") != RunKind.DEVELOPMENT.value:
       raise ValueError("父级必须是成功的 DEVELOPMENT 运行")
     parent_run_id = _safe_run_id(parent_manifest.get("run_id", ""))
-    if parent_run_id != parent_dir.name:
-      raise ValueError("父级 run_id 与目录身份不一致")
+    # Trainer binds the parent ID and manifest hash before handing off its
+    # content-addressed cache. Identity belongs to the verified manifest and
+    # development lock, not the name of a machine-local directory.
     lock = _load_json(parent_dir / "development-lock.json")
     artifact_hashes, parent_validation, parent_lock_hash = _validate_parent_lock(
       parent_dir,

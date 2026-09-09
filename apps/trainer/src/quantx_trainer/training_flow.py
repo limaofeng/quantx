@@ -46,7 +46,7 @@ from quantx_infrastructure.training_result import (
   safe_public_details as _safe_public_details,
 )
 
-from quantx_trainer.dataset_transfer import load_dataset
+from quantx_trainer.dataset_transfer import load_dataset, load_parent_result
 from quantx_trainer.publication import (
   PublicationError,
   publish_generated_result,
@@ -772,14 +772,17 @@ async def _run_claimed_job(
       ).strip().lower()
       if not _HEX_RE.fullmatch(parent_artifact_hash):
         raise ValueError("final evaluation parent has incomplete Research manifest evidence")
-      parent_directory = find_research_run_directory(
-        parent_run_id=parent_run_id,
-        expected_run_key=parent_key,
-        root=research_runs_root(),
-      )
-      parent_manifest_path = parent_directory / "manifest.json"
-      if _sha256_file(parent_manifest_path) != parent_artifact_hash:
-        raise ValueError("final evaluation parent manifest hash does not match the DB evidence")
+      try:
+        parent_directory = await load_parent_result(
+          current_config(), repository, parent, run_id=run_id, owner=execution_owner,
+        )
+      except PublicationError as exc:
+        if str(exc) == "PUBLICATION_OWNERSHIP_LOST":
+          return {"run_id": run_id, "status": "OWNERSHIP_LOST"}
+        if str(exc) == "PUBLICATION_CANCEL_REQUESTED":
+          await repository.mark_cancelled(run_id, expected_flow_run_id=execution_owner)
+          return {"run_id": run_id, "status": "CANCELLED"}
+        raise
       # Keep the parent identity internal to request.json.  It is never copied
       # to the public environment evidence or flow result.
     request = build_training_request(

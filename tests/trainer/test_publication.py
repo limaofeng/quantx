@@ -284,6 +284,91 @@ def test_store_passes_cancellation_into_upload_source_verification(result):
     store.publish(bundle, result.directory)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "fault", [None, "hash", "identity", "key", "corrupt", "inventory"]
+)
+async def test_final_evaluation_fetches_verified_parent_bundle(
+  result, monkeypatch, fault
+):
+  import shutil
+
+  from quantx_infrastructure.training_bundle_store import (
+    DirectoryBundleReader,
+    materialize_bundle,
+  )
+  from quantx_trainer import dataset_transfer as inputs
+
+  bundle = publication.result_bundle(
+    result.directory, run_id="run-1", run_kind="DEVELOPMENT"
+  )
+  parent = SimpleNamespace(
+    run_id="run-1",
+    run_kind="DEVELOPMENT",
+    status="SUCCEEDED",
+    run_key=hashlib.sha256(b"next-day-selection\0v1\0run-1").hexdigest(),
+    artifact_bundle=bundle.model_dump(mode="json"),
+    artifact_manifest_sha256=next(
+      entry.sha256 for entry in bundle.files if entry.path == "manifest.json"
+    ),
+  )
+  remote = result.config.state_root / "remote"
+  remote.mkdir()
+  shutil.copytree(result.directory, remote / bundle.bundle_id)
+  shutil.rmtree(result.directory)
+  if fault == "hash":
+    parent.artifact_manifest_sha256 = "f" * 64
+  elif fault == "identity":
+    parent.run_id = "different-run"
+  elif fault == "key":
+    parent.run_key = "f" * 64
+  elif fault == "corrupt":
+    (remote / bundle.bundle_id / "lightgbm.txt").write_bytes(b"corrupted")
+  elif fault == "inventory":
+    # A content-addressed bundle still must match Research's embedded inventory.
+    raw = parent.artifact_bundle
+    raw["files"] = [
+      item for item in raw["files"] if item["path"] != "development-lock.json"
+    ]
+    from quantx_contracts.training_bundle import TrainingBundle
+
+    altered = TrainingBundle.model_validate(raw)
+    (remote / bundle.bundle_id / "development-lock.json").unlink()
+    (remote / bundle.bundle_id).rename(remote / altered.bundle_id)
+
+  @contextmanager
+  def store(config, *, cancel):
+    def fetch(bundle, cache, *, minimum_free_bytes):
+      return materialize_bundle(
+        DirectoryBundleReader(remote),
+        bundle,
+        cache,
+        reserve_bytes=minimum_free_bytes,
+        cancel=cancel,
+      )
+
+    yield SimpleNamespace(fetch=fetch)
+
+  monkeypatch.setattr(inputs, "open_store", store)
+  monkeypatch.setattr(
+    inputs.HostPolicy, "load", lambda *args: SimpleNamespace(minimum_free_disk_mib=1)
+  )
+  if fault:
+    with pytest.raises((ValueError, RuntimeError)):
+      await inputs.load_parent_result(
+        result.config, result.repository, parent, run_id="child", owner="owner"
+      )
+  else:
+    directory = await inputs.load_parent_result(
+      result.config, result.repository, parent, run_id="child", owner="owner"
+    )
+    assert directory == result.config.state_root / "parent-cache" / bundle.bundle_id
+    assert (directory / "lightgbm.txt").read_bytes() == b"{}"
+    assert not result.directory.exists()
+  result.repository.record_artifact_bundle.assert_not_called()
+  result.repository.complete_run.assert_not_called()
+
+
 def test_publication_command_runs_preflight_before_any_registration(
   monkeypatch, capsys
 ):
