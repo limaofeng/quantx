@@ -22,13 +22,17 @@ def main(argv: list[str] | None = None) -> int:
       "admission-status",
       "serve",
       "status",
+      "logs",
     ],
   )
   parser.add_argument("--config", type=Path, required=True)
   parser.add_argument("--run-id")
   parser.add_argument("--owner")
   parser.add_argument("--dataset-version")
+  parser.add_argument("--lines", type=int, default=100)
   args = parser.parse_args(argv)
+  if args.command == "logs" and (args.run_id or not 1 <= args.lines <= 1000):
+    parser.error("logs reads service lifecycle events; --lines must be 1..1000")
   if args.command == "publish-result" and (not args.run_id or not args.owner):
     parser.error("publish-result requires --run-id and --owner")
   if args.command == "publish-dataset" and not args.dataset_version:
@@ -41,6 +45,19 @@ def main(argv: list[str] | None = None) -> int:
   except TrainerConfigurationError as exc:
     print(f"Trainer configuration rejected: {exc}", file=sys.stderr)
     return 2
+
+  if args.command == "logs":
+    from quantx_infrastructure.training_bundle_store import BundleTransferError
+
+    from quantx_trainer.service_log import read_events
+
+    try:
+      for event in read_events(config.state_root, lines=args.lines):
+        print(json.dumps(event, sort_keys=True))
+    except (OSError, ValueError, BundleTransferError):
+      print("Trainer logs unavailable: SERVICE_LOG_READ_FAILED", file=sys.stderr)
+      return 3
+    return 0
 
   if args.command == "status":
     from quantx_trainer.service_status import service_status

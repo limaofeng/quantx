@@ -229,3 +229,8 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 服务运行时可在另一终端执行 `python -m quantx_trainer.main status --config <同一配置绝对路径>`。查询不连接开发控制面，返回 `ALIVE`、`OFFLINE`、`STALE` 或 `UNKNOWN`。只有单实例锁占用、主机/PID/创建时间/解释器/配置哈希匹配且本地心跳不超过 30 秒，才报告 `ALIVE`；证据每 10 秒刷新。`phase` 区分预检、部署注册、进入 Worker 循环和退出阶段；不代表控制面或 GPU 健康。`OFFLINE` 表示查询时服务锁可获取，残留状态文件不会让服务显示在线。
 
 所有服务状态均携带 `execution_state=NOT_INSPECTED`，不能用作计算排空或升级许可。`UNKNOWN` / `STALE` 的命令退出码为 3；明确的本地在线/离线状态退出码为 0。
+
+
+使用 `python -m quantx_trainer.main logs --config <同一配置绝对路径> --lines 100` 离线读取服务生命周期事件，行数范围为 1–1000。文件位于 `state_root/service/events.jsonl`，每个文件最多 1 MiB，保留三个轮转备份。事件仅包含时间、实例标识和固定阶段/失败代码，不收集配置、异常原文或任意输出；心跳刷新不重复写阶段事件。读取拒绝链接和非预期字段，损坏时返回稳定错误，不输出损坏原文。
+
+该入口查询服务生命周期日志；逐次计算的 stdout/stderr 仍位于对应运行控制目录，尚未统一到此查询入口。后台 up/down 与完整退出验收仍在实施中。

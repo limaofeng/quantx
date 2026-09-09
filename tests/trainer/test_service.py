@@ -68,6 +68,11 @@ def test_serve_isolates_environment_holds_lease_and_preserves_drain(
     ["preflight"] if failure == "preflight" else ["preflight", "worker"]
   )
   assert dict(os.environ) == original
+  from quantx_trainer.service_log import read_events
+
+  logged = [event["event"] for event in read_events(config.state_root)]
+  assert logged[0] == "PREFLIGHT" and logged[-1] == "EXITING"
+  assert ("SERVICE_FAILED" in logged) == bool(failure)
   assert Path.cwd() == directory
   assert admission_status(config.state_root / "control")["admission"] == "DRAINING"
   with publication_lock(config.state_root / "service"):

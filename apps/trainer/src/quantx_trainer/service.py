@@ -113,6 +113,13 @@ def serve(config, config_path: Path) -> None:
           await asyncio.gather(task, monitor, return_exceptions=True)
 
       asyncio.run(run())
+    except BaseException as exc:
+      reporter.event(
+        "SERVICE_INTERRUPTED"
+        if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
+        else "SERVICE_FAILED"
+      )
+      raise
     finally:
       os.chdir(original_directory)
       os.environ.clear()

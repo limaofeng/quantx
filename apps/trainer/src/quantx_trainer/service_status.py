@@ -35,6 +35,7 @@ class ServiceReporter:
       "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
     }
     self.phase = "PREFLIGHT"
+    self.logged_phase = None
 
   def write(self, phase=None):
     if phase is not None:
@@ -52,8 +53,16 @@ class ServiceReporter:
         stream.flush()
         os.fsync(stream.fileno())
       temporary.replace(target)
+      if self.logged_phase != self.phase:
+        self.event(self.phase)
+        self.logged_phase = self.phase
     finally:
       temporary.unlink(missing_ok=True)
+
+  def event(self, event):
+    from quantx_trainer.service_log import append_event
+
+    append_event(self.root, self.identity["instance_id"], event)
 
 
 def service_status(state_root: Path, config_path: Path) -> dict[str, str]:
