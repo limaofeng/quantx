@@ -24,6 +24,24 @@ class CollectionOutcomeUnknown(RuntimeError):
   reason_code = "COLLECTION_NATIVE_OUTCOME_UNKNOWN"
 
 
+async def join_history_thread(function, *args):
+  """Cancellation never releases ownership before its disk/native call exits."""
+  task = asyncio.create_task(asyncio.to_thread(function, *args))
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    while not task.done():
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        continue
+      except Exception:
+        break
+    if not task.cancelled():
+      task.exception()
+    raise
+
+
 class CollectionExecution:
   def __init__(
     self,
@@ -81,22 +99,7 @@ class CollectionExecution:
       return artifact
 
   async def _join_native_thread(self, function, *args):
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-      return await asyncio.shield(task)
-    except asyncio.CancelledError:
-      # Cancellation is not evidence that native work stopped. Keep the global
-      # lock until the call exits, including when cancellation is repeated.
-      while not task.done():
-        try:
-          await asyncio.shield(task)
-        except asyncio.CancelledError:
-          continue
-        except Exception:
-          break
-      if not task.cancelled():
-        task.exception()
-      raise
+    return await join_history_thread(function, *args)
 
   def _collect(self, permit, collect):
     # Recheck after both the acknowledgement and thread-pool wait. Commit the

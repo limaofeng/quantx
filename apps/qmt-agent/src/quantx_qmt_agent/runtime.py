@@ -5995,6 +5995,18 @@ class AgentRuntime:
         self._history_workload = "idle"
         self._history_workload_reason = ""
 
+  def _available_history_spool_bytes(self):
+    retained = _managed_market_data_spool_bytes(self._market_spool_root)
+    free = shutil.disk_usage(self._market_spool_root).free
+    return max(0, min(MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - retained, free - 512 * 1024 * 1024))
+
+  async def _handle_history_work(self, message):
+    from .history_pipeline import HistoryPipeline
+
+    if not hasattr(self, "_history_pipeline"):
+      self._history_pipeline = HistoryPipeline(self)
+    await self._history_pipeline.handle(message)
+
   def _prepare_history_job_sync(self, job, artifacts):
     """Build/recover upload bytes without entering a broker or recapturing data."""
     if not self._historical_worker_lock.locked():
@@ -6012,7 +6024,7 @@ class AgentRuntime:
       except FileNotFoundError:
         pass  # An interrupted assembly is disposable; native results are separate.
     directory = _reset_market_data_spool_directory(self._market_spool_root, request_id)
-    remaining = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - _managed_market_data_spool_bytes(self._market_spool_root)
+    remaining = self._available_history_spool_bytes()
     budget = _HistoricalDiskBudget(max_bytes=remaining)
     records = history_request_records(
       job, device_id=self.configuration.device_id, journal=self.journal,
