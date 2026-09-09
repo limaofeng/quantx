@@ -55,10 +55,14 @@ async def _locked_delivery(db, delivery_id, claim_token, owner):
 
 
 def _binding(row, version):
-  if not isinstance(version, ImmutableBarVersion):
+  if not isinstance(version, ImmutableBarVersion) or not isinstance(
+    row["manifest"], dict
+  ):
     raise DeliveryVersionConflict("invalid prepared storage version")
   request = HistoryPartitionRequest.model_validate(row["request"])
-  manifest = row["manifest"]
+  manifest = {
+    key: value for key, value in row["manifest"].items() if key != "local_verification"
+  }
   validate_delivery_manifest(manifest, request)
   prepared = json.loads(version.manifest_json)
   chunks = [
@@ -191,6 +195,59 @@ async def publish_delivery_bar_version(
     {"id": delivery_id, "proof": json.dumps(proof, allow_nan=False)},
   )
   await owner._guard_ingestion_owner(db)
+
+
+async def check_delivery_bar_publication(db, delivery_id, version, proof, *, owner):
+  """Check an existing receipt without publishing or changing its source intent."""
+  await owner._guard_ingestion_owner(db, lock=False)
+  row = (
+    (
+      await db.execute(
+        text(
+          "SELECT request,manifest,state FROM development_data_export WHERE id=:id FOR UPDATE"
+        ),
+        {"id": delivery_id},
+      )
+    )
+    .mappings()
+    .one_or_none()
+  )
+  if (
+    row is None
+    or not isinstance(row["manifest"], dict)
+    or not isinstance(row["manifest"].get("local_verification"), dict)
+  ):
+    raise DeliveryVersionConflict("existing storage receipt is missing")
+  phase = await db.scalar(
+    text(
+      "SELECT progress->>'phase' FROM development_data_ingestion WHERE delivery_id=:id"
+    ),
+    {"id": delivery_id},
+  )
+  existing = (
+    (
+      await db.execute(
+        text(
+          "SELECT * FROM development_data_bar_version WHERE delivery_id=:id FOR UPDATE"
+        ),
+        {"id": delivery_id},
+      )
+    )
+    .mappings()
+    .one_or_none()
+  )
+  if (
+    row["state"] not in {"LOCAL_VERIFIED", "WAITING_LOCAL_PROOF"}
+    or phase != "VERIFIED"
+    or existing is None
+    or not isinstance(proof, dict)
+    or existing["verified_at"] is None
+    or existing["proof"] != proof
+    or row["manifest"].get("local_verification", {}).get("immutable_storage") != proof
+  ):
+    raise DeliveryVersionConflict("existing storage publication proof is invalid")
+  _same_binding(existing, _binding(row, version))
+  return row["manifest"]
 
 
 async def resolve_published_bar_version(db, request: HistoryPartitionRequest):

@@ -1,7 +1,7 @@
 """Reserve network work durably before starting it; crashes never refund work."""
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 import httpx
 from sqlalchemy import text
@@ -30,7 +30,7 @@ class DevelopmentDownloadBudget:
     self.delivery_id = delivery_id
     self.owner = owner
 
-  async def schedule(self, action="read"):
+  async def schedule(self, action="read", *, _db=None):
     changes = {
       "read": None,
       "submitted": "remote_submitted=true",
@@ -47,7 +47,7 @@ class DevelopmentDownloadBudget:
     )
     if action not in changes:
       raise ValueError("invalid delivery schedule action")
-    async with self.session_factory() as db:
+    async with (self.session_factory() if _db is None else nullcontext(_db)) as db:
       if self.owner is not None:
         await self.owner._guard_ingestion_owner(db)
       await db.execute(
@@ -90,7 +90,8 @@ class DevelopmentDownloadBudget:
       )
       if self.owner is not None:
         await self.owner._guard_ingestion_owner(db)
-      await db.commit()
+      if _db is None:
+        await db.commit()
     return dict(row)
 
   async def reserve(self, maximum_bytes):
