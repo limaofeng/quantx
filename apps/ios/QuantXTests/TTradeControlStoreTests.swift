@@ -244,6 +244,26 @@ final class TTradeControlStoreTests: XCTestCase {
     XCTAssertNil(harness.store.releaseTicket)
   }
 
+  func testReleaseStatusSurvivesLocalLockWithoutConfirmationCredential() async throws {
+    let release = TAssistantReleaseSpy()
+    let harness = await makeHarness(releaseRepository: release)
+    try await harness.store.previewRelease(release.draft)
+    try await harness.store.confirmRelease()
+    let reference = harness.store.releaseReference
+    harness.runtime.localSessionLocked = true
+    harness.store.invalidateChallengeContext()
+    XCTAssertNil(harness.store.releaseTicket)
+    XCTAssertEqual(harness.store.releaseReference, reference)
+    do { try await harness.store.refreshReleaseStatus(); XCTFail("locked") } catch {}
+    harness.runtime.localSessionLocked = false
+    try await harness.store.refreshReleaseStatus()
+    XCTAssertEqual(harness.store.releaseStatus?.phase, .pending)
+    do { try await harness.store.confirmRelease(); XCTFail("credential cleared") } catch {}
+    XCTAssertEqual(release.confirmCount, 1)
+    harness.store.clearSession()
+    XCTAssertNil(harness.store.releaseReference)
+  }
+
   func testReleaseStatusRejectsUnprovenSuccessAndUnknownPhase() {
     for phase in ["SUCCEEDED", "NEW_PHASE"] {
       XCTAssertThrowsError(try TAssistantReleaseStatus.validated(challengeID: "challenge",
@@ -562,10 +582,10 @@ private final class TAssistantReleaseSpy: TAssistantReleaseLoading {
     if loseConfirmation { throw URLError(.networkConnectionLost) }
     return "command-1"
   }
-  func status(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+  func status(_ reference: TAssistantReleaseReference, context: TTradeControlRepositoryContext)
     async throws -> TAssistantReleaseStatus {
-    try TAssistantReleaseStatus.validated(challengeID: ticket.challengeID, phase: "PENDING",
+    try TAssistantReleaseStatus.validated(challengeID: reference.challengeID, phase: "PENDING",
       commandID: "command-1", executionID: nil, executionStatus: nil, reasonCode: nil,
-      expectedChallengeID: ticket.challengeID)
+      expectedChallengeID: reference.challengeID)
   }
 }

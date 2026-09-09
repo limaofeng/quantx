@@ -26,6 +26,7 @@ final class TTradeControlStore: ObservableObject {
   typealias RefreshSession = @MainActor () async throws -> Void
   typealias RefreshAssistantProjection = @MainActor () async -> Void
 
+  @Published private(set) var releaseReference: TAssistantReleaseReference?
   @Published private(set) var releaseTicket: TAssistantReleaseTicket?
   @Published private(set) var releaseStatus: TAssistantReleaseStatus?
   @Published private(set) var releaseCommandID: String?
@@ -81,9 +82,7 @@ final class TTradeControlStore: ObservableObject {
   func invalidateChallengeContext() {
     sessionContextID = UUID()
     releaseTicket = nil
-    releaseConfirmationAttempted = false
     releaseStatus = nil
-    releaseCommandID = nil
     pendingControl = nil
     requestedAction = nil
   }
@@ -593,6 +592,7 @@ final class TTradeControlStore: ObservableObject {
   private func resetTransientState(resetReadState: Bool) {
     stateRequestID = UUID()
     releaseTicket = nil
+    releaseReference = nil
     releaseConfirmationAttempted = false
     releaseStatus = nil
     releaseCommandID = nil
@@ -620,6 +620,7 @@ extension TTradeControlStore {
     }
     operationInProgress = true
     releaseTicket = nil
+    releaseReference = nil
     releaseConfirmationAttempted = false
     releaseStatus = nil
     releaseCommandID = nil
@@ -629,6 +630,7 @@ extension TTradeControlStore {
       let ticket = try await repository.preview(draft, context: context)
       try ticket.validate(context: repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"]))
       releaseTicket = ticket
+      releaseReference = TAssistantReleaseReference(ticket: ticket)
     } catch { throw fail(error) }
   }
 
@@ -660,17 +662,17 @@ extension TTradeControlStore {
 
   func refreshReleaseStatus() async throws {
     guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
-    guard let ticket = releaseTicket, let repository = binding?.releaseRepository else {
+    guard let reference = releaseReference, let repository = binding?.releaseRepository else {
       throw fail(TTradeControlError.contextChanged)
     }
     operationInProgress = true
     defer { operationInProgress = false }
     do {
       let context = try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])
-      try ticket.validate(context: context)
-      let status = try await repository.status(ticket, context: context)
-      try ticket.validate(context: repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"]))
-      guard releaseTicket == ticket,
+      try reference.validate(context: context)
+      let status = try await repository.status(reference, context: context)
+      try reference.validate(context: repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"]))
+      guard context.sessionContextID == sessionContextID, releaseReference == reference,
         releaseCommandID == nil || releaseCommandID == status.commandID else {
         throw TTradeControlError.contextChanged
       }

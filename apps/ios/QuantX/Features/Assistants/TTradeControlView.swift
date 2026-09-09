@@ -24,6 +24,7 @@ struct TTradeControlView: View {
           status: .attention
         )
       }
+      if store.releaseReference != nil { releaseOperationCard }
       stateContent
     }
     .task {
@@ -47,6 +48,60 @@ struct TTradeControlView: View {
       }
     } message: {
       Text("此操作不需要生物确认。它只停止新的做 T 买入；现有批次的退出保护会继续运行。")
+    }
+  }
+
+  private var releaseOperationCard: some View {
+    QuantXCard {
+      VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
+        Text("做 T 灰度发布").font(.headline)
+        if let ticket = store.releaseTicket {
+          Text("主账户 \(TTradeControlPrivacy.maskedAccount(ticket.draft.accountID))")
+          Text("维护窗口：\(ticket.draft.windowStart.formatted()) 至 \(ticket.draft.windowEnd.formatted())")
+            .font(.caption)
+          Text("确认后创建灰度执行；预热和入场门禁由服务端继续检查。")
+            .font(.subheadline)
+          DisclosureGroup("核对审核证据") {
+            VStack(alignment: .leading, spacing: 8) {
+              Text("目标配置：\(ticket.draft.configVersionID)")
+              Text("配置摘要：\(ticket.draft.configHash)")
+              Text("报告摘要：\(ticket.draft.reportHash)")
+              Text("审核规则摘要：\(ticket.draft.policyHash)")
+            }
+            .font(.caption.monospaced())
+            .textSelection(.enabled)
+          }
+          if store.releaseCommandID == nil {
+            Button("生物确认发布") {
+              Task { try? await store.confirmRelease() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(store.operationInProgress || ticket.expiresAt <= Date())
+          }
+        }
+        Text(releaseStatusText).font(.subheadline)
+        if let reason = store.releaseStatus?.reasonCode {
+          Text(reason).font(.caption.monospaced()).textSelection(.enabled)
+        }
+        Button("查询原发布状态") {
+          Task { try? await store.refreshReleaseStatus() }
+        }
+        .buttonStyle(.bordered)
+        .disabled(store.operationInProgress)
+      }
+    }
+  }
+
+  private var releaseStatusText: String {
+    switch store.releaseStatus?.phase {
+    case .awaitingConfirmation: "尚未确认"
+    case .expired: "确认已过期，请重新取得发布预览"
+    case .pending: "命令已入队，等待处理"
+    case .processing: "服务端正在处理发布"
+    case .failed: "发布失败，请核对失败原因"
+    case .succeeded: "发布已完成，执行状态：\(store.releaseStatus?.executionStatus ?? "")"
+    case .unknown: "尚无法确认结果，请保留原操作并再次查询"
+    case nil: store.releaseCommandID == nil ? "等待确认或查询原操作" : "命令已入队，待查询结果"
     }
   }
 

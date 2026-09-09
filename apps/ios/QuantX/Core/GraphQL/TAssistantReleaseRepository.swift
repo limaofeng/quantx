@@ -44,6 +44,29 @@ struct TAssistantReleaseTicket: Equatable, Sendable {
   }
 }
 
+// Read-only identity survives local lock; it cannot authorize a confirmation.
+struct TAssistantReleaseReference: Equatable, Sendable {
+  let challengeID: String
+  let userID: String
+  let deviceSessionID: String
+  let accountID: String
+
+  init(ticket: TAssistantReleaseTicket) {
+    challengeID = ticket.challengeID
+    userID = ticket.context.userID
+    deviceSessionID = ticket.context.deviceSessionID
+    accountID = ticket.context.activeAccountID
+  }
+
+  func validate(context: TTradeControlRepositoryContext) throws {
+    guard context.userID == userID, context.deviceSessionID == deviceSessionID,
+      context.activeAccountID == accountID, context.authorizedAccountIDs == [accountID],
+      !userID.isEmpty, !deviceSessionID.isEmpty, !accountID.isEmpty,
+      UUID(uuidString: challengeID) != nil
+    else { throw TTradeControlError.contextChanged }
+  }
+}
+
 struct TAssistantReleaseStatus: Equatable, Sendable {
   enum Phase: String, Sendable {
     case awaitingConfirmation = "AWAITING_CONFIRMATION"
@@ -92,7 +115,7 @@ protocol TAssistantReleaseLoading: AnyObject {
     async throws -> TAssistantReleaseTicket
   func confirm(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
     async throws -> String
-  func status(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+  func status(_ reference: TAssistantReleaseReference, context: TTradeControlRepositoryContext)
     async throws -> TAssistantReleaseStatus
 }
 
@@ -163,12 +186,12 @@ final class TAssistantReleaseRepository: TAssistantReleaseLoading {
     return commandID
   }
 
-  func status(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+  func status(_ reference: TAssistantReleaseReference, context: TTradeControlRepositoryContext)
     async throws -> TAssistantReleaseStatus
   {
-    try ticket.validate(context: context)
+    try reference.validate(context: context)
     let response = try await client.fetch(
-      query: QuantXAPI.IOSTAssistantLiveReleaseStatusQuery(challengeId: ticket.challengeID),
+      query: QuantXAPI.IOSTAssistantLiveReleaseStatusQuery(challengeId: reference.challengeID),
       cachePolicy: .networkOnly, requestConfiguration: noCache)
     try ApolloReadOnlyResponseValidator.validate(response.errors)
     guard let value = response.data?.tAssistantLiveReleaseStatus else {
@@ -178,6 +201,6 @@ final class TAssistantReleaseRepository: TAssistantReleaseLoading {
       challengeID: value.challengeId,
       phase: value.status, commandID: value.engineCommandId, executionID: value.executionId,
       executionStatus: value.executionStatus, reasonCode: value.reasonCode,
-      expectedChallengeID: ticket.challengeID)
+      expectedChallengeID: reference.challengeID)
   }
 }
