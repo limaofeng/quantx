@@ -4168,6 +4168,16 @@ class TradeCommandService:
     )
     if batch_identity is None:
       raise AgentUnavailableError("RISK_ADMISSION_BATCH_NOT_FOUND")
+    from quantx_infrastructure.services.live_entry_source_locks import (
+      lock_live_entry_sources,
+    )
+
+    try:
+      await lock_live_entry_sources(
+        self.db, account_id=str(batch_identity.account_id), order_requests=order_requests,
+      )
+    except ValueError as exc:
+      raise AgentUnavailableError(str(exc)) from exc
     requires_manual_window = any(
       bool(request.get("manual_live")) for request in order_requests
     )

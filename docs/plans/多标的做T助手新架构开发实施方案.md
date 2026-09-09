@@ -837,6 +837,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   TradeCommandService 入口及无回调时设备零调用验证。证据 `.codex_screenshots/p6-live-dispatch-{review,regression}.log`。
   下一步仍需 Engine 新鲜行情/Gate 回调接线、账户批次与执行锁顺序统一、过期请求回收，
   再注册 LIVE 请求生成/账户调度并完成无替身隔离整链。
+- 公共账户批次发送入口已先锁定新 T 来源：配置头排序加锁→执行排序加锁→账户授权锁，
+  避免最新审查在持有账户锁后首次等待执行锁。重复来源去重，错账户/降级/非当前配置在
+  账户授权前拒绝；其他 owner 不访问 T 表。26 项锁顺序/出队/准入回归与 Ruff 通过。
+  锁测试检查真实公共方法发出的锁请求顺序，数据库取数为替身，尚无 PostgreSQL 并发死锁
+  演练结论。证据 `.codex_screenshots/p6-live-source-locks.log`。
+  下一步转入 Engine Gate/witness 构造回调、过期请求回收及实际调度接线。
 - 剩余开发顺序：
   人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
