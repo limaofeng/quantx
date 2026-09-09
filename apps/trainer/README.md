@@ -181,4 +181,4 @@ conda run -n quantx-train python -m quantx_trainer.main publish-dataset --config
 
 `trainer-gpu-preparation` 仅领取 GPU 类型准备任务，使用同一显式运行配置与 `quantx-train-pool`。Worker 仅领取 COVERAGE、DOWNLOAD、CERTIFY；构建认证的导出交接尚未完成。Trainer 从已登记 bundle 拉取数据集，GPU wheel 证据固定为 `state_root/gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl`，资格结果写入 `state_root/gpu/qualification.json`，能力探测读取同一路径。Research 子进程仅接收文件路径和隔离环境，不接收数据库/Prefect 凭据。
 
-准备监督端每 10 秒核对归属并写心跳，保存请求及计算进程身份，退出未确认保持 RUNNING。异步启动返回句柄前被打断时保留 STARTING，不开放重试。资格计算完成后若数据库登记失败，保持 RUNNING；后续调度在新领取与计算门禁之前重试登记。正常执行与恢复共用尝试锁，恢复要求明确零退出码、原请求绑定和完整结果，可在原监督进程仍存活时收敛，不重跑资格基准。GPU 输入/中途崩溃恢复、主机资源门争用时的重新排队、运行端部署与真实 GPU 资格验收仍待完成。
+准备监督端每 10 秒核对归属并写心跳，保存请求及计算进程身份，退出未确认保持 RUNNING。异步启动返回句柄前被打断时保留 STARTING，不开放重试。资格计算完成后若数据库登记失败，保持 RUNNING；后续调度在新领取与计算门禁之前重试登记。正常执行与恢复共用尝试锁，恢复要求明确零退出码、原请求绑定和完整结果，可在原监督进程仍存活时收敛，不重跑资格基准。主机门禁退出码 75 在记录退出后按原归属重新排队，后续重新领取生成新归属；其他明确的非零退出记录失败，即使存在 ready 结果也不登记成功。未知退出继续保留运行态。GPU 输入恢复、缺少退出记录的中途崩溃收敛、运行端部署与真实 GPU 资格验收仍待完成。

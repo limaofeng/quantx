@@ -22,7 +22,7 @@ from quantx_infrastructure.training_bundle_store import reject_links
 from quantx_infrastructure.training_process_evidence import (
   begin_execution,
   inspect_execution,
-  local_success_recorded,
+  local_exit_recorded,
   record_exit,
   record_spawn,
 )
@@ -35,6 +35,10 @@ from quantx_trainer.training_flow import _host_admission_reason
 
 
 class PreparationStopUnconfirmed(RuntimeError):
+  pass
+
+
+class GPUAdmissionDenied(RuntimeError):
   pass
 
 
@@ -64,14 +68,28 @@ async def recover_gpu_results(config, repository):
           run_id=job.job_id, owner=job.flow_run_id, request=directory / "request.json"
         )
         state = inspect_execution(evidence, **identity)
-        if state != "EXITED" and not local_success_recorded(evidence, **identity):
+        if state != "EXITED" and not local_exit_recorded(evidence, **identity):
           continue
         process = read_object(evidence)
         if (
-          process.get("state") != "EXITED"
-          or type(process.get("returncode")) is not int
-          or process["returncode"] != 0
+          process.get("state") != "EXITED" or type(process.get("returncode")) is not int
         ):
+          continue
+        if process["returncode"] == 75:
+          await repository.requeue_gpu_admission(
+            job.job_id, expected_flow_run_id=job.flow_run_id
+          )
+          recovered.append(job.job_id)
+          continue
+        if process["returncode"] != 0:
+          await repository.progress(
+            job.job_id,
+            expected_flow_run_id=job.flow_run_id,
+            status="FAILED",
+            phase="资格进程退出",
+            error="GPU_PREPARATION_PROCESS_FAILED",
+          )
+          recovered.append(job.job_id)
           continue
         result = read_object(directory / "result.json")
         if type(result.get("ready")) is not bool:
@@ -142,6 +160,8 @@ async def run_gpu_job(config, job, files, check):
       done, _ = await asyncio.wait({waiter}, timeout=10)
       if not done:
         await check()
+    if waiter.result() == 75:
+      raise GPUAdmissionDenied("GPU_PREPARATION_HOST_ADMISSION_DENIED")
     if waiter.result() != 0:
       raise ValueError("GPU_PREPARATION_PROCESS_FAILED")
     return read_object(directory / "result.json")
@@ -198,6 +218,9 @@ async def trainer_gpu_preparation_flow(config_path: str):
           result=safe_public_details(result),
         )
         return {"job_id": job_id, "status": status}
+      except GPUAdmissionDenied:
+        await repository.requeue_gpu_admission(job_id, expected_flow_run_id=owner)
+        return {"job_id": job_id, "status": "QUEUED", "reason": "HOST_ADMISSION_DENIED"}
       except PreparationStopUnconfirmed:
         return {
           "job_id": job_id,

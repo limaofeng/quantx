@@ -209,16 +209,25 @@ def finish_input_preparation(path: Path, *, run_id: str, owner: str, request: Pa
     return False
 
 
-def local_success_recorded(path: Path, *, run_id: str, owner: str, request: Path) -> bool:
-  """Current supervisor may publish its recorded, successfully exited child."""
+def _local_exit_code(path: Path, *, run_id: str, owner: str, request: Path) -> int | None:
   try:
     value = _read(path, run_id, owner, request)
     supervisor = value.get("supervisor")
-    return (
+    valid = (
       isinstance(supervisor, dict) and supervisor.get("pid") == os.getpid()
       and _identity_state(supervisor) == "LIVE"
       and value["state"] == "EXITED" and type(value.get("returncode")) is int
-      and value["returncode"] == 0
     )
+    return value["returncode"] if valid else None
   except Exception:
-    return False
+    return None
+
+
+def local_exit_recorded(path: Path, *, run_id: str, owner: str, request: Path) -> bool:
+  """Current supervisor has recorded its child's exit, including failure."""
+  return _local_exit_code(path, run_id=run_id, owner=owner, request=request) is not None
+
+
+def local_success_recorded(path: Path, *, run_id: str, owner: str, request: Path) -> bool:
+  """Current supervisor may publish its recorded, successfully exited child."""
+  return _local_exit_code(path, run_id=run_id, owner=owner, request=request) == 0

@@ -109,4 +109,13 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assert assigned.flow_run_id == "trainer"
     assert [row.job_id for row in await repo.running_jobs(kinds=("GPU",))] == [gpu.job_id]
     assert await repo.running_jobs(kinds=("DOWNLOAD",)) == []
+    gpu_id = assigned.job_id
+    with pytest.raises(ValueError, match="归属"):
+      await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="old-owner")
+    await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="trainer")
+    reassigned = await repo.claim("new-trainer", kinds=("GPU",))
+    assert reassigned.job_id == gpu_id
+    assert reassigned.flow_run_id == "new-trainer"
+    with pytest.raises(ValueError, match="归属"):
+      await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="trainer")
   await engine.dispose()

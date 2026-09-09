@@ -10,7 +10,9 @@ from quantx_trainer import preparation_flow as flow
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["ready", "blocked", "unconfirmed", "registration"])
+@pytest.mark.parametrize(
+  "outcome", ["ready", "blocked", "unconfirmed", "registration", "admission"]
+)
 async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
   monkeypatch, tmp_path, outcome
 ):
@@ -22,6 +24,7 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
   )
   repo = SimpleNamespace(
     claim=AsyncMock(return_value=job),
+    requeue_gpu_admission=AsyncMock(),
     progress=AsyncMock(),
     running_jobs=AsyncMock(return_value=[]),
   )
@@ -46,6 +49,8 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
     assert files["directory"] == tmp_path / "verified"
     if outcome == "unconfirmed":
       raise flow.PreparationStopUnconfirmed()
+    if outcome == "admission":
+      raise flow.GPUAdmissionDenied()
     return {"ready": outcome in {"ready", "registration"}}
 
   monkeypatch.setattr(flow, "training_session", session)
@@ -69,6 +74,7 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
       "ready": "SUCCEEDED",
       "blocked": "FAILED",
       "unconfirmed": "RUNNING",
+      "admission": "QUEUED",
       "registration": "RUNNING",
     }[outcome]
   )
@@ -78,6 +84,27 @@ async def test_gpu_job_is_owned_by_trainer_with_verified_inputs(
       assert "status" not in call.kwargs
     if outcome == "registration":
       assert call.kwargs.get("status") != "FAILED"
+  if outcome == "admission":
+    repo.requeue_gpu_admission.assert_awaited_once_with(
+      "job", expected_flow_run_id="owner"
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_host_denial_exit_is_recorded_before_requeue(monkeypatch, tmp_path):
+  create = asyncio.create_subprocess_exec
+
+  async def spawn(*args, **kwargs):
+    return await create(sys.executable, "-c", "raise SystemExit(75)", **kwargs)
+
+  monkeypatch.setattr(flow.asyncio, "create_subprocess_exec", spawn)
+  config = SimpleNamespace(state_root=tmp_path, research_environment=lambda ambient: {})
+  job = SimpleNamespace(job_id="job", flow_run_id="owner", request={})
+  with pytest.raises(flow.GPUAdmissionDenied):
+    await flow.run_gpu_job(config, job, {"directory": tmp_path / "cache"}, AsyncMock())
+  evidence = json.loads((flow.attempt_directory(config, job) / "process.json").read_text())
+  assert evidence["state"] == "EXITED"
+  assert evidence["returncode"] == 75
 
 
 @pytest.mark.asyncio
@@ -145,7 +172,9 @@ async def test_gpu_supervisor_uses_file_request_and_records_real_child_exit(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", ["locked", "request", "nonzero", "result"])
+@pytest.mark.parametrize(
+  "fault", ["locked", "request", "nonzero", "result", "admission"]
+)
 async def test_recovery_rejects_active_or_unverifiable_gpu_attempt(tmp_path, fault):
   from contextlib import nullcontext
 
@@ -158,15 +187,25 @@ async def test_recovery_rejects_active_or_unverifiable_gpu_attempt(tmp_path, fau
   identity = dict(run_id="job", owner="owner", request=request)
   evidence = directory / "process.json"
   flow.begin_execution(evidence, **identity)
-  flow.record_exit(evidence, returncode=1 if fault == "nonzero" else 0, **identity)
+  flow.record_exit(
+    evidence, returncode={"nonzero": 1, "admission": 75}.get(fault, 0), **identity
+  )
   (directory / "result.json").write_text(
     "{}" if fault == "result" else '{"ready":true}'
   )
   if fault == "request":
     request.write_text("changed")
   repo = SimpleNamespace(
-    running_jobs=AsyncMock(return_value=[job]), progress=AsyncMock()
+    running_jobs=AsyncMock(return_value=[job]),
+    progress=AsyncMock(),
+    requeue_gpu_admission=AsyncMock(),
   )
   with flow.publication_lock(directory) if fault == "locked" else nullcontext():
-    assert await flow.recover_gpu_results(config, repo) == []
-  repo.progress.assert_not_called()
+    assert await flow.recover_gpu_results(config, repo) == (
+      ["job"] if fault in {"nonzero", "admission"} else []
+    )
+  if fault == "nonzero":
+    assert repo.progress.await_args.kwargs["status"] == "FAILED"
+  else:
+    repo.progress.assert_not_called()
+  assert repo.requeue_gpu_admission.await_count == int(fault == "admission")

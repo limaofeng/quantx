@@ -246,6 +246,21 @@ class ResearchPreparationRepository:
       await self.db.refresh(row)
     return row
 
+  async def requeue_gpu_admission(self, job_id, *, expected_flow_run_id):
+    """Requeue only after the supervisor verifies a host-admission exit."""
+    if not expected_flow_run_id:
+      raise ValueError("准备任务执行归属无效")
+    result = await self.db.execute(
+      update(Job).where(Job.job_id == job_id, Job.kind == "GPU", Job.status == "RUNNING",
+                        Job.flow_run_id == expected_flow_run_id)
+      .values(status="QUEUED", phase="等待主机资源", flow_run_id=None,
+              error=None, updated_at=now())
+    )
+    if result.rowcount != 1:
+      await self.db.rollback()
+      raise ValueError("准备任务执行归属已变化或任务已结束")
+    await self.db.commit()
+
   async def progress(self, job_id, *, expected_flow_run_id, **values):
     if not expected_flow_run_id or set(values) - {"status", "phase", "error", "result", "request"}:
       raise ValueError("准备任务更新参数或执行归属无效")
