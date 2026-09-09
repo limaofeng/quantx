@@ -236,6 +236,37 @@ async def _dispatch(
   command_id: Optional[str] = None,
 ) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
+  if command_type == "T_ASSISTANT_CONFIRM_LEGACY_DRAIN":
+    from quantx_infrastructure.models.trade_confirmation_challenge import (
+      TradeConfirmationChallenge,
+    )
+
+    from .t_assistant_confirmed_legacy_drain import execute_confirmed_legacy_drain
+
+    if set(payload) != {"challenge_id"}:
+      raise ValueError("LEGACY_T_DRAIN_CHALLENGE_REQUIRED")
+    async with AsyncSessionLocal() as db:
+      challenge = await db.get(TradeConfirmationChallenge, payload["challenge_id"])
+      if challenge is None:
+        raise ValueError("LEGACY_T_DRAIN_CHALLENGE_REQUIRED")
+      account_id = challenge.account_id
+    async with t_trade_account_coordination_lock(account_id):
+      async with AsyncSessionLocal() as db, db.begin():
+        result = await execute_confirmed_legacy_drain(
+          db,
+          challenge_id=payload["challenge_id"],
+          command_id=command_id,
+          account_id=account_id,
+          now=utcnow().replace(tzinfo=UTC),
+        )
+      if strategy_manager.get_run(result["run_id"]) is not None:
+        if not await strategy_manager.executor.invalidate_t_trade_entry_authority(
+          result["run_id"],
+          account_id=account_id,
+          reason="LEGACY_T_ENTRY_DRAINING",
+        ):
+          raise ValueError("LEGACY_T_DRAIN_RUNTIME_INVALIDATION_REQUIRED")
+    return result
   if command_type == "T_ASSISTANT_PREPARE_LIVE_AUTO_SUCCESSOR":
     from .t_assistant_live_successor import dispatch_live_auto_successor
 

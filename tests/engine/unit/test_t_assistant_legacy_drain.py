@@ -29,13 +29,7 @@ from tests.engine.test_entry_plan_broker_zero_fill_reconciliation import (
 )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-  "damage", [None, "class", "hash", "changed", "audit", "stopped"]
-)
-async def test_atomic_drain_uses_reviewed_inventory_and_retains_order_owner(
-  monkeypatch, damage
-):
+async def seed_legacy_drain(monkeypatch, damage=None):
   engine, sessions = await _database(monkeypatch)
   # Portable SQLite copies for the two generic Strategy tables' ARRAY fields.
   # Production models and their PostgreSQL mappings are not modified.
@@ -111,6 +105,17 @@ async def test_atomic_drain_uses_reviewed_inventory_and_retains_order_owner(
       actor_id="user-1",
       now=now,
     )
+  return engine, sessions, now, digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "damage", [None, "class", "hash", "changed", "audit", "stopped"]
+)
+async def test_atomic_drain_uses_reviewed_inventory_and_retains_order_owner(
+  monkeypatch, damage
+):
+  engine, sessions, now, digest = await seed_legacy_drain(monkeypatch, damage)
   if damage == "changed":
     async with sessions() as db, db.begin():
       (await db.get(PendingTradeOrder, "client-1")).status = "UNKNOWN"

@@ -980,7 +980,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   失败整体回滚，普通策略、已停止来源、错误哈希及变化清单均拒绝。18 项 inventory/guard/
   原子排空组件验证通过，Ruff 通过，证据 `.codex_screenshots/p6-legacy-atomic-drain-regression.log`。
   测试使用 SQLite 中 Strategy ARRAY 的独立 JSON 映射副本，未修改生产模型或验证 PG 并发。
-  尚需维护授权与命令调度、活跃内存失效、排空后终结/解除旧绑定的整链；不开放新源准入。
+  维护确认服务与 Engine 调度已接入：API 签发/消费绑定原生设备、操作人、账户、旧 run、
+  head version、清单哈希及维护窗口的凭据，消费和消息箱写入同事务；Engine 仅接受已消费
+  且签名、命令引用一致的凭据，持久化排空提交后使活跃内存失效。提交后内存失效失败可
+  在窗口结束后重试收敛，不重复取消或推进版本。45 项 API 确认、Engine 调度、原子排空、
+  inventory/guard 及原发布确认回归通过，Ruff 通过；证据
+  `.codex_screenshots/p6-legacy-confirmation-regression.log`。认证刷新与内存端点为合成边界，
+  SQLite 验证实际签名/令牌、消息箱和排空持久化，不代表真实设备、PG 并发或完整进程验收。
+  尚需公开 GraphQL/UI 维护入口、清单准备命令、排空后终结/解除旧绑定的整链；不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

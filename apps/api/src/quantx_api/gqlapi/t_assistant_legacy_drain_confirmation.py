@@ -1,0 +1,197 @@
+"""Native maintenance confirmation over an already frozen legacy inventory."""
+
+import re
+import secrets
+from datetime import UTC, timedelta
+from uuid import uuid4
+
+from quantx_application.t_trade_v3.portfolio_reference import aware_time
+from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.models.agent_runtime import (
+  EngineCommandOutbox,
+  TTradeRolloutEvent,
+)
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
+from quantx_infrastructure.models.trade_confirmation_challenge import (
+  TradeConfirmationChallenge,
+)
+
+from .t_trade_control import (
+  TTradeControlChallengeService,
+  _require_native_control_principal,
+)
+from .trade_approval import (
+  challenge_token_digest,
+  signed_payload_fingerprint,
+  validate_persistent_trade_challenge,
+)
+
+ACTION = "T_ASSISTANT_LEGACY_DRAIN"
+COMMAND = "T_ASSISTANT_CONFIRM_LEGACY_DRAIN"
+
+
+def normalize_drain_request(request):
+  required = {
+    "account_id",
+    "config_id",
+    "run_id",
+    "expected_head_version",
+    "inventory_operation_id",
+    "expected_inventory_hash",
+    "window_start",
+    "window_end",
+  }
+  if not isinstance(request, dict) or set(request) != required:
+    raise ValueError("LEGACY_T_DRAIN_REQUEST_INVALID")
+  result = dict(request)
+  if (
+    any(
+      not isinstance(result[key], str) or not result[key].strip()
+      for key in required - {"expected_head_version", "window_start", "window_end"}
+    )
+    or type(result["expected_head_version"]) is not int
+    or result["expected_head_version"] < 1
+    or re.fullmatch(r"[0-9a-f]{64}", result["expected_inventory_hash"]) is None
+  ):
+    raise ValueError("LEGACY_T_DRAIN_REQUEST_INVALID")
+  start, end = (
+    aware_time(result[key]).astimezone(UTC) for key in ("window_start", "window_end")
+  )
+  if start >= end:
+    raise ValueError("LEGACY_T_DRAIN_WINDOW_INVALID")
+  result.update(window_start=start.isoformat(), window_end=end.isoformat())
+  return result
+
+
+async def _lock_inventory(db, request, actor_id):
+  head = await db.get(
+    TTradeGlobalConfig,
+    request["config_id"],
+    with_for_update=True,
+    populate_existing=True,
+  )
+  inventory = await db.get(TTradeRolloutEvent, request["inventory_operation_id"])
+  if (
+    head is None
+    or head.account_id != request["account_id"]
+    or head.mode != "live"
+    or head.strategy_run_id != request["run_id"]
+    or head.state_version != request["expected_head_version"]
+    or inventory is None
+    or inventory.event_type != "LEGACY_T_OBLIGATION_INVENTORY_FROZEN"
+    or inventory.account_id != request["account_id"]
+    or inventory.actor_user_id != actor_id
+    or inventory.details.get("manifest_hash") != request["expected_inventory_hash"]
+  ):
+    raise ValueError("LEGACY_T_DRAIN_INVENTORY_CHANGED")
+  manifest = dict(inventory.details.get("manifest") or {})
+  if (
+    any(
+      manifest.get(key) != request[key] for key in ("account_id", "config_id", "run_id")
+    )
+    or manifest.get("head_version") != request["expected_head_version"]
+  ):
+    raise ValueError("LEGACY_T_DRAIN_INVENTORY_SCOPE_CONFLICT")
+
+
+async def issue_drain_confirmation(db, *, principal, request, now):
+  if not db.in_transaction():
+    raise ValueError("LEGACY_T_DRAIN_TRANSACTION_REQUIRED")
+  request = normalize_drain_request(request)
+  now = aware_time(now).astimezone(UTC)
+  _require_native_control_principal(principal, request["account_id"])
+  current = await TTradeControlChallengeService._lock_current_principal(
+    db, principal, request["account_id"]
+  )
+  await _lock_inventory(db, request, current.user_id)
+  expires = min(now + timedelta(seconds=60), aware_time(request["window_end"]))
+  if expires <= now:
+    raise ValueError("LEGACY_T_DRAIN_WINDOW_EXPIRED")
+  token, identity = secrets.token_urlsafe(48), str(uuid4())
+  db.add(
+    TradeConfirmationChallenge(
+      id=identity,
+      action=ACTION,
+      user_id=current.user_id,
+      device_session_id=current.device_session_id,
+      account_id=request["account_id"],
+      idempotency_key=identity,
+      payload=request,
+      payload_fingerprint=signed_payload_fingerprint(request),
+      token_digest=challenge_token_digest(token),
+      created_at=time_utils.to_shanghai(now),
+      expires_at=time_utils.to_shanghai(expires),
+    )
+  )
+  await db.flush()
+  return {
+    "challenge_id": identity,
+    "confirmation_token": token,
+    "expires_at": expires,
+    "request": request,
+  }
+
+
+async def consume_drain_confirmation(
+  db, *, principal, challenge_id, confirmation_token, now
+):
+  if not db.in_transaction():
+    raise ValueError("LEGACY_T_DRAIN_TRANSACTION_REQUIRED")
+  now = aware_time(now).astimezone(UTC)
+  challenge = await db.get(TradeConfirmationChallenge, challenge_id)
+  if challenge is None:
+    raise ValueError("LEGACY_T_DRAIN_CHALLENGE_REQUIRED")
+  _require_native_control_principal(principal, challenge.account_id)
+  current = await TTradeControlChallengeService._lock_current_principal(
+    db, principal, challenge.account_id
+  )
+  challenge = await db.get(
+    TradeConfirmationChallenge,
+    challenge_id,
+    with_for_update=True,
+    populate_existing=True,
+  )
+  request = normalize_drain_request(challenge.payload)
+  validate_persistent_trade_challenge(
+    challenge=challenge,
+    principal=current,
+    action=ACTION,
+    confirmation_token=confirmation_token,
+    now=time_utils.to_shanghai(now),
+    payload=request,
+    allow_consumed=True,
+  )
+  if request["account_id"] != challenge.account_id:
+    raise ValueError("LEGACY_T_DRAIN_CONFIRMATION_SCOPE_CONFLICT")
+  if challenge.consumed_at is not None:
+    identity = (
+      (challenge.result_reference or {}).get("engine_command", {}).get("message_id")
+    )
+    command = await db.get(EngineCommandOutbox, identity) if identity else None
+    if (
+      command is None
+      or command.command_type != COMMAND
+      or command.aggregate_id != request["run_id"]
+      or command.payload != {"challenge_id": challenge_id}
+    ):
+      raise ValueError("LEGACY_T_DRAIN_COMMAND_REFERENCE_CONFLICT")
+    return identity
+  await _lock_inventory(db, request, current.user_id)
+  if not aware_time(request["window_start"]) <= now < aware_time(request["window_end"]):
+    raise ValueError("LEGACY_T_DRAIN_OUTSIDE_MAINTENANCE_WINDOW")
+  identity = str(uuid4())
+  db.add(
+    EngineCommandOutbox(
+      message_id=identity,
+      idempotency_key=f"legacy-drain:{challenge_id}",
+      command_type=COMMAND,
+      aggregate_id=request["run_id"],
+      payload={"challenge_id": challenge_id},
+      available_at=now.replace(tzinfo=None),
+      processing_status="PENDING",
+    )
+  )
+  challenge.consumed_at = time_utils.to_shanghai(now)
+  challenge.result_reference = {"engine_command": {"message_id": identity}}
+  await db.flush()
+  return identity
