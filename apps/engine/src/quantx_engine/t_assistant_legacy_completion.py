@@ -440,6 +440,12 @@ async def dispatch_legacy_completion(db, *, command_id, payload, now):
     account_id=challenge.account_id,
     now=now,
   )
+  # A recovered PROCESSING command may outlive its old in-memory runtime.
+  # Revalidate the committed cut here as well as before runtime retirement;
+  # missing runtime resources must not turn late reports into false success.
+  existing_cut = await db.get(
+    TTradeRolloutEvent, f"legacy-t-completed:{drained['run_id']}"
+  )
   result = await complete_legacy_t_drain(
     db,
     config_id=drained["request"]["config_id"],
@@ -447,5 +453,6 @@ async def dispatch_legacy_completion(db, *, command_id, payload, now):
     expected_head_version=payload["expected_head_version"],
     actor_id=challenge.user_id,
     now=now,
+    revalidate_completed=existing_cut is not None,
   )
   return {"run_id": drained["run_id"], "account_id": challenge.account_id, **result}

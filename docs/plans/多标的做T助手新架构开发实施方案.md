@@ -1065,8 +1065,22 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   **82 项定向测试及 Ruff 通过**，证据
   `.codex_screenshots/p6-legacy-completion-consumer-final.log`；覆盖实际消费循环、回滚、
   幂等重试、来源拒绝及清理前新义务阻断。SQLite 与模拟资源端口不能替代 PostgreSQL
-  并发、完整 Engine 进程或实盘验收。下一步接入服务端终结命令生产与状态查询，补齐
-  重启和迟到回报整链验证；公开维护入口尚未开放，不开放新源准入，不执行业务维护 mutation。
+  并发、完整 Engine 进程或实盘验收。服务端终结命令生产、原设备权限绑定、确定性 UUID
+  幂等和终结证据查询已在工作区实现；新增 mutation 与客户端操作尚未完成契约生成，
+  **17 项 API 定向测试通过**。扩大回归 48 passed/2 failed：契约快照待更新、既有
+  historyDownloadSettings 描述缺失；日志 `.codex_screenshots/p6-legacy-completion-api-final.log`。
+  本机统一 dev/full/paper 重启在 market-data-worker 启动阶段失败并自动清理：数据库仍为
+  `20260910_0073`，缺失并行行情开发所需下载预算和入库进度表；当前迁移链至 0082，末项
+  尚未提交。本轮未应用该迁移链，Caddy 不可用，codegen 失败证据
+  `.codex_screenshots/p6-completion-codegen.log`。API 工作暂不提交，待开发库迁移范围确定、
+  恢复统一服务和实际 Caddy 契约验证后原子提交，再补重启和迟到回报整链验证。
+  Web check、build、895 项测试通过，lint 无错误（1 项既有警告）；证据
+  `.codex_screenshots/p6-completion-{check,lint,web-tests,build}.log`，不替代失败的 codegen。
+  重启恢复独立修复：已复现 cut 提交后、命令完成前退出，重启没有旧运行时时遗漏迟到
+  inbox 的错误成功。命令分发现在复核已有 cut 的当前义务，不依赖内存清理触发复核。
+  **40 项定向测试与 Ruff 通过**，证据 `.codex_screenshots/p6-completion-restart-final.log`；
+  实际消费恢复、同命令延后重试、审计不重写与原退出计划保留已验证，回报收敛仍为合成边界。
+  不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
