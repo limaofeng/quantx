@@ -1124,8 +1124,10 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   source、账户、标的、bucket、批次与环境；单笔退出完成但批次仍有余量时保持 EXIT_PARTIAL。
   **53 项定向验证通过**（含 8 项来源范围漂移拒绝），Ruff 与差异检查通过；证据
   `.codex_screenshots/p6-live-exit-reports-final.log`、`p6-exit-batch-partial.log`。
-  额外 runtime 回归有 4 项旧 PublicPlanSession 缺少 execute 的失败，修改前 HEAD 同样复现，
-  证据 `p6-exit-reports-runtime-baseline.log`，未将这组记为通过。
+  额外 runtime 回归曾有 4 项旧 PublicPlanSession 缺少 execute 的失败，修改前 HEAD 同样复现，
+  证据 `p6-exit-reports-runtime-baseline.log`。现已将内存夹具适配公共 scope 与
+  persist_execution_plan_state 接口，保留真实注册流程、输入 hash 重放校验和期望版本检查；
+  **8 项 runtime 回调/检查点失败与重试测试通过**，证据 `p6-runtime-fixture-repair.log`。
   平台/设备和账户容量读取仍用隔离替身，回报为合成输入，未验证真实 Agent inbox 传输、
   PostgreSQL 并发锁或实盘闭环；P6 正式门保持未完成。
   iOS 按用户要求暂停，已有改动保留；继续后端与 macOS 可完成的验证。

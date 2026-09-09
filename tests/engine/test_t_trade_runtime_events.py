@@ -52,6 +52,7 @@ def _in_memory_strategy_exit_plan_store(monkeypatch: pytest.MonkeyPatch) -> None
   states: dict[tuple[str, str], dict] = {}
   versions: dict[tuple[str, str], int] = {}
   applied_events: set[tuple[str, str]] = set()
+  entry_events: dict[str, SimpleNamespace] = {}
 
   class PublicPlanSession:
     async def __aenter__(self):
@@ -62,6 +63,8 @@ def _in_memory_strategy_exit_plan_store(monkeypatch: pytest.MonkeyPatch) -> None
 
     async def scalar(self, statement):
       params = statement.compile().params
+      if "plan_id_1" not in params:
+        return entry_events.get(str(params.get("business_key_1")))
       key = (str(params.get("plan_id_1")), str(params.get("business_key_1")))
       return "applied" if key in applied_events else None
 
@@ -87,6 +90,12 @@ def _in_memory_strategy_exit_plan_store(monkeypatch: pytest.MonkeyPatch) -> None
 
   monkeypatch.setattr(exit_service_module, "AsyncSessionLocal", PublicPlanSession)
   monkeypatch.setattr(exit_service_module, "AutoExitPlanRepository", PublicPlanRepository)
+
+  async def lock_scope(db, *, target_plan_id, **_kwargs):
+    record = await PublicPlanRepository(db).find_by_id(target_plan_id)
+    return SimpleNamespace(plan=lambda plan_id: record if plan_id == target_plan_id else None)
+
+  monkeypatch.setattr(exit_service_module, "lock_exit_plan_scope", lock_scope)
 
   async def strategy_plan_event_applied(
     _service,
@@ -132,6 +141,24 @@ def _in_memory_strategy_exit_plan_store(monkeypatch: pytest.MonkeyPatch) -> None
       if run_id == normalized_run_id
     }
     return {"version": ExitPlanBook.VERSION, "plans": plans}, plan_versions
+
+  async def persist_execution_plan_state(
+    service, *, execution_ref, plan_state, expected_state_version,
+    event_business_key, _event_input_hash, **_kwargs,
+  ):
+    plan_id = str(plan_state["template"]["plan_id"])
+    key = (execution_ref.owner_id, plan_id)
+    assert versions.get(key) == expected_state_version
+    state, version = await persist_strategy_plan_state(
+      service, strategy_run_id=execution_ref.owner_id, plan_state=plan_state,
+      event_business_key=event_business_key,
+    )
+    entry_events[event_business_key] = SimpleNamespace(
+      plan_id=plan_id, payload={"input_hash": _event_input_hash},
+    )
+    return state, version
+
+  monkeypatch.setattr(AutoExitPlanService, "persist_execution_plan_state", persist_execution_plan_state)
 
   monkeypatch.setattr(
     AutoExitPlanService,
