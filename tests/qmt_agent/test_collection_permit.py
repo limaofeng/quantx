@@ -212,3 +212,15 @@ def test_epoch_check_is_serialized_between_journal_connections(tmp_path):
     first.accept_collection_permit(low, device_id=DEVICE, unit=low.unit, now=NOW)
   first.connection.close()
   second.connection.close()
+
+
+def test_planner_bounds_catalog_before_allocating_all_units():
+  request = {
+    "operation": "bars",
+    "stock_list": ["000001.SZ"],
+    "periods": ["tick"],
+    "start_time": "20000101",
+    "end_time": "20991231",
+  }
+  with pytest.raises(ValueError, match="bounded catalog"):
+    plan_historical_work_units(request)

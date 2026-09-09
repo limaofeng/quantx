@@ -18,6 +18,7 @@ def test_revision_graph_has_one_head_and_preserves_both_feature_chains():
   assert len(heads) == 1
   ids = [revision.revision for revision in revisions]
   expected = [
+    "20260909_0067",  # Native collection permits
     "20260909_0066",  # Offline demand catalog
     "20260909_0065",  # Historical worker lease
     "20260909_0064",  # Ingestion checkpoints

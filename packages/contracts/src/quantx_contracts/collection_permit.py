@@ -15,6 +15,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+MAX_COLLECTION_UNITS = 2048
+
 COLLECTION_PLAN_VERSION = "xtdata-units-v1"
 
 HISTORICAL_WORK_UNIT_INSTRUMENTS = 20
@@ -89,6 +91,8 @@ def plan_historical_work_units(
           str(payload["end_time"]),
           max_days=HISTORICAL_WORK_UNIT_WINDOW_DAYS[period],
         ):
+          if len(units) >= MAX_COLLECTION_UNITS:
+            raise ValueError("collection unit plan exceeds its bounded catalog")
           units.append(
             {
               **payload,
@@ -102,6 +106,8 @@ def plan_historical_work_units(
 
   batch_size = instrument_batch_size or HISTORICAL_WORK_UNIT_INSTRUMENTS
   for code_batch in _chunks(sorted(codes), batch_size):
+    if len(units) >= MAX_COLLECTION_UNITS:
+      raise ValueError("collection unit plan exceeds its bounded catalog")
     units.append({**payload, "stock_list": code_batch})
   return tuple(units)
 
