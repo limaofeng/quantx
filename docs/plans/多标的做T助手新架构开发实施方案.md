@@ -665,7 +665,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   准入、supervisor、决策和候选证据 **33 项通过**；重试补强及 PAPER 回归 **27 项通过**
   （含新增 1 项），聚焦 Ruff 通过。证据 `.codex_screenshots/p6-live-canary-admission.xml`
   及 `p6-live-admission-final.log`。未运行正式 P5 评估，未伪造真实审批或创建业务库 LIVE source。
-- 剩余开发顺序：LIVE 公开准入审批、预热完成后的 READY 激活及恢复、
+- 首次 CANARY READY 激活已接入 LIVE supervisor：只有热内存及持久化标的均完成预热、
+  已提交周期与配置/行情/状态 hash 一致、原审批仍在维护窗口内，才读取共享账户健康与实际
+  LIVE 组合快照。唯一 Agent、协议、账户控制版本和快照身份必须一致；风险阻断保持 WARMING。
+  估值 I/O 后再次检查行情代次和时效，READY 状态与审计在同一事务写入；健康读取失败仅记录
+  脱敏原因，重复查询限频，冷启动不凭旧数据库 ACTIVE 状态激活。
+  联合准入/监督/决策/PAPER 回归 59 项通过，时序边界补强后受影响 24 项通过，Ruff 通过。
+  证据 `.codex_screenshots/p6-live-readiness.xml`、`p6-live-readiness-final.xml`。
+  激活测试使用真实隔离准入/状态仓库、合成审批与 mock 组合读取；不等同完整真实账户整链验收。
+  尚未创建业务库 LIVE source，RUNNING 重启后入场仍须后续 handler 的重新预热门禁。
+- 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

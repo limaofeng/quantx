@@ -1,10 +1,16 @@
 """Ordered LIVE market consumer for explicitly existing independent executions."""
 
 import asyncio
+import re
 from dataclasses import dataclass, field, fields
+from datetime import datetime
 
 from quantx_domain.clock import SHANGHAI
-from quantx_domain.trading.t_assistant_execution import TAssistantConfigVersion
+from quantx_domain.trading.t_assistant_execution import (
+  TAssistantConfigVersion,
+  TAssistantEntryReadinessProjection,
+  TAssistantExecutionEvent,
+)
 from quantx_domain.trading.t_assistant_market_state import (
   T_MARKET_GENERATION_CHANGED,
   TickAcceptance,
@@ -30,6 +36,10 @@ from quantx_infrastructure.repositories.t_assistant_symbol_state_repository impo
 from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
   TTradeInstrumentProfileRepository,
 )
+from quantx_infrastructure.services.live_t_market_marks import LiveTMarketMarkReader
+from quantx_infrastructure.services.t_trade_operations_service import (
+  TTradeOperationsService,
+)
 from quantx_infrastructure.services.t_trade_opportunity_runtime_service import (
   TTradeOpportunityRuntimeService,
 )
@@ -40,6 +50,7 @@ from .t_assistant_candidate_controls import read_candidate_controls
 from .t_assistant_decision_runtime import TAssistantLiveDecisionRuntime
 from .t_assistant_live_admission import canary_instrument_codes
 from .t_assistant_live_drain import drain_live_entry_work
+from .t_assistant_live_readiness import activate_live_canary_ready
 from .t_assistant_paper_shadow_supervisor import _accepted_tick, _market_gate_context
 from .t_trade_decision_snapshot import (
   TDecisionSnapshotBuilder,
@@ -56,10 +67,11 @@ class _Binding:
   sequences: dict = field(default_factory=dict)
   generations: dict = field(default_factory=dict)
   rewarm: set = field(default_factory=set)
+  readiness_checked_at: datetime | None = None
 
 
 class TAssistantLiveSupervisor:
-  """Does not create/activate executions or broker commands.
+  """Consumes admitted executions and activates them after verified warmup.
 
   Lifecycle admission supplies an existing WARMING/RUNNING source. The supervisor
   restores durable symbol state and forces a new warm window after restart;
@@ -72,11 +84,14 @@ class TAssistantLiveSupervisor:
     quote_hub=whole_quote_hub,
     session_factory=AsyncSessionLocal,
     clock=time_utils.now_aware,
+    readiness_provider=TTradeOperationsService.readiness,
   ):
     self.hub, self.sessions, self.clock = quote_hub, session_factory, clock
     self.runtime = TAssistantLiveDecisionRuntime(
       session_factory=session_factory, clock=clock
     )
+    self.readiness_provider = readiness_provider
+    self.market_marks = LiveTMarketMarkReader(quote_hub)
     self._lock = asyncio.Lock()
     self._handle = None
     self._bindings = {}
@@ -316,6 +331,104 @@ class TAssistantLiveSupervisor:
       )
       return execution_id
 
+  async def _warming_reason(self, binding, reason, now):
+    async with self.sessions() as db, db.begin():
+      repository = TAssistantExecutionRepository(db)
+      execution = await repository.get_domain(binding.execution.execution_id)
+      await self.runtime._lock_live_source(db, execution)
+      if execution.status.value != "WARMING" or execution.readiness.reasons == (
+        reason,
+      ):
+        binding.execution = execution
+        return
+      updated = execution.with_readiness(
+        TAssistantEntryReadinessProjection("WARMING", (reason,), now)
+      )
+      await repository.save_transition_with_event(
+        updated,
+        expected_state_version=execution.state_version,
+        event=TAssistantExecutionEvent(
+          execution.execution_id,
+          f"live-readiness:{updated.state_version}",
+          "LIVE_ENTRY_READINESS_BLOCKED",
+          now,
+          {"reason_codes": [reason]},
+        ),
+      )
+      binding.execution = updated
+
+  async def _try_activate(self, binding, cycle_id, capture):
+    execution = binding.execution
+    if (
+      execution.status.value != "WARMING"
+      or execution.entry_authorization.value != "MANUAL_CONFIRM"
+    ):
+      return
+    codes = [
+      entry.instrument_code
+      for entry in binding.universe
+      if entry.eligible and not entry.draining and not entry.ignored
+    ]
+    states = self.runtime.symbol_states(execution.execution_id)
+    if not codes or not all(
+      code in states and states[code].lifecycle.value == "ACTIVE" for code in codes
+    ):
+      return
+    now = self.clock()
+    if (
+      binding.readiness_checked_at is not None
+      and (now - binding.readiness_checked_at).total_seconds() < 1
+    ):
+      return
+    binding.readiness_checked_at = now
+    try:
+      health = await self.readiness_provider(execution.account_id)
+    except Exception:
+      await self._warming_reason(binding, "LIVE_READY_HEALTH_UNAVAILABLE", self.clock())
+      return
+    observed = self.clock()
+    if (
+      not self.hub.is_ready
+      or self.hub.stream_id != capture.stream_id
+      or str(self.hub.generation) != capture.continuity_generation
+    ):
+      await self._warming_reason(binding, "LIVE_READY_MARKET_CHANGED", observed)
+      return
+
+    def validate_market():
+      # Valuation can await historical I/O while the hub continues ingesting.
+      # Roll the transition and its audit back if that invalidated the witness.
+      if (
+        not self.hub.is_ready
+        or self.hub.stream_id != capture.stream_id
+        or str(self.hub.generation) != capture.continuity_generation
+        or not 0 <= (self.clock() - capture.captured_at).total_seconds() < 90
+      ):
+        raise ValueError("LIVE_READY_MARKET_CHANGED")
+
+    try:
+      async with self.sessions() as db, db.begin():
+        activated = await activate_live_canary_ready(
+          db,
+          execution_id=execution.execution_id,
+          cycle_id=cycle_id,
+          instrument_codes=codes,
+          market_capture=capture,
+          market_mark_reader=self.market_marks,
+          health=health,
+          health_observed_at=observed,
+          now=observed,
+          validate_before_activation=validate_market,
+        )
+      binding.execution = activated
+    except ValueError as exc:
+      reason = (
+        str(exc)
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", str(exc))
+        else "LIVE_READY_INPUT_UNAVAILABLE"
+      )
+      await self._warming_reason(binding, reason, observed)
+
   async def _on_quotes(self, data):
     async with self._lock:
       if not data or not self.hub.is_ready:
@@ -384,6 +497,8 @@ class TAssistantLiveSupervisor:
           self.last_results[key] = await self.runtime.run_cycle(
             execution=binding.execution, snapshot=snapshot
           )
+          if self.last_results[key].committed:
+            await self._try_activate(binding, self.last_results[key].cycle_id, capture)
         except Exception:
           self._unbind(key)
           raise
