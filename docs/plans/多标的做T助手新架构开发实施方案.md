@@ -703,6 +703,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   23 项测试通过，含 PASS/FAIL、修改费用后重新哈希、零成交未平仓场景；Ruff 通过。
   证据 `.codex_screenshots/p6-persisted-metrics.xml`。校验已覆盖存储事实到指标，尚未将
   外部审核身份/目标 LIVE 配置绑定并写入公开发布审批，不把合成样本视为正式准入。
+- P5→LIVE 目标配置绑定入口已实现：先验证报告结论、事实链和指标重算，要求正式 PASS，
+  再校验 RULE_ONLY/MANUAL_CONFIRM/CANARY、策略/特征版本、完整参数与信号策略一致。
+  CANARY 名单须包含于已评估标的；组合、执行门、每个标的 envelope 的经济策略精确一致。
+  返回绑定报告/policy/evaluation/目标配置 hash 的材料；不自行写审批或创建执行。
+  7 项合成评估整链测试通过，涵盖目标参数/额度/门/范围/授权漂移，Ruff 通过。
+  证据 `.codex_screenshots/p6-release-evidence.xml`。审核身份与维护窗口的审批持久化仍待接入。
 - 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
