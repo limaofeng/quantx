@@ -119,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     "--build-evidence",
     type=Path,
     required=True,
-    help="build-lightgbm-opencl-wheel.ps1 生成的 schema-v1 build evidence JSON",
+    help="锁定的官方 Windows GPU wheel，或本机构建的 schema-v1 build evidence JSON",
   )
 
   probe_parser = subparsers.add_parser(

@@ -39,13 +39,18 @@ except (ImportError, OSError):  # pragma: no cover - depends on host wheel
   lgb = None  # type: ignore[assignment]
 
 
-GPU_QUALIFICATION_VERSION = "next-day-selection-gpu-v1"
+GPU_QUALIFICATION_VERSION = "next-day-selection-gpu-v2"
 GPU_BRIER_RELATIVE_TOLERANCE = 0.005
 GPU_ECE_ABSOLUTE_TOLERANCE = 0.002
 GPU_TOP20_OVERLAP_MINIMUM = 0.90
 GPU_MIN_SPEEDUP = 0.20
 GPU_QUALIFICATION_ENV = "QUANTX_LIGHTGBM_GPU_QUALIFICATION"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_OFFICIAL_GPU_WHEEL_SHA256 = "37089ee95664b6550a7189d887dbf098e3eadab03537e411f52c63c121e3ba4b"
+_OFFICIAL_WHEEL_FIELDS = frozenset({
+  "schema_version", "source", "lightgbm_version", "wheel_sha256",
+  "binary_sha256", "platform", "use_gpu",
+})
 _BUILD_EVIDENCE_FIELDS = frozenset(
   {
     "schema_version",
@@ -369,11 +374,16 @@ def _qualification_is_complete(
   except (TypeError, ValueError):
     return False
   minimum_sample_count = payload.get("minimum_sample_count")
+  # Predictions cover the held-out split, whereas the acceleration threshold
+  # is the size of the complete certified panel used for the benchmark.
+  labels_count = evidence.get("labels_count")
   if (
     isinstance(minimum_sample_count, bool)
     or not isinstance(minimum_sample_count, int)
     or minimum_sample_count < 1
-    or evidence.get("labels_count") != minimum_sample_count
+    or isinstance(labels_count, bool)
+    or not isinstance(labels_count, int)
+    or not 0 < labels_count <= minimum_sample_count
   ):
     return False
   build_evidence_hash = payload.get("build_evidence_sha256")
@@ -382,11 +392,7 @@ def _qualification_is_complete(
     not isinstance(build_evidence_hash, str)
     or not _HASH_RE.fullmatch(build_evidence_hash)
     or not isinstance(build_evidence, Mapping)
-    or set(build_evidence) != _PUBLIC_BUILD_EVIDENCE_FIELDS
-    or build_evidence.get("schema_version") != 1
-    or build_evidence.get("lightgbm_version") != "4.7.0"
-    or build_evidence.get("wheel_metadata_version") != "4.7.0"
-    or build_evidence.get("use_gpu") is not True
+    or not _valid_public_build_evidence(build_evidence)
   ):
     return False
   if evidence.get("build_evidence_sha256") != build_evidence_hash:
@@ -616,6 +622,54 @@ def _reject_path_links(path: Path) -> None:
       raise ValueError(f"GPU 资格路径不允许符号链接或联接点: {current.name}")
 
 
+def _valid_public_build_evidence(payload: Mapping[str, Any]) -> bool:
+  if payload.get("schema_version") == 2:
+    return bool(
+      set(payload) == _OFFICIAL_WHEEL_FIELDS
+      and payload.get("source") == "pypi-official-wheel"
+      and payload.get("lightgbm_version") == "4.6.0"
+      and payload.get("wheel_sha256") == _OFFICIAL_GPU_WHEEL_SHA256
+      and isinstance(payload.get("binary_sha256"), str)
+      and _HASH_RE.fullmatch(payload["binary_sha256"])
+      and payload.get("platform") == "Windows"
+      and payload.get("use_gpu") is True
+    )
+  return bool(
+    set(payload) == _PUBLIC_BUILD_EVIDENCE_FIELDS
+    and payload.get("schema_version") == 1
+    and payload.get("lightgbm_version") == "4.7.0"
+    and payload.get("wheel_metadata_version") == "4.7.0"
+    and payload.get("use_gpu") is True
+  )
+
+
+def _load_official_wheel_evidence(path: Path) -> tuple[str, dict[str, Any]]:
+  """Verify the pinned upstream artifact and the binary actually loaded."""
+  import zipfile
+
+  from lightgbm.libpath import _find_lib_path
+
+  _reject_path_links(path)
+  if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != _OFFICIAL_GPU_WHEEL_SHA256:
+    raise ValueError("官方 GPU wheel SHA-256 与锁定版本不匹配")
+  binary = Path(_find_lib_path()[0])
+  _reject_path_links(binary)
+  with zipfile.ZipFile(path) as archive:
+    wheel_binary = archive.read("lightgbm/bin/lib_lightgbm.dll")
+  if getattr(lgb, "__version__", None) != "4.6.0" or binary.read_bytes() != wheel_binary:
+    raise ValueError("已安装 LightGBM 二进制与官方 GPU wheel 不一致")
+  public = {
+    "schema_version": 2,
+    "source": "pypi-official-wheel",
+    "lightgbm_version": "4.6.0",
+    "wheel_sha256": _OFFICIAL_GPU_WHEEL_SHA256,
+    "binary_sha256": hashlib.sha256(wheel_binary).hexdigest(),
+    "platform": "Windows",
+    "use_gpu": True,
+  }
+  return stable_json_sha256(public), public
+
+
 def _load_build_evidence(
   value: str | Path | Mapping[str, Any] | None,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -627,6 +681,8 @@ def _load_build_evidence(
     payload = dict(value)
   else:
     path = Path(value)
+    if path.suffix.lower() == ".whl":
+      return _load_official_wheel_evidence(path)
     _reject_path_links(path)
     if _is_link_like(path) or not path.is_file():
       raise ValueError("GPU build evidence 不是安全普通文件")
@@ -808,12 +864,12 @@ def _default_backend_trial(
 
   if lgb is None:
     raise RuntimeError("LightGBM Python wheel unavailable")
-  feature_columns = [
-    column
-    for column in panel.columns
-    if column not in {"label", "event_date", "stock_code", "target_date"}
-    and pd.api.types.is_numeric_dtype(panel[column])
-  ]
+  from quantx_domain.selection_factors import selection_feature_columns
+
+  # Match real training features; numeric outcome columns contain future data.
+  feature_columns = list(selection_feature_columns())
+  if any(column not in panel.columns for column in feature_columns):
+    raise ValueError("黄金面板缺少训练特征")
   if not feature_columns:
     raise ValueError("黄金面板没有数值特征")
   frame = panel.sort_values(["event_date", "stock_code"], kind="mergesort")
@@ -913,7 +969,12 @@ def qualify_lightgbm_gpu(
   build_evidence_hash = loaded_build_evidence[0] if loaded_build_evidence else None
   build_evidence_public = loaded_build_evidence[1] if loaded_build_evidence else None
   root = Path(dataset_dir).resolve(strict=True)
-  panel = pd.read_parquet(root / "training-panel.parquet")
+  from quantx_domain.selection_factors import selection_feature_columns
+
+  panel = pd.read_parquet(
+    root / "training-panel.parquet",
+    columns=["event_date", "stock_code", "label", *selection_feature_columns()],
+  )
   if isinstance(repeat_count, bool) or not isinstance(repeat_count, int) or repeat_count < 3:
     raise ValueError("GPU FP32/FP64 至少需要三次重复运行")
   runner = trial_runner or _default_backend_trial

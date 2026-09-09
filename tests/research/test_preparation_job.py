@@ -15,6 +15,36 @@ class Calendar:
     return list(pd.bdate_range(start, end).date)
 
 
+@pytest.mark.asyncio
+async def test_gpu_preparation_uses_downloaded_official_wheel(tmp_path, monkeypatch):
+  from quantx_research import next_day_selection_dataset as dataset
+  from quantx_research import next_day_selection_gpu as gpu
+
+  monkeypatch.delenv("QUANTX_LIGHTGBM_BUILD_EVIDENCE", raising=False)
+  monkeypatch.setattr(preparation, "root", lambda: tmp_path)
+  wheel = tmp_path / ".runtime/research-gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl"
+  wheel.parent.mkdir(parents=True)
+  wheel.touch()
+  monkeypatch.setattr(dataset, "resolve_dataset_directory", lambda version: tmp_path / version)
+
+  def qualify(directory, *, build_evidence):
+    assert directory == tmp_path / "certified"
+    assert build_evidence == wheel
+    raise RuntimeError("qualification invoked")
+
+  monkeypatch.setattr(gpu, "qualify_lightgbm_gpu", qualify)
+  request = {
+    "kind": "GPU", "dataset_version": "certified",
+    "config": {"date_start": "2025-01-02", "date_end": "2025-01-10"},
+  }
+  with pytest.raises(RuntimeError, match="qualification invoked"):
+    await preparation.execute(request, tmp_path)
+  wheel.unlink()
+  result = await preparation.execute(request, tmp_path)
+  assert result["ready"] is False
+  assert "官方 GPU wheel" in result["error"]
+
+
 class Source:
   def __init__(self, missing=False):
     self.missing = missing

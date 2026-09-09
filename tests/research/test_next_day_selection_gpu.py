@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -38,6 +41,53 @@ def _build_evidence() -> dict[str, object]:
     "python_abi": "cp312",
     "built_at_utc": "2026-09-02T00:00:00+00:00",
   }
+
+
+def test_official_wheel_requires_matching_artifact_and_installed_binary(tmp_path, monkeypatch):
+  import lightgbm.libpath
+
+  wheel = tmp_path / "lightgbm.whl"
+  binary = tmp_path / "lib_lightgbm.dll"
+  binary.write_bytes(b"gpu-binary")
+  with zipfile.ZipFile(wheel, "w") as archive:
+    archive.writestr("lightgbm/bin/lib_lightgbm.dll", binary.read_bytes())
+  monkeypatch.setattr(gpu, "_OFFICIAL_GPU_WHEEL_SHA256", file_sha256(wheel))
+  monkeypatch.setattr(gpu, "lgb", SimpleNamespace(__version__="4.6.0"))
+  monkeypatch.setattr(lightgbm.libpath, "_find_lib_path", lambda: [str(binary)])
+  evidence_hash, public = gpu._load_build_evidence(wheel)
+  assert evidence_hash == stable_json_sha256(public)
+  assert public["binary_sha256"] == hashlib.sha256(b"gpu-binary").hexdigest()
+  assert gpu._valid_public_build_evidence(public)
+  binary.write_bytes(b"cpu-binary")
+  with pytest.raises(ValueError, match="二进制"):
+    gpu._load_build_evidence(wheel)
+  wheel.write_bytes(b"untrusted-wheel")
+  with pytest.raises(ValueError, match="SHA-256"):
+    gpu._load_build_evidence(wheel)
+
+
+def test_qualification_benchmark_excludes_future_outcomes(monkeypatch):
+  panel = pd.DataFrame({column: np.arange(100) for column in selection_feature_columns()})
+  panel["label"] = np.tile([0, 1], 50)
+  panel["event_date"] = pd.date_range("2025-01-01", periods=100)
+  panel["stock_code"] = "000001.SZ"
+  panel["next_open_to_close_return"] = 999999.0
+  panel["next_close"] = 999999.0
+
+  class Model:
+    def __init__(self, **kwargs):
+      pass
+
+    def fit(self, x, y):
+      assert x.shape[1] == len(selection_feature_columns())
+      assert np.max(x) < 999999.0
+
+    def predict_proba(self, x):
+      return np.tile([0.5, 0.5], (len(x), 1))
+
+  monkeypatch.setattr(gpu, "lgb", SimpleNamespace(LGBMClassifier=Model))
+  result = gpu._default_backend_trial(panel, device_type="cpu")
+  assert result["no_non_finite"] is True
 
 
 def _certified_dataset(tmp_path: Path) -> Path:
@@ -133,10 +183,22 @@ def test_requirement_hash_invalidates_binary_and_device_changes(monkeypatch, tmp
   assert gpu.gpu_requirement_hash() != second
 
 
-def test_probe_requires_complete_matching_qualification(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("official_wheel", [False, True])
+def test_probe_requires_complete_matching_qualification(monkeypatch, tmp_path: Path, official_wheel) -> None:
   build_evidence = _build_evidence()
   build_evidence_hash = stable_json_sha256(build_evidence)
   _, build_evidence_public = gpu._load_build_evidence(build_evidence) or (None, None)
+  if official_wheel:
+    build_evidence_public = {
+      "schema_version": 2,
+      "source": "pypi-official-wheel",
+      "lightgbm_version": "4.6.0",
+      "wheel_sha256": gpu._OFFICIAL_GPU_WHEEL_SHA256,
+      "binary_sha256": "a" * 64,
+      "platform": "Windows",
+      "use_gpu": True,
+    }
+    build_evidence_hash = stable_json_sha256(build_evidence_public)
   evidence = {
     "golden_panel": "abc",
     "version": 1,
@@ -194,11 +256,14 @@ def test_probe_requires_complete_matching_qualification(monkeypatch, tmp_path: P
   assert gpu.probe_lightgbm_gpu(qualification_path=path, requirement_hash="req-1")["status"] == "GPU_UNQUALIFIED"
 
 
-def test_qualification_writes_evidence_and_applies_all_gates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("holdout_only", [False, True])
+def test_qualification_writes_evidence_and_applies_all_gates(tmp_path: Path, holdout_only) -> None:
   dataset = _certified_dataset(tmp_path)
 
   def trial_runner(panel: pd.DataFrame, *, device_type: str, gpu_use_dp: bool) -> dict:
     gpu_run = device_type == "gpu"
+    if holdout_only:
+      panel = panel.iloc[int(len(panel) * 0.8):]
     probability = np.linspace(0.1, 0.9, len(panel)).tolist()
     return {
       "probabilities": probability,
@@ -227,6 +292,7 @@ def test_qualification_writes_evidence_and_applies_all_gates(tmp_path: Path) -> 
   assert evidence["speedup"] >= 0.2
   assert evidence["evidence_sha256"] == stable_json_sha256(evidence["evidence"])
   assert evidence["minimum_sample_count"] == 30
+  assert gpu._qualification_is_complete(evidence, requirement_hash="req-1")
   assert evidence["build_evidence"]["lightgbm_version"] == "4.7.0"
   assert json.loads(output.read_text(encoding="utf-8"))["status"] == "GPU_AVAILABLE"
 
