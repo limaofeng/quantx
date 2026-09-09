@@ -1034,7 +1034,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   实际 Caddy 生成 Web/iOS 契约，check/lint/build 及 Web **895 项通过**；额外契约回归
   8 passed/1 failed 仍为既有 historyDownloadSettings 描述缺失。证据统一位于
   `.codex_screenshots/p6-legacy-recovery-*`，未执行真实维护或交易。
-  下一步完成原生可操作界面和排空后终结/解除旧绑定整链；不开放新源准入。
+  当前旧执行来源只读查询已接入：复核当前设备/账户权限及真实 LIVE 旧策略绑定，返回
+  head.state_version 和持久化排空标记；测试刻意将 config_version 设为 99，确认不会混用
+  两种版本。API 定向回归 9 项通过；实际本机 dev Caddy 生成契约，Web check/lint/build、
+  895 项测试及定向 Ruff 通过，证据 `.codex_screenshots/p6-legacy-ui-*`。契约回归仍有
+  既有 historyDownloadSettings 描述缺失（8 passed/1 failed），不计为全量契约通过。
+  2026-09-10 用户要求暂不开发 iOS：停止原生界面后续开发，已有未提交改动留在工作区，
+  不纳入本次服务端提交或阶段完成证据。下一步推进服务端排空后终结/解除旧绑定整链；
+  不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

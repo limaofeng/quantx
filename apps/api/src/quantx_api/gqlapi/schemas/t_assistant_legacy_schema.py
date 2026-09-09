@@ -14,6 +14,7 @@ from ..t_assistant_legacy_drain_confirmation import (
   issue_drain_confirmation,
   read_legacy_confirmation_status,
   read_legacy_maintenance_operation,
+  read_legacy_maintenance_source,
 )
 from ..trade_approval import TradeApprovalChallengeError
 
@@ -66,6 +67,15 @@ class TAssistantLegacyConfirmationStatus:
   engine_command_id: str | None = None
 
 
+@strawberry.type
+class TAssistantLegacyMaintenanceSource:
+  account_id: str
+  config_id: str
+  run_id: str
+  head_version: int
+  draining: bool
+
+
 def _failed(exc):
   if isinstance(exc, TradeApprovalChallengeError):
     return TAssistantLegacyMaintenanceResult(
@@ -80,6 +90,19 @@ def _failed(exc):
 
 @strawberry.type
 class TAssistantLegacyQuery:
+  @strawberry.field(
+    description="读取当前账户绑定的旧做 T 来源和精确状态版本，不授权切换"
+  )
+  async def t_assistant_legacy_maintenance_source(
+    self, info: strawberry.types.Info, account_id: str
+  ) -> TAssistantLegacyMaintenanceSource | None:
+    principal = principal_from_context(info.context)
+    async with AsyncSessionLocal() as db, db.begin():
+      result = await read_legacy_maintenance_source(
+        db, principal=principal, account_id=account_id
+      )
+    return TAssistantLegacyMaintenanceSource(**result) if result else None
+
   @strawberry.field(
     description="原设备锁定后按确认 ID 找回处理状态，不返回或重新签发令牌"
   )

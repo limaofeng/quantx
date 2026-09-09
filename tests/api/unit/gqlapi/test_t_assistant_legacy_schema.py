@@ -84,6 +84,7 @@ async def test_public_maintenance_contract(monkeypatch):
     "confirmTAssistantLegacyDrain",
     "tAssistantLegacyMaintenanceOperation",
     "tAssistantLegacyConfirmationStatus",
+    "tAssistantLegacyMaintenanceSource",
   ):
     policy = operation_policy(
       "Query" if name.startswith("tAssistant") else "Mutation", name

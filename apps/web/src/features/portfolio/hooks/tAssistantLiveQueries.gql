@@ -202,3 +202,13 @@ query Portfolio_TAssistantLegacyConfirmationStatus($challengeId: String!) {
     request
   }
 }
+
+query Portfolio_TAssistantLegacyMaintenanceSource($accountId: String!) {
+  tAssistantLegacyMaintenanceSource(accountId: $accountId) {
+    accountId
+    configId
+    runId
+    headVersion
+    draining
+  }
+}

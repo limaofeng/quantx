@@ -5231,6 +5231,9 @@ type Query {
   """当前独立 LIVE 做 T 执行的人工确认队列"""
   tAssistantLiveApprovalQueue(accountId: String!): TAssistantLiveApprovalQueue!
 
+  """读取当前账户绑定的旧做 T 来源和精确状态版本，不授权切换"""
+  tAssistantLegacyMaintenanceSource(accountId: String!): TAssistantLegacyMaintenanceSource
+
   """原设备锁定后按确认 ID 找回处理状态，不返回或重新签发令牌"""
   tAssistantLegacyConfirmationStatus(challengeId: String!): TAssistantLegacyConfirmationStatus!
 
@@ -7458,6 +7461,14 @@ type TAssistantLegacyMaintenanceResult {
   message: String!
   engineCommandId: String
   preview: TAssistantLegacyDrainPreview
+}
+
+type TAssistantLegacyMaintenanceSource {
+  accountId: String!
+  configId: String!
+  runId: String!
+  headVersion: Int!
+  draining: Boolean!
 }
 
 type TAssistantLiveApprovalQueue {

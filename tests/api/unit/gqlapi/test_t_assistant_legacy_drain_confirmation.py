@@ -264,3 +264,37 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
     )
   finally:
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", [None, "class", "stopped"])
+async def test_maintenance_source_uses_live_legacy_binding(monkeypatch, damage):
+  engine, sessions, _, _ = await seed_legacy_drain(monkeypatch, damage)
+  principal = replace(
+    _principal(authorized_account_ids=("account-1",)),
+    is_native_session=True,
+    permissions=frozenset({"trade:approve", "t-trade:control"}),
+  )
+  monkeypatch.setattr(
+    api.TTradeControlChallengeService,
+    "_lock_current_principal",
+    AsyncMock(return_value=principal),
+  )
+  try:
+    async with sessions() as db, db.begin():
+      (await db.get(TTradeGlobalConfig, "head")).config_version = 99
+      source = await api.read_legacy_maintenance_source(
+        db, principal=principal, account_id="account-1"
+      )
+      if damage:
+        assert source is None
+      else:
+        assert source == dict(
+          account_id="account-1",
+          config_id="head",
+          run_id="plan-1",
+          head_version=1,
+          draining=False,
+        )
+  finally:
+    await engine.dispose()

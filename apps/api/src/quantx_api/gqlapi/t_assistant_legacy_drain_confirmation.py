@@ -433,3 +433,50 @@ async def read_legacy_confirmation_status(db, *, principal, challenge_id, now):
     "engine_command_id": identity,
     "status": operation["status"],
   }
+
+
+async def read_legacy_maintenance_source(db, *, principal, account_id):
+  from quantx_infrastructure.core.assistant_strategy_policy import (
+    T_TRADE_STRATEGY_CLASS_NAME,
+  )
+  from quantx_infrastructure.models.enums import StrategyRunMode, StrategyRunStatus
+  from quantx_infrastructure.models.strategy import Strategy
+  from quantx_infrastructure.models.strategy_run import StrategyRun
+  from quantx_infrastructure.services.t_legacy_drain_guard import (
+    legacy_t_entry_is_draining,
+  )
+  from sqlalchemy import select
+
+  _require_native_control_principal(principal, account_id)
+  await TTradeControlChallengeService._lock_current_principal(db, principal, account_id)
+  heads = list(
+    await db.scalars(
+      select(TTradeGlobalConfig)
+      .where(TTradeGlobalConfig.account_id == account_id)
+      .limit(2)
+    )
+  )
+  if len(heads) > 1:
+    raise ValueError("LEGACY_T_MAINTENANCE_HEAD_AMBIGUOUS")
+  head = heads[0] if heads else None
+  if head is None or head.mode != "live" or not head.strategy_run_id:
+    return None
+  run = await db.get(StrategyRun, head.strategy_run_id)
+  strategy = await db.get(Strategy, run.strategy_id) if run else None
+  if (
+    run is None
+    or strategy is None
+    or strategy.class_name != T_TRADE_STRATEGY_CLASS_NAME
+    or run.mode != StrategyRunMode.LIVE
+    or run.status not in {StrategyRunStatus.RUNNING, StrategyRunStatus.PAUSED}
+    or dict(run.parameters or {}).get("account_id") != account_id
+  ):
+    return None
+  draining = await legacy_t_entry_is_draining(db, account_id=account_id, run_id=run.id)
+  return {
+    "account_id": account_id,
+    "config_id": head.id,
+    "run_id": run.id,
+    "head_version": head.state_version,
+    "draining": draining,
+  }
