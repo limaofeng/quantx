@@ -276,3 +276,14 @@ Windows 确认 Job 活动数归零后，在关闭控制句柄前原子保存 `se
 Windows `down` 获得适用的 GROUP_EXITED 证明后，会在领取保持关闭且生命周期锁可获取时，使用显式开发配置执行已有训练/准备恢复逻辑；这可能重试已完成制品的发布，不重新计算。恢复仍逐条核验进程证据及执行归属，未知执行不会被批量标记失败。命令返回 recovered/pending 运行与准备任务标识；还有 Trainer 的 RUNNING 任务或控制面不可用时，返回 `database_state=PENDING` 和退出码 3，可在控制面恢复后再次 down 重试。Worker 尚未交接的认证导出不计入 Trainer 待处理集合。
 
 `RECONCILED` 只说明这次开发数据库查询未发现剩余 Trainer RUNNING 任务；离线 status 仍只展示持久化组退出证明，不缓存数据库结论，也不自动恢复领取或授权升级。
+
+
+### 锁定外部依赖
+
+代码包制作前先使用明确 Conda Python 校验/导出根锁文件，避免元数据迁移后锁文件滞后：
+
+```powershell
+uv export --locked --package quantx-trainer --no-dev --no-emit-workspace --no-header --python C:\实际Conda路径\envs\quantx-train\python.exe --output-file requirements.txt
+```
+
+该清单保留每项外部依赖的版本和分发文件哈希，排除工作区源码包；不得把它当作完整代码包或 CUDA wheel 资格证明。本地已导出 `.runtime/trainer-deployment/requirements.txt` 及记录锁文件/清单 SHA256 的 `dependencies.json`，共 161 条依赖，无包版本升级或环境安装。独立代码打包、安装与运行期间冻结仍需完成。
