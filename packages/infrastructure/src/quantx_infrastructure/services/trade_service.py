@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from typing import Any, Dict, List, Optional
 
 from quantx_infrastructure.core.utils import time_utils
@@ -24,8 +25,9 @@ class TradeService:
 
   async def upsert_report(self, report: dict[str, Any]) -> Trade:
     trade = Trade.from_dict(report)
-    async for db in get_async_db():
-      return await TradeRepository(db).save(trade)
+    async with aclosing(get_async_db()) as sessions:
+      async for db in sessions:
+        return await TradeRepository(db).save(trade)
     raise RuntimeError("成交数据库不可用")
 
   async def get_history_trades(

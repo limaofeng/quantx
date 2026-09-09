@@ -866,8 +866,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   可卖），公共服务成功派生绑定 challenge-1 的自动退出授权。35 项授权/生命周期/组合
   测试、40 项增量回报/owner 回归通过，证据 `.codex_screenshots/p6-live-exit-grant-*.log`。
   仍需用实际报告入账替换该合成持仓投影，未完成 ingress/inbox drain 或真实券商验收。
+- 实际报告入账组合已扩展：持久化合成 inbox 后调用真实 report `_process`，OrderService/
+  TradeService 及 Repository 完成入账，重复订单/成交各只留一条；真实 runtime-event
+  staging/drain 将事件标记 APPLIED，重放不重复事件、退出数量或授权。修复三个服务方法
+  从异步生成器返回后会话延迟关闭的问题，使用显式 aclosing；测试验证服务会话计数归零。
+  34 项组合/增量报告/订单服务回归通过，证据
+  `.codex_screenshots/p6-live-report-persistence-regression.log`。账户持仓更新仍为显式合成
+  投影，未覆盖设备网络 ingress、inbox worker claim/finish 或真实 QMT 投递。
 - 剩余开发顺序：
-  补齐 LIVE 实际报告入账与命令重试→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 命令重试与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

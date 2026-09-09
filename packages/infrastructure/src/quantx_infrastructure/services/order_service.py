@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from typing import Any, List, Optional
 
 from quantx_infrastructure.core.utils import time_utils
@@ -51,12 +52,13 @@ class OrderService:
     return []
 
   async def get_order_by_id(self, order_id: int) -> Optional[Order]:
-    async for db in get_async_db():
-      order = await OrderRepository(db).find_by_id(order_id)
-      if order is not None and self.account_id:
-        if order.account_id != self.account_id:
-          return None
-      return order
+    async with aclosing(get_async_db()) as sessions:
+      async for db in sessions:
+        order = await OrderRepository(db).find_by_id(order_id)
+        if order is not None and self.account_id:
+          if order.account_id != self.account_id:
+            return None
+        return order
     return None
 
   async def get_orders(
@@ -70,6 +72,7 @@ class OrderService:
     return []
 
   async def save_orders(self, orders: List[Order]) -> BulkSaveResult:
-    async for db in get_async_db():
-      return await OrderRepository(db).bulk_save(orders)
+    async with aclosing(get_async_db()) as sessions:
+      async for db in sessions:
+        return await OrderRepository(db).bulk_save(orders)
     return BulkSaveResult([], 0, 0, len(orders))

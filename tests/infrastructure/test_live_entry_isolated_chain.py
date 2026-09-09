@@ -396,8 +396,46 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   monkeypatch.setattr(
     report_processor, "utcnow", lambda: confirmed.replace(tzinfo=None)
   )
+  from quantx_infrastructure.services import (
+    auto_exit_plan_service,
+    order_service,
+    trade_service,
+  )
+
+  open_service_sessions = 0
+
+  async def isolated_db():
+    nonlocal open_service_sessions
+    open_service_sessions += 1
+    try:
+      async with sessions() as db:
+        yield db
+    finally:
+      open_service_sessions -= 1
+
+  monkeypatch.setattr(order_service, "get_async_db", isolated_db)
+  monkeypatch.setattr(trade_service, "get_async_db", isolated_db)
+  monkeypatch.setattr(auto_exit_plan_service, "AsyncSessionLocal", sessions)
+  order_payload = {
+    "client_order_id": pending.client_order_id,
+    "account_id": "account-1",
+    "stock_code": "600000.SH",
+    "order_id": 101,
+    "order_sysid": "system-101",
+    "order_type": 23,
+    "order_status": 50,
+    "order_volume": 100,
+    "price": 9.9,
+    "order_time": int(confirmed.timestamp()),
+    "source_sequence": 1,
+    "source_event_at": confirmed.isoformat(),
+  }
+  await report_processor._process_order_report(dict(order_payload))
+  await report_processor._process_order_report(dict(order_payload))
   report = AgentReportInbox(
     message_id="synthetic-fill",
+    client_order_id=pending.client_order_id,
+    received_at=confirmed.replace(tzinfo=None),
     device_id="synthetic",
     message_type="execution_report",
     protocol_version=PROTOCOL_VERSION,
@@ -407,13 +445,28 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       "client_order_id": pending.client_order_id,
       "account_id": "account-1",
       "stock_code": "600000.SH",
-      "order_id": "broker-1",
+      "order_id": "101",
       "traded_id": "fill-1",
       "traded_volume": 100,
       "traded_price": 9.9,
-      "traded_time": confirmed.isoformat(),
+      "traded_time": int(confirmed.timestamp()),
+      "source_sequence": 2,
+      "source_event_at": confirmed.isoformat(),
     },
   )
+  report.raw_payload_hash = hashlib.sha256(
+    json.dumps(report.payload, sort_keys=True, separators=(",", ":")).encode()
+  ).hexdigest()
+  async with sessions() as db, db.begin():
+    db.add(report)
+  await report_processor._process(report)
+  await report_processor._process(report)
+  assert open_service_sessions == 0
+  async with sessions() as db:
+    assert await db.scalar(select(func.count()).select_from(Order)) == 1
+    assert await db.scalar(select(func.count()).select_from(Trade)) == 1
+    recorded_trade = await db.get(Trade, "fill-1")
+    assert recorded_trade.volume == 100 and recorded_trade.order_id == 101
   await report_processor._stage_runtime_events(report)
   async with sessions() as db:
     event = await db.scalar(select(StrategyRuntimeEvent))
@@ -452,9 +505,13 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     source.completed_at = confirmed
     source.entry_readiness = "BLOCKED"
     await db.commit()
-  await report_processor._apply_runtime_event(event)
-  await report_processor._apply_runtime_event(event)
+  await report_processor._drain_runtime_events()
+  await report_processor._stage_runtime_events(report)
+  await report_processor._drain_runtime_events()
   async with sessions() as db:
+    applied = await db.get(StrategyRuntimeEvent, event.event_id)
+    assert applied.application_status == "APPLIED"
+    assert await db.scalar(select(func.count()).select_from(StrategyRuntimeEvent)) == 1
     plans = list(await db.scalars(select(AutoExitPlanRecord)))
     assert len(plans) == 1
     assert plans[0].plan_state["entry_filled_volume"] == 100
