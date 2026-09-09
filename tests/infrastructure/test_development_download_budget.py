@@ -61,7 +61,7 @@ async def download(workers):
   first.budget_migration = await install_budget_schema(first.engine)
   async with first.engine.begin() as connection:
     await connection.execute(
-      text("ALTER TABLE development_data_export ADD COLUMN error text")
+      text("ALTER TABLE development_data_export ADD COLUMN IF NOT EXISTS error text")
     )
     await connection.execute(
       text("""
@@ -136,6 +136,10 @@ async def test_exhaustion_is_sticky_and_visible_without_starting_work(
     assert after[key] == before[key]
   assert after["reason_code"] == "DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED"
   async with first.engine.connect() as connection:
+    assert (
+      await connection.scalar(text("SELECT state FROM development_data_export"))
+      == "BLOCKED"
+    )
     assert (
       await connection.scalar(text("SELECT error FROM development_data_export"))
       == after["reason_code"]

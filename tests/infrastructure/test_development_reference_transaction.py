@@ -20,6 +20,7 @@ from quantx_infrastructure.repositories.divid_factor_repository import (
 from quantx_infrastructure.services.data_exchange_reference import (
   INSTRUMENT_FIELDS,
   import_reference_in_transaction,
+  verify_imported_reference,
 )
 from sqlalchemy import MetaData, event, insert, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -189,6 +190,87 @@ async def test_calendar_scope_rejected_before_writing(references, change):
       )
 
 
+@pytest.mark.parametrize(
+  "change", ["instrument", "calendar", "factor", "receipt", "missing"]
+)
+async def test_reference_recheck_rejects_changes_without_repair(references, change):
+  store = references
+  item = reference()
+  async with store.engine.begin() as connection:
+    audit = await import_reference_in_transaction(
+      connection, item, code="600000.SH", owner=store
+    )
+  async with store.engine.begin() as connection:
+    await verify_imported_reference(connection, item, audit, code="600000.SH")
+    if change == "instrument":
+      await connection.execute(text("UPDATE instruments SET price_tick=2"))
+    elif change == "calendar":
+      await connection.execute(text("UPDATE holidays SET description='changed'"))
+    elif change == "factor":
+      await connection.execute(
+        insert(DividFactorTable).values(
+          stock_code="600000.SH",
+          ex_date="20260601",
+          time=datetime(2026, 6, 1),
+          dr=2,
+        )
+      )
+    elif change == "missing":
+      await connection.execute(text("DELETE FROM instruments"))
+    else:
+      audit["reference_sha256"] = "0" * 64
+
+  def reject_writes(connection, cursor, statement, parameters, context, executemany):
+    assert statement.lstrip().split()[0].upper() not in {"INSERT", "UPDATE", "DELETE"}
+
+  event.listen(store.engine.sync_engine, "before_cursor_execute", reject_writes)
+  try:
+    with pytest.raises(ValueError):
+      async with store.engine.begin() as connection:
+        await verify_imported_reference(connection, item, audit, code="600000.SH")
+  finally:
+    event.remove(store.engine.sync_engine, "before_cursor_execute", reject_writes)
+
+
+async def test_permanent_readback_capacity_keeps_its_reason(references, monkeypatch):
+  from quantx_infrastructure.services import development_history_import as importer
+  from quantx_infrastructure.services.market_data_persistence_verification import (
+    MarketDataPersistenceBlockedError,
+  )
+
+  from tests.infrastructure.test_development_delivery_manifest import REQUEST, manifest
+
+  store = references
+  async with store.engine.begin() as connection:
+    await connection.execute(
+      text("ALTER TABLE development_data_export ADD COLUMN IF NOT EXISTS error text")
+    )
+    await connection.execute(
+      text("""
+      INSERT INTO development_data_export(id,request,state,updated_at)
+      VALUES ('delivery','{}','LOCAL_VERIFIED',clock_timestamp())
+    """)
+    )
+  monkeypatch.setattr(importer, "AsyncSessionLocal", async_sessionmaker(store.engine))
+  monkeypatch.setattr(
+    importer,
+    "verify_uploaded_bar_request",
+    AsyncMock(
+      side_effect=MarketDataPersistenceBlockedError(
+        "DEPENDENCY_READBACK_CAPACITY_BLOCKED"
+      ),
+    ),
+  )
+  result = await importer._recheck_local_partition(
+    "delivery", REQUEST, manifest(), None
+  )
+  assert result == {
+    "id": "delivery",
+    "status": "BLOCKED",
+    "reason": "DEPENDENCY_READBACK_CAPACITY_BLOCKED",
+  }
+
+
 @pytest.mark.parametrize("fail_receipt", [False, True])
 async def test_importer_publishes_reference_and_local_receipt_in_one_transaction(
   references,
@@ -212,7 +294,7 @@ async def test_importer_publishes_reference_and_local_receipt_in_one_transaction
   await install_budget_schema(store.engine)
   async with store.engine.begin() as connection:
     await connection.execute(
-      text("ALTER TABLE development_data_export ADD COLUMN error text")
+      text("ALTER TABLE development_data_export ADD COLUMN IF NOT EXISTS error text")
     )
   factory = async_sessionmaker(store.engine)
   monkeypatch.setattr(importer, "AsyncSessionLocal", factory)
@@ -299,3 +381,43 @@ async def test_importer_publishes_reference_and_local_receipt_in_one_transaction
         "SELECT count(*) FROM development_data_export WHERE state='REFERENCE_VERIFIED'"
       )
     ) == (0 if fail_receipt else 1)
+  if not fail_receipt:
+    from quantx_infrastructure.services.market_data_persistence_verification import (
+      MarketDataPersistenceQueryError,
+    )
+
+    verify = AsyncMock(
+      side_effect=MarketDataPersistenceQueryError("temporarily unavailable")
+    )
+    monkeypatch.setattr(importer, "verify_uploaded_bar_request", verify)
+    pending = await importer._import_partition_owned(request)
+    assert pending["status"] == "WAITING_LOCAL_PROOF"
+    assert (await catalog.get_export(identity))["state"] == "WAITING_LOCAL_PROOF"
+    assert await importer._import_partition_owned(request) == pending
+    assert verify.await_count == 1
+    async with store.engine.begin() as connection:
+      await connection.execute(
+        text(
+          "UPDATE development_data_download_budget SET next_probe_at=clock_timestamp()"
+        )
+      )
+    verify.side_effect = None
+    verify.return_value = {"records_verified": 1}
+    assert "local_verification" in await importer._import_partition_owned(request)
+    assert importer.ingest_uploaded_bar_request.await_count == 1
+    async with store.engine.begin() as connection:
+      await connection.execute(
+        insert(DividFactorTable).values(
+          stock_code="600000.SH",
+          ex_date="20260601",
+          time=datetime(2026, 6, 1),
+          dr=2,
+        )
+      )
+    blocked = await importer._import_partition_owned(request)
+    assert blocked["status"] == "BLOCKED"
+    assert (await catalog.get_export(identity))["state"] == "BLOCKED"
+    assert await importer._import_partition_owned(request) == blocked
+    assert importer.ingest_uploaded_bar_request.await_count == 1
+    async with store.engine.connect() as connection:
+      assert await connection.scalar(text("SELECT count(*) FROM divid_factors")) == 1

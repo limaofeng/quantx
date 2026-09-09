@@ -1295,6 +1295,87 @@ async def persist_bar_records(
   )
 
 
+async def _verify_uploaded_bar_coverage(
+  manifest,
+  payload,
+  audit,
+  *,
+  verify_persistence=None,
+  progress=None,
+  single_attempt=False,
+):
+  scope = _parse_bars_request(payload)
+  verifier = verify_persistence or verify_persisted_bar_summaries
+  with market_data_stage("readback"):
+    verification = await verifier(
+      code_summaries=audit["code_summaries"],
+      expected_key_batches=_uploaded_key_batches(manifest),
+      start_ms=scope.start_ms,
+      end_exclusive_ms=scope.end_exclusive_ms,
+      **(
+        # Reserve the other service query slot for the local historical API.
+        {
+          "max_attempts": 1,
+          "retry_delays": (),
+          "progress": progress,
+          "concurrency": 1,
+        }
+        if progress is not None or single_attempt
+        else {}
+      ),
+    )
+  records_verified = int(verification.get("records_verified", -1))
+  summary_fields = (
+    "code",
+    "period",
+    "row_count",
+    "min_time",
+    "max_time",
+    "key_sha256",
+  )
+  expected_verified_summaries = [
+    {field: summary.get(field) for field in summary_fields}
+    for summary in audit["code_summaries"]
+  ]
+  if (
+    verification.get("status") != "verified"
+    or records_verified != int(audit["records_received"])
+    or int(verification.get("groups_verified", -1)) != len(expected_verified_summaries)
+    or verification.get("code_summaries") != expected_verified_summaries
+  ):
+    raise MarketDataPersistenceVerificationError(
+      "Influx persistence verification did not prove every accepted row"
+    )
+  return {
+    "records_verified": records_verified,
+    "persistence_verification": verification,
+  }
+
+
+async def verify_uploaded_bar_request(
+  store: MarketDataTransferStore,
+  request_id: str,
+  *,
+  verify_persistence: VerifyPersistence | None = None,
+) -> dict[str, Any]:
+  """Recheck immutable input and current key coverage without writes or cached proofs."""
+  token = market_data_request_id.set(request_id)
+  try:
+    _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
+    with market_data_stage("manifest_validation"):
+      audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
+    verified = await _verify_uploaded_bar_coverage(
+      manifest,
+      payload,
+      audit,
+      verify_persistence=verify_persistence,
+      single_attempt=True,
+    )
+    return {**audit, **verified}
+  finally:
+    market_data_request_id.reset(token)
+
+
 async def ingest_uploaded_bar_request(
   store: MarketDataTransferStore,
   request_id: str,
@@ -1342,54 +1423,14 @@ async def ingest_uploaded_bar_request(
         )
         if progress is not None:
           await progress.apply("advance", phase="READBACK", write_result=persisted)
-    scope = _parse_bars_request(payload)
-    verifier = verify_persistence or verify_persisted_bar_summaries
-    with market_data_stage("readback"):
-      verification = await verifier(
-        code_summaries=audit["code_summaries"],
-        expected_key_batches=_uploaded_key_batches(manifest),
-        start_ms=scope.start_ms,
-        end_exclusive_ms=scope.end_exclusive_ms,
-        **(
-          # Reserve the other service query slot for the local historical API.
-          {
-            "max_attempts": 1,
-            "retry_delays": (),
-            "progress": progress,
-            "concurrency": 1,
-          }
-          if progress is not None
-          else {}
-        ),
-      )
-    records_verified = int(verification.get("records_verified", -1))
-    summary_fields = (
-      "code",
-      "period",
-      "row_count",
-      "min_time",
-      "max_time",
-      "key_sha256",
+    verified = await _verify_uploaded_bar_coverage(
+      manifest,
+      payload,
+      audit,
+      verify_persistence=verify_persistence,
+      progress=progress,
     )
-    expected_verified_summaries = [
-      {field: summary.get(field) for field in summary_fields}
-      for summary in audit["code_summaries"]
-    ]
-    if (
-      verification.get("status") != "verified"
-      or records_verified != int(audit["records_received"])
-      or int(verification.get("groups_verified", -1))
-      != len(expected_verified_summaries)
-      or verification.get("code_summaries") != expected_verified_summaries
-    ):
-      raise MarketDataPersistenceVerificationError(
-        "Influx persistence verification did not prove every accepted row"
-      )
-    return {
-      **persisted,
-      "records_verified": records_verified,
-      "persistence_verification": verification,
-    }
+    return {**persisted, **verified}
   finally:
     market_data_request_id.reset(token)
 

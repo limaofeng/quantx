@@ -185,7 +185,7 @@ async def import_reference_in_transaction(
   return result
 
 
-async def _import_reference_session(db, reference: dict, *, code: str) -> dict:
+def _parse_imported_reference(reference: dict, *, code: str):
   as_of = date.fromisoformat(reference["as_of"])
   holidays = reference["holidays"]
   if not isinstance(holidays, list) or len(holidays) > 366:
@@ -247,14 +247,6 @@ async def _import_reference_session(db, reference: dict, *, code: str) -> dict:
     ]
     if evidence.stock_code != code or not current_rows_match_evidence(evidence, values):
       raise ValueError("Imported reference evidence does not match factor rows")
-  await db.merge(Instrument(**instrument))
-  for holiday in calendar:
-    day = holiday["date"]
-    found = await db.scalar(
-      select(Holiday).where(Holiday.market == "SH", Holiday.date == day)
-    )
-    if found is None:
-      db.add(Holiday(**holiday))
   factors = []
   for raw in reference["factors"]:
     if set(raw) != set(FACTOR_FIELDS) or raw["stock_code"] != code:
@@ -268,6 +260,53 @@ async def _import_reference_session(db, reference: dict, *, code: str) -> dict:
         }
       )
     )
+  return instrument, calendar, factors, proof
+
+
+async def _verify_reference_fields(db, instrument, calendar, *, code):
+  actual_instrument = (
+    (
+      await db.execute(
+        select(
+          *(getattr(Instrument, key).label(key) for key in INSTRUMENT_FIELDS)
+        ).where(Instrument.id == code)
+      )
+    )
+    .mappings()
+    .one_or_none()
+  )
+  if actual_instrument is None or dict(actual_instrument) != instrument:
+    raise ValueError("Imported instrument readback mismatch")
+  if calendar:
+    actual_calendar = (
+      (
+        await db.execute(
+          select(Holiday.market, Holiday.year, Holiday.date, Holiday.description)
+          .where(
+            Holiday.market == "SH",
+            Holiday.date.in_([item["date"] for item in calendar]),
+          )
+          .order_by(Holiday.date)
+          .limit(len(calendar) + 1)
+        )
+      )
+      .mappings()
+      .all()
+    )
+    if [dict(item) for item in actual_calendar] != calendar:
+      raise ValueError("Imported calendar readback mismatch")
+
+
+async def _import_reference_session(db, reference: dict, *, code: str) -> dict:
+  instrument, calendar, factors, proof = _parse_imported_reference(reference, code=code)
+  await db.merge(Instrument(**instrument))
+  for holiday in calendar:
+    day = holiday["date"]
+    found = await db.scalar(
+      select(Holiday).where(Holiday.market == "SH", Holiday.date == day)
+    )
+    if found is None:
+      db.add(Holiday(**holiday))
   # Available rows are not proof of an empty or authoritative replacement range.
   proof = reference.get("factor_coverage", {})
   factor_audit = None
@@ -290,37 +329,7 @@ async def _import_reference_session(db, reference: dict, *, code: str) -> dict:
       end_ex_date=max(factor.ex_date for factor in factors),
     )
   await db.flush()
-  actual_instrument = (
-    (
-      await db.execute(
-        select(
-          *(getattr(Instrument, key).label(key) for key in INSTRUMENT_FIELDS)
-        ).where(Instrument.id == code)
-      )
-    )
-    .mappings()
-    .one()
-  )
-  if dict(actual_instrument) != instrument:
-    raise ValueError("Imported instrument readback mismatch")
-  if calendar:
-    actual_calendar = (
-      (
-        await db.execute(
-          select(Holiday.market, Holiday.year, Holiday.date, Holiday.description)
-          .where(
-            Holiday.market == "SH",
-            Holiday.date.in_([item["date"] for item in calendar]),
-          )
-          .order_by(Holiday.date)
-          .limit(len(calendar) + 1)
-        )
-      )
-      .mappings()
-      .all()
-    )
-    if [dict(item) for item in actual_calendar] != calendar:
-      raise ValueError("Imported calendar readback mismatch")
+  await _verify_reference_fields(db, instrument, calendar, code=code)
   if proof.get("status") == "VERIFIED":
     encoded = json.dumps(reference, sort_keys=True)
     version = hashlib.sha256(encoded.encode()).hexdigest()
@@ -355,6 +364,49 @@ async def _import_reference_session(db, reference: dict, *, code: str) -> dict:
     "factor_replacement": factor_audit,
     "factor_coverage_status": proof.get("status", "UNVERIFIED"),
   }
+
+
+async def verify_imported_reference(connection, reference, audit, *, code):
+  """Read current reference rows against the original receipt; never repair them."""
+  instrument, calendar, factors, proof = _parse_imported_reference(reference, code=code)
+  digest = hashlib.sha256(
+    json.dumps(reference, sort_keys=True, allow_nan=False).encode()
+  ).hexdigest()
+  if (
+    not isinstance(audit, dict)
+    or audit.get("reference_sha256") != digest
+    or audit.get("instrument_records_verified") != 1
+    or audit.get("calendar_records_verified") != len(calendar)
+    or audit.get("factor_coverage_status") != proof.get("status", "UNVERIFIED")
+  ):
+    raise ValueError("Imported reference receipt mismatch")
+  async with AsyncSession(bind=connection, join_transaction_mode="rollback_only") as db:
+    await _verify_reference_fields(db, instrument, calendar, code=code)
+    if proof.get("status") == "VERIFIED" or factors:
+      if not isinstance(audit.get("factor_replacement"), dict):
+        raise ValueError("Imported factor receipt missing")
+      start = (
+        proof["start_date"]
+        if proof.get("status") == "VERIFIED"
+        else min(f.ex_date for f in factors)
+      )
+      end = (
+        proof["end_date"]
+        if proof.get("status") == "VERIFIED"
+        else max(f.ex_date for f in factors)
+      )
+      try:
+        await DividFactorRepository(db).verify_replaced_range(
+          [f for f in factors if start <= f.ex_date <= end],
+          stock_codes=[code],
+          start_ex_date=start,
+          end_ex_date=end,
+          audit=audit["factor_replacement"],
+        )
+      except RuntimeError as exc:
+        raise ValueError("Imported factor recovery mismatch") from exc
+    elif audit.get("factor_replacement") is not None:
+      raise ValueError("Unexpected imported factor receipt")
 
 
 async def imported_factor_evidence(session, codes: set[str]) -> list[tuple]:

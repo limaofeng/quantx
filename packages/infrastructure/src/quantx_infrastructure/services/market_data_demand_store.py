@@ -66,6 +66,7 @@ class MarketDataDemandStore(DurableRuntimeStore):
         SELECT d.*, r.status AS source_status,
                r.ingestion_progress->>'phase' AS source_phase,
                e.state AS delivery_status,
+               e.error AS delivery_reason,
                clock_timestamp() AS observed_at
         FROM market_data_demand d
         LEFT JOIN market_data_request r ON r.request_id=d.source_request_id
@@ -81,6 +82,9 @@ class MarketDataDemandStore(DurableRuntimeStore):
     if row is None:
       return None
     result = dict(row)
+    delivery_reason = result.pop("delivery_reason")
+    if result["source_kind"] == "REMOTE" and delivery_reason:
+      result["reason_code"] = delivery_reason
     result["state"] = (
       "LINKED"
       if result["source_request_id"] or result["delivery_id"]

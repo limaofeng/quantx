@@ -104,7 +104,7 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
       text("""
       CREATE TEMP TABLE development_data_export (
         id varchar(64) PRIMARY KEY, request json NOT NULL, state varchar(32) NOT NULL,
-        updated_at timestamptz NOT NULL, expires_at timestamptz
+        updated_at timestamptz NOT NULL, expires_at timestamptz, error text
       )
     """)
     )

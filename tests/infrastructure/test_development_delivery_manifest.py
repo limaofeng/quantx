@@ -137,7 +137,8 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
     await connection.execute(
       text("""
       CREATE TEMP TABLE development_data_export (
-        id varchar(64) PRIMARY KEY, request json, manifest json, updated_at timestamptz, error text
+        id varchar(64) PRIMARY KEY, request json, manifest json, updated_at timestamptz, error text,
+        state varchar(32) DEFAULT 'QUEUED'
       )
     """)
     )

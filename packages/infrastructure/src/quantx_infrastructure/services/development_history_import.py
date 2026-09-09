@@ -13,6 +13,7 @@ from uuid import uuid4
 import httpx
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from quantx_infrastructure.database.connection import AsyncSessionLocal
 from quantx_infrastructure.services.data_exchange import (
@@ -24,20 +25,30 @@ from quantx_infrastructure.services.data_exchange import (
 from quantx_infrastructure.services.data_exchange_reference import (
   import_reference,
   import_reference_in_transaction,
+  verify_imported_reference,
 )
 from quantx_infrastructure.services.development_delivery_manifest import (
   MAX_DELIVERY_METADATA_BYTES,
   pin_delivery_manifest,
   read_delivery_metadata,
+  validate_delivery_manifest,
 )
 from quantx_infrastructure.services.development_download_budget import (
   DeliveryDownloadBudgetExhausted,
   DeliveryRemoteUnavailable,
   DevelopmentDownloadBudget,
 )
+from quantx_infrastructure.services.market_data_persistence_verification import (
+  MarketDataPersistenceBlockedError,
+  MarketDataPersistenceMismatchError,
+  MarketDataPersistenceQueryError,
+  MarketDataPersistenceVerificationError,
+)
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   MAX_TRANSFER_CHUNK_COMPRESSED_BYTES,
+  MarketDataValidationError,
   ingest_uploaded_bar_request,
+  verify_uploaded_bar_request,
 )
 
 
@@ -95,14 +106,17 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
     raise ValueError("History import is development-only")
   identity = await submit(request)
   local = await get_export(identity)
-  if local["state"] == "LOCAL_VERIFIED":
-    return local["manifest"]
+  if local["state"] == "BLOCKED":
+    return {"id": identity, "status": "BLOCKED", "reason": local["error"]}
   budget = DevelopmentDownloadBudget(AsyncSessionLocal, identity)
   schedule = await budget.schedule()
   if schedule["reason_code"]:
     return {"id": identity, "status": "BLOCKED", "reason": schedule["reason_code"]}
   if not schedule["due"]:
-    return {"id": identity, "status": "WAITING_SOURCE", "reason": schedule["wait_reason"]}
+    waiting = "WAITING_LOCAL_PROOF" if local["state"] == "WAITING_LOCAL_PROOF" else "WAITING_SOURCE"
+    return {"id": identity, "status": waiting, "reason": schedule["wait_reason"]}
+  if local["state"] in {"LOCAL_VERIFIED", "WAITING_LOCAL_PROOF"}:
+    return await _recheck_local_partition(identity, request, local["manifest"], budget)
   base = os.environ["QUANTX_MARKET_DATA_URL"].rstrip("/")
   headers = {"Authorization": f"Bearer {os.environ['QUANTX_MARKET_DATA_TOKEN']}"}
   async with httpx.AsyncClient(
@@ -192,6 +206,48 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
       )
       await db.commit()
     return receipt
+
+
+async def _recheck_local_partition(identity, request, receipt, budget):
+  try:
+    if not isinstance(receipt, dict):
+      raise ValueError("Missing local receipt")
+    manifest = {k: v for k, v in receipt.items() if k != "local_verification"}
+    validate_delivery_manifest(manifest, request)
+    current = await verify_uploaded_bar_request(ImportedTransfer(manifest), identity)
+    async with AsyncSessionLocal() as db:
+      await verify_imported_reference(
+        await db.connection(), manifest["reference"],
+        receipt.get("local_verification", {}).get("reference_verification"),
+        code=request.instrument,
+      )
+      result = {**receipt, "local_verification": {**receipt["local_verification"], **current}}
+      await db.execute(text("""
+        UPDATE development_data_export SET state='LOCAL_VERIFIED',error=NULL,
+          manifest=CAST(:manifest AS JSON),updated_at=clock_timestamp() WHERE id=:id
+      """), {"id": identity, "manifest": json.dumps(result, default=str)})
+      await db.execute(text("""
+        UPDATE development_data_download_budget SET wait_reason=NULL,transient_failures=0,
+          next_probe_at=clock_timestamp(),updated_at=clock_timestamp() WHERE delivery_id=:id
+      """), {"id": identity})
+      await db.commit()
+    return result
+  except MarketDataPersistenceBlockedError as exc:
+    state, reason = "BLOCKED", exc.reason_code
+  except (MarketDataPersistenceQueryError, SQLAlchemyError):
+    state, reason = "WAITING_LOCAL_PROOF", "LOCAL_READBACK_UNAVAILABLE"
+  except (ValueError, MarketDataValidationError, MarketDataPersistenceMismatchError,
+          MarketDataPersistenceVerificationError, FileNotFoundError):
+    state, reason = "BLOCKED", "LOCAL_DELIVERY_PROOF_INVALID"
+  async with AsyncSessionLocal() as db:
+    await db.execute(text("""
+      UPDATE development_data_export SET state=:state,error=:reason,
+        updated_at=clock_timestamp() WHERE id=:id
+    """), {"id": identity, "state": state, "reason": reason})
+    await db.commit()
+  if state == "WAITING_LOCAL_PROOF":
+    await budget.schedule("local_failed")
+  return {"id": identity, "status": state, "reason": reason}
 
 
 async def run_range(

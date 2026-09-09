@@ -82,7 +82,7 @@ async def supplement_partition(code, day, wait_seconds):
             and state.delivery_status == "LOCAL_VERIFIED"
           ):
             return {**result, "status": "success"}
-          terminal = {"FAILED", "CANCELLED", "INCOMPLETE"}
+          terminal = {"FAILED", "CANCELLED", "INCOMPLETE", "BLOCKED"}
           if state.source_status in terminal or state.delivery_status in terminal:
             return {**result, "status": "failed"}
           await asyncio.sleep(2)

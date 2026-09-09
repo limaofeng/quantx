@@ -130,6 +130,8 @@ async def test_source_phase_comes_from_persisted_checkpoint(workers, phase):
     ("REMOTE", None, None, "READY", "pending"),
     ("REMOTE", None, None, "LOCAL_VERIFIED", "success"),
     ("REMOTE", None, None, "INCOMPLETE", "failed"),
+    ("REMOTE", None, None, "BLOCKED", "failed"),
+    ("REMOTE", None, None, "WAITING_LOCAL_PROOF", "pending"),
   ],
 )
 async def test_cli_verification_gate(
@@ -150,6 +152,34 @@ async def test_cli_verification_gate(
   assert result["source_phase"] == phase and result["delivery_status"] == delivery
   assert client.client.is_closed
   store.submit_history_demand.assert_awaited_once_with(demand())
+
+
+async def test_remote_proof_failure_reason_is_exposed_by_local_api(workers):
+  (store, _), _ = workers
+  store.demand_source_kind = "REMOTE"
+  identity = await store.submit_history_demand(demand())
+  async with store.engine.begin() as connection:
+    await connection.execute(
+      text("""
+      INSERT INTO development_data_export(id,request,state,error,updated_at)
+      VALUES (:id,'{}','BLOCKED','LOCAL_DELIVERY_PROOF_INVALID',clock_timestamp())
+    """),
+      {"id": "b" * 64},
+    )
+    await connection.execute(
+      text("UPDATE market_data_demand SET delivery_id=:id"), {"id": "b" * 64}
+    )
+  app = create_app(store=store, token="internal", reader=object())
+  async with app.router.lifespan_context(app):
+    client = module.LocalMarketDataClient(
+      token="internal", transport=httpx.ASGITransport(app)
+    )
+    try:
+      value = await client.history_demand(identity, expected_partition=demand())
+      assert value.delivery_status == "BLOCKED"
+      assert value.reason_code == "LOCAL_DELIVERY_PROOF_INVALID"
+    finally:
+      await client.close()
 
 
 @pytest.mark.parametrize("change", ["id", "partition"])

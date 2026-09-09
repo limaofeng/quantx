@@ -42,6 +42,9 @@ class DevelopmentDownloadBudget:
       "transient_failures=LEAST(6,transient_failures+1),wait_reason='DELIVERY_REMOTE_UNAVAILABLE'",
       "ready": "wait_reason=NULL,next_probe_at=clock_timestamp()",
     }
+    changes["local_failed"] = changes["failed"].replace(
+      "DELIVERY_REMOTE_UNAVAILABLE", "LOCAL_READBACK_UNAVAILABLE"
+    )
     if action not in changes:
       raise ValueError("invalid delivery schedule action")
     async with self.session_factory() as db:
@@ -61,6 +64,14 @@ class DevelopmentDownloadBudget:
             + changes[action]
             + ",updated_at=clock_timestamp() WHERE delivery_id=:id"
           ),
+          {"id": self.delivery_id},
+        )
+      if action == "expired":
+        await db.execute(
+          text("""
+          UPDATE development_data_export SET state='BLOCKED',error='DELIVERY_REMOTE_EXPIRED',
+            updated_at=clock_timestamp() WHERE id=:id
+        """),
           {"id": self.delivery_id},
         )
       row = (
@@ -126,7 +137,7 @@ class DevelopmentDownloadBudget:
         )
         await db.execute(
           text("""
-          UPDATE development_data_export SET error='DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED',
+          UPDATE development_data_export SET state='BLOCKED',error='DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED',
             updated_at=clock_timestamp() WHERE id=:id
         """),
           {"id": self.delivery_id},
