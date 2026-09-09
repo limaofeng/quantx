@@ -322,7 +322,7 @@ async def test_market_data_wait_timeout_keeps_durable_status(monkeypatch) -> Non
       return None
 
   store = FakeStore()
-  monkeypatch.setattr(durable_agent_flows, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(durable_agent_flows, "LocalMarketDataClient", lambda: store)
 
   result = await durable_agent_flows._request_and_wait(
     {"operation": "bars"},

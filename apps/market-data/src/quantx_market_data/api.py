@@ -10,6 +10,13 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
+from fastapi.responses import Response
+from quantx_contracts.history_collection_api import (
+  MAX_HISTORY_RESULT_BYTES,
+  HistoryCollectionAccepted,
+  HistoryCollectionResult,
+  HistoryCollectionSubmission,
+)
 from quantx_contracts.instrument_details import (
   INSTRUMENT_CODE_PATTERN,
   InstrumentDetailSnapshot,
@@ -180,6 +187,52 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     if result is None:
       raise HTTPException(404, "INSTRUMENT_SNAPSHOT_NOT_VERIFIED")
     return result
+
+  @app.post(
+    "/market-data/internal/v1/requests",
+    status_code=202,
+    response_model=HistoryCollectionAccepted,
+    dependencies=[Depends(authorize)],
+  )
+  async def collect(request: HistoryCollectionSubmission):
+    try:
+      identity = await app.state.store.create_market_data_request(
+        request.payload,
+        device_id=str(request.device_id) if request.device_id else None,
+        required_capabilities=request.required_capabilities,
+        idempotency_scope=request.idempotency_scope,
+      )
+    except ValueError:
+      raise HTTPException(422, "HISTORY_REQUEST_INVALID") from None
+    except (RuntimeError, SQLAlchemyError):
+      raise HTTPException(503, "HISTORY_REQUEST_UNAVAILABLE") from None
+    return {"request_id": identity}
+
+  @app.get(
+    "/market-data/internal/v1/requests/{request_id}/result",
+    dependencies=[Depends(authorize)],
+  )
+  async def collection_result(request_id: str):
+    value = await app.state.store.market_data_request(request_id)
+    if value is None:
+      raise HTTPException(404, "HISTORY_REQUEST_NOT_FOUND")
+    if (
+      value["status"] != "COMPLETED"
+      or (value.get("ingestion_progress") or {}).get("phase") != "VERIFIED"
+    ):
+      raise HTTPException(409, "HISTORY_RESULT_NOT_VERIFIED")
+    try:
+      result = HistoryCollectionResult(
+        request_id=request_id, result=value["ingestion_result"]
+      )
+      encoded = json.dumps(
+        result.model_dump(mode="json"), allow_nan=False, separators=(",", ":")
+      ).encode()
+      if len(encoded) > MAX_HISTORY_RESULT_BYTES:
+        raise ValueError("result too large")
+    except (KeyError, ValueError):
+      raise HTTPException(503, "HISTORY_RESULT_UNAVAILABLE") from None
+    return Response(encoded, media_type="application/json")
 
   @app.get(
     "/market-data/internal/v1/requests/{request_id}", dependencies=[Depends(authorize)]

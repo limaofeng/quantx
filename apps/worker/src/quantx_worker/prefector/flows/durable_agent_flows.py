@@ -22,6 +22,9 @@ from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.repositories.financial_sync_run_repository import (
   FinancialSyncRunRepository,
 )
+from quantx_infrastructure.services.local_market_data_client import (
+  LocalMarketDataClient,
+)
 from quantx_infrastructure.services.market_data_reference_ingestion import (
   _FINANCIAL_RECORD_FORMAT,
   _FINANCIAL_TABLES,
@@ -174,7 +177,7 @@ async def _request_and_wait(
       if remote.get("status") == "success"
       else remote.get("status"),
     }
-  store = DurableRuntimeStore()
+  store = LocalMarketDataClient()
   request_id = ""
   try:
     request_kwargs: dict[str, Any] = {}
