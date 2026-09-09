@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from quantx_contracts import ExecutionEnvironment
-from quantx_domain.trading.t_assistant_execution import TAssistantScorerMode
+from quantx_domain.trading.t_assistant_execution import (
+  TAssistantEntryAuthorization,
+  TAssistantExecution,
+  TAssistantScorerMode,
+)
 from quantx_domain.trading.t_assistant_market_state import AcceptedTMarketTick
 from quantx_domain.trading.t_trade_opportunity_engine import OpportunityCandidate
 
@@ -204,6 +208,29 @@ class EntryExecutionGate:
   @staticmethod
   def evaluate(request: EntryExecutionGateInput) -> EntryExecutionGateResult:
     return EntryExecutionGate._evaluate(request, ExecutionEnvironment.PAPER)
+
+  @staticmethod
+  def evaluate_live(
+    request: EntryExecutionGateInput, *, execution: TAssistantExecution
+  ) -> EntryExecutionGateResult:
+    """Explicit LIVE binding; ALLOW still requires confirmation, sizing and risk."""
+    if (
+      not isinstance(execution, TAssistantExecution)
+      or execution.environment is not ExecutionEnvironment.LIVE
+      or request.execution_environment is not ExecutionEnvironment.LIVE
+      or not execution.can_produce_entry
+      or execution.entry_authorization
+      is not TAssistantEntryAuthorization.MANUAL_CONFIRM
+      or execution.scorer_mode is not TAssistantScorerMode.RULE_ONLY
+      or request.frozen_binding.config_version_id != execution.config_version_id
+      or request.frozen_binding.config_snapshot_hash != execution.config_snapshot_hash
+      or request.frozen_binding.policy_version != execution.policy_version
+      or request.frozen_binding.feature_schema_version
+      != execution.feature_schema_version
+      or int(execution.readiness.as_of.timestamp() * 1000) > request.evaluated_at_ms
+    ):
+      raise ValueError("T_ENTRY_LIVE_EXECUTION_BINDING_INVALID")
+    return EntryExecutionGate._evaluate(request, ExecutionEnvironment.LIVE)
 
   @staticmethod
   def evaluate_backtest(

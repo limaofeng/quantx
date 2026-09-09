@@ -805,6 +805,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   36 项定向确认/准入测试通过；扩大命令测试有 12 项被 macOS 禁止实盘的平台门提前拦截，
   未进入改动路径。证据 `.codex_screenshots/p6-final-entry-{focused,regression}.log`。
   尚未补齐 LIVE Gate/Sizer 与请求生成调度，因此不宣称下单整链完成。
+- PAPER/LIVE 共用持久化候选 Gate 审查已提取，PAPER 调用切换并保留完整 receipt 链。
+  新增显式 LIVE Gate 入口，绑定 RUNNING+READY、MANUAL_CONFIRM、RULE_ONLY 与配置版本/
+  哈希/策略/特征版本及就绪时间；原默认入口仍只处理 PAPER。共享审查锁定 cycle/symbol，
+  校验候选证据、原始 intake、行情连续性、冻结策略和 TTL，ALLOW 不构成下单授权。
+  150 项 Gate/PAPER 审查/运行回归通过；补充 LIVE 降级与配置错配负例后审查 24 项通过，
+  Ruff 通过。证据 `.codex_screenshots/p6-shared-entry-gate{,-final}.log`。
+  下一步：LIVE 最终容量读取需区分自身分配额度与其他待入场义务，再接 Sizer/风控/请求生成。
 - 剩余开发顺序：
   人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

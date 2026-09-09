@@ -610,3 +610,103 @@ async def test_final_review_refuses_future_persisted_source_availability(
       "FUTURE" in code for code in result.reason_codes
     )
     assert list((await db.scalars(select(PaperExecutionOrderRecord))).all()) == []
+
+
+@pytest.mark.parametrize(
+  "environment", [ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE]
+)
+@pytest.mark.parametrize("fault", [None, "candidate", "gate_environment", "expired"])
+async def test_shared_gate_binds_environment_and_persisted_evidence(
+  sessions, review_evidence, environment, fault
+):
+  from quantx_infrastructure.models.t_assistant_execution import (
+    TAssistantDecisionCycleRecord,
+  )
+  from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
+    TTradeOpportunityEvaluation,
+  )
+  from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+  from quantx_infrastructure.repositories.t_allocation_repository import (
+    TAllocationRepository,
+  )
+  from quantx_infrastructure.services.t_entry_gate_review import review_t_entry_gate
+
+  snapshot, candidates = await allocation_tests._seed(
+    sessions,
+    environment=environment,
+    enrich_intent=enrich_intent,
+  )
+  async with sessions() as db, db.begin():
+    repo = TAllocationRepository(db)
+    batch = await allocation_tests._prepared(repo, snapshot, candidates, now=NOW)
+    claim = await allocation_tests._claim(repo, batch, snapshot, candidates, now=NOW)
+    await repo.commit(claim=claim, snapshot=snapshot, candidates=candidates, now=NOW)
+    intent = await db.get(TradeIntentRecord, "intent-0")
+    # The gate reviews persisted READY material; manual confirmation and final
+    # authority are tested separately, and no order sink is attached here.
+    intent.status = "EXECUTION_READY"
+    scope = intent.owner_id
+    execution = await db.get(TAssistantExecutionRecord, scope)
+    gate, _ = await input_for(db, scope, intent.id)
+    cycle = await db.get(TAssistantDecisionCycleRecord, intent.allocation_cycle_id)
+    source = await db.scalar(
+      select(TTradeOpportunityEvaluation).where(
+        TTradeOpportunityEvaluation.event_key
+        == cycle.output_manifest["accepted_intents"][0]["candidate_evidence_key"]
+      )
+    )
+    gate = replace(gate, execution_environment=environment)
+    if fault == "candidate":
+      source.content_fingerprint = "0" * 64
+    elif fault == "gate_environment":
+      gate = replace(
+        gate,
+        execution_environment=(
+          ExecutionEnvironment.LIVE
+          if environment is ExecutionEnvironment.PAPER
+          else ExecutionEnvironment.PAPER
+        ),
+      )
+    elif fault == "expired":
+      gate = replace(gate, intent_expires_at_ms=gate.evaluated_at_ms - 1)
+    await db.flush()
+    result = await review_t_entry_gate(
+      db, execution=execution, intent=intent, gate=gate, now=quote(1).timestamp
+    )
+    assert result.outcome == ("REJECT" if fault else "ALLOW"), result.reason_codes
+    if environment is ExecutionEnvironment.LIVE and fault is None:
+      from quantx_application.t_trade_v3.entry_execution_gate import EntryExecutionGate
+      from quantx_domain.trading.t_assistant_execution import (
+        TAssistantEntryReadinessProjection,
+      )
+      from quantx_infrastructure.repositories.t_assistant_execution_repository import (
+        _execution_from_record,
+      )
+
+      domain_execution = _execution_from_record(execution)
+      degraded = replace(
+        domain_execution,
+        readiness=TAssistantEntryReadinessProjection(
+          "DEGRADED",
+          ("T_MARKET_NOT_READY",),
+          quote(1).timestamp,
+        ),
+      )
+      with pytest.raises(ValueError, match="T_ENTRY_LIVE_EXECUTION_BINDING_INVALID"):
+        EntryExecutionGate.evaluate_live(gate, execution=degraded)
+      with pytest.raises(ValueError, match="T_ENTRY_LIVE_EXECUTION_BINDING_INVALID"):
+        EntryExecutionGate.evaluate_live(
+          replace(
+            gate,
+            frozen_binding=replace(gate.frozen_binding, config_snapshot_hash="wrong"),
+          ),
+          execution=domain_execution,
+        )
+      assert (
+        "T_ENTRY_ENVIRONMENT_UNSUPPORTED"
+        in EntryExecutionGate.evaluate(gate).reason_codes
+      )
+    if fault:
+      assert all(
+        code.startswith(environment.value + "_REVIEW_") for code in result.reason_codes
+      )
