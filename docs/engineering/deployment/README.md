@@ -211,10 +211,17 @@ conda run --no-capture-output -n quantx python ops/t-assistant-backtest-data.py 
 不取消已派发请求。配置读取失败时禁止新补采。Agent 健康门和生产请求优先级保持不变。
 开发请求按单标的、单日、单周期拆分，窗口外的缺口继续排队。
 
-生产 Worker 的 development-data-export 与开发 Worker 的 development-data-import
-每分钟执行一次；macOS 离线不删除生产任务。分片保留七天，过期后从已有持久化数据
+生产 Prefect Worker 的 development-data-export 每分钟执行一次；开发导入由独立
+Data Worker 的开发循环推进，CLI/历史 Flow 通过本机 Data API 提交并查询需求。
+上线本批前应用迁移 `20260910_0082`，并停止、移除旧 Prefect deployment
+`development-data-import`，确认旧执行已经退出，再启动新 Data Worker；删除代码中的
+日程不会自动删除 Prefect Server 上已注册的 deployment。此处是切换步骤，尚未执行。
+macOS 离线不删除生产任务。分片保留七天，过期后从已有持久化数据
 重建；若覆盖证明或源身份不匹配，返回 INCOMPLETE，不伪装成完整数据。
 开发端检查 SHA256、协议、范围与行数，幂等导入后再次回读验证；已下载分片可复用。
+开发 Worker 不重复扫描 LOCAL_VERIFIED、BLOCKED 或 INCOMPLETE；恢复只处理到期分区。
+完成后只读复核最多保留 4 次累计尝试，每次在 IO 前持久化预留，取消、重启或成功均不
+返还；耗尽返回 DELIVERY_PROOF_BUDGET_EXHAUSTED，需要显式恢复处理，不自动重开预算。
 没有可靠无数据证明的空区间仍视为数据不足。
 
 参考数据仅导出明确的证券、日历和因子字段。复权覆盖沿用原有 schema-v2 证据，

@@ -7,6 +7,8 @@ import logging
 import signal
 import uuid
 
+import httpx
+from quantx_contracts.data_exchange import HistoryPartitionRequest
 from quantx_infrastructure.database.timeseries import (
   init_timeseries,
   shutdown_timeseries,
@@ -19,6 +21,32 @@ from quantx_infrastructure.services.market_data_worker_store import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def advance_development_delivery(store) -> bool:
+  from quantx_infrastructure.services.development_history_import import import_partition
+
+  item = await store.next_development_delivery()
+  if item is None:
+    return False
+  try:
+    await import_partition(
+      HistoryPartitionRequest.model_validate(item["request"]), owner=store
+    )
+  except (ValueError, KeyError, TypeError, httpx.HTTPStatusError) as exc:
+    # Remote malformed content and permanent HTTP failures affect this delivery,
+    # not every partition behind it. Retryable transport failures are persisted
+    # by the importer; ownership/DB failures propagate to stop the worker.
+    reason = (
+      "DELIVERY_REMOTE_AUTH_BLOCKED"
+      if (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code in {401, 403}
+      )
+      else "DELIVERY_SOURCE_INVALID"
+    )
+    await store.fail_development_delivery(item["id"], reason=reason)
+  return True
 
 
 async def sweep(store, *, ingest=None) -> int:
@@ -86,6 +114,11 @@ async def run(store, stop: asyncio.Event) -> None:
       await store.dispatch_history_collection()
       await _pause(stop, 1)
 
+  async def development():
+    while not stop.is_set():
+      await advance_development_delivery(store)
+      await _pause(stop, 1)
+
   from quantx_infrastructure.services.market_data_staging_cleanup import (
     run_market_data_staging_sweeper,
   )
@@ -98,6 +131,8 @@ async def run(store, stop: asyncio.Event) -> None:
     asyncio.create_task(dispatch()),
     asyncio.create_task(stop.wait()),
   ]
+  if getattr(store, "demand_source_kind", None) == "REMOTE":
+    tasks.append(asyncio.create_task(development()))
   try:
     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     for task in done:

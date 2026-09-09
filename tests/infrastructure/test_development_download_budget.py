@@ -69,6 +69,18 @@ async def install_budget_schema(engine):
       progress_migration.upgrade()
 
     await connection.run_sync(upgrade_progress)
+    proof_path = path.with_name("20260910_0082_development_proof_budget.py")
+    proof_spec = importlib.util.spec_from_file_location(
+      "proof_budget_migration", proof_path
+    )
+    proof_migration = importlib.util.module_from_spec(proof_spec)
+    proof_spec.loader.exec_module(proof_migration)
+
+    def upgrade_proof(sync_connection):
+      proof_migration.op = Operations(MigrationContext.configure(sync_connection))
+      proof_migration.upgrade()
+
+    await connection.run_sync(upgrade_proof)
   return migration
 
 
@@ -104,6 +116,49 @@ async def snapshot(engine):
       .mappings()
       .one()
     )
+
+
+async def test_completed_proof_budget_survives_recreation_and_never_refunds(download):
+  first, second, factory = download
+  initial = budgets.DevelopmentDownloadBudget(factory, "delivery", owner=first)
+  await initial.schedule()
+  for count in range(1, budgets.MAX_PROOF_ATTEMPTS + 1):
+    current = budgets.DevelopmentDownloadBudget(factory, "delivery", owner=first)
+    assert await current.reserve_proof() is None
+    # A crash/cancel after reservation has no refund path; a new object observes it.
+    assert (await snapshot(first.engine))["proof_attempts"] == count
+  await first.release()
+  assert await second.acquire()
+  with pytest.raises(RuntimeError, match="lease was lost"):
+    await initial.reserve_proof()
+  recovered = budgets.DevelopmentDownloadBudget(factory, "delivery", owner=second)
+  assert await recovered.reserve_proof() == "DELIVERY_PROOF_BUDGET_EXHAUSTED"
+  row = await snapshot(first.engine)
+  assert row["proof_attempts"] == budgets.MAX_PROOF_ATTEMPTS
+  assert row["reason_code"] == "DELIVERY_PROOF_BUDGET_EXHAUSTED"
+  async with factory() as db:
+    assert (
+      await db.scalar(
+        text("SELECT state FROM development_data_export WHERE id='delivery'")
+      )
+      == "BLOCKED"
+    )
+  path = (
+    Path(__file__).resolve().parents[2]
+    / "packages/infrastructure/alembic/versions/20260910_0082_development_proof_budget.py"
+  )
+  spec = importlib.util.spec_from_file_location("proof_downgrade", path)
+  migration = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(migration)
+
+  def downgrade(connection):
+    migration.op = Operations(MigrationContext.configure(connection))
+    migration.downgrade()
+
+  async with first.engine.begin() as db:
+    with pytest.raises(RuntimeError, match="cannot remove persisted"):
+      await db.run_sync(downgrade)
+  assert (await snapshot(first.engine))["proof_attempts"] == budgets.MAX_PROOF_ATTEMPTS
 
 
 async def test_restart_and_cancellation_never_refund_reserved_work(download):

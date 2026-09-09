@@ -16,6 +16,56 @@ from quantx_infrastructure.services.market_data_demand_store import (
 
 
 class MarketDataWorkerStore(MarketDataDemandStore):
+  async def next_development_delivery(self):
+    """Select one due local import; successful/terminal deliveries are never swept."""
+    if self.demand_source_kind != "REMOTE":
+      return None
+    async with self.engine.begin() as db:
+      await self._guard_ingestion_owner(db)
+      row = (
+        (
+          await db.execute(
+            text("""
+        SELECT e.id,e.request FROM development_data_export e
+        LEFT JOIN development_data_download_budget b ON b.delivery_id=e.id
+        LEFT JOIN development_data_ingestion i ON i.delivery_id=e.id
+        WHERE e.state IN ('QUEUED','WAITING_SOURCE','WAITING_LOCAL_INGESTION','WAITING_LOCAL_PROOF')
+          AND (b.delivery_id IS NULL OR (b.reason_code IS NULL AND b.next_probe_at <= clock_timestamp()))
+          AND (i.delivery_id IS NULL OR (
+            NOT (i.progress->>'blocked')::boolean AND
+            (i.progress->>'next_retry_at' IS NULL OR
+              (i.progress->>'next_retry_at')::timestamptz <= clock_timestamp())))
+        ORDER BY e.updated_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED
+      """)
+          )
+        )
+        .mappings()
+        .one_or_none()
+      )
+      if row is None:
+        return None
+      # Rotate admission fairly without changing the immutable receipt or budgets.
+      await db.execute(
+        text(
+          "UPDATE development_data_export SET updated_at=clock_timestamp() WHERE id=:id"
+        ),
+        {"id": row["id"]},
+      )
+      await self._guard_ingestion_owner(db)
+      return dict(row)
+
+  async def fail_development_delivery(self, identity, *, reason):
+    async with self.engine.begin() as db:
+      await self._guard_ingestion_owner(db)
+      await db.execute(
+        text(
+          "UPDATE development_data_export SET state='BLOCKED',error=:reason,updated_at=clock_timestamp() "
+          "WHERE id=:id AND state IN ('QUEUED','WAITING_SOURCE','WAITING_LOCAL_INGESTION','WAITING_LOCAL_PROOF')"
+        ),
+        {"id": identity, "reason": reason},
+      )
+      await self._guard_ingestion_owner(db)
+
   async def dispatch_history_collection(self):
     from .market_data_collection_dispatch import dispatch_history_collection
 

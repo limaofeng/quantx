@@ -105,8 +105,19 @@ async def delivery(prepared, monkeypatch):
   lock_engine = create_async_engine(case.first.engine.url, pool_size=1, max_overflow=0)
 
   async def locked(request, _factory, execute, *, worker_owner=None):
+    class RoutedWorkerOwner:
+      async def _guard_ingestion_owner(self, db, *, lock=True):
+        if getattr(db, "bind", getattr(db, "engine", None)) is lock_engine:
+          async with case.factory() as business_db:
+            await worker_owner._guard_ingestion_owner(business_db, lock=False)
+        else:
+          await worker_owner._guard_ingestion_owner(db, lock=lock)
+
     return await run_delivery_execution(
-      request, async_sessionmaker(lock_engine), execute, worker_owner=worker_owner
+      request,
+      async_sessionmaker(lock_engine),
+      execute,
+      worker_owner=RoutedWorkerOwner() if worker_owner else None,
     )
 
   monkeypatch.setattr(importer, "run_delivery_execution", locked)
@@ -301,3 +312,20 @@ async def test_legacy_evidence_blocks_without_mutation_or_external_io(delivery, 
   ) == calls
   for item in case.manifest["chunks"]:
     assert catalog.content_path(item["checksum_sha256"]).is_file()
+
+
+async def test_exhausted_completed_proof_budget_stops_before_external_read(delivery):
+  from quantx_infrastructure.services.development_download_budget import (
+    MAX_PROOF_ATTEMPTS,
+  )
+
+  case = delivery
+  receipt = await importer.import_partition(case.request)
+  for _ in range(MAX_PROOF_ATTEMPTS):
+    assert await importer.import_partition(case.request) == receipt
+  reads = len(case.connection.queries)
+  blocked = await importer.import_partition(case.request)
+  assert blocked["reason"] == "DELIVERY_PROOF_BUDGET_EXHAUSTED"
+  assert await importer.import_partition(case.request) == blocked
+  assert len(case.connection.queries) == reads
+  assert len(case.connection.lines) == 1

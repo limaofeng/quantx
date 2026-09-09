@@ -10,6 +10,7 @@ MAX_DOWNLOAD_ATTEMPTS = 512
 MAX_DOWNLOAD_RESERVED_BYTES = 768 * 1024 * 1024
 MAX_DOWNLOAD_RESERVED_SECONDS = 10800
 DOWNLOAD_ATTEMPT_SECONDS = 30
+MAX_PROOF_ATTEMPTS = 4
 
 
 class DeliveryDownloadBudgetExhausted(ValueError):
@@ -30,6 +31,51 @@ class DevelopmentDownloadBudget:
     self.delivery_id = delivery_id
     self.owner = owner
 
+  async def reserve_proof(self):
+    """Each attempt reserves a full bounded content scan; never refund on exit."""
+    async with self.session_factory() as db:
+      if self.owner is not None:
+        await self.owner._guard_ingestion_owner(db)
+      row = (
+        (
+          await db.execute(
+            text(
+              "SELECT proof_attempts,reason_code FROM development_data_download_budget WHERE delivery_id=:id FOR UPDATE"
+            ),
+            {"id": self.delivery_id},
+          )
+        )
+        .mappings()
+        .one()
+      )
+      reason = row["reason_code"]
+      if reason is None and row["proof_attempts"] >= MAX_PROOF_ATTEMPTS:
+        reason = "DELIVERY_PROOF_BUDGET_EXHAUSTED"
+      if reason:
+        await db.execute(
+          text(
+            "UPDATE development_data_download_budget SET reason_code=:reason,updated_at=clock_timestamp() WHERE delivery_id=:id"
+          ),
+          {"id": self.delivery_id, "reason": reason},
+        )
+        await db.execute(
+          text(
+            "UPDATE development_data_export SET state='BLOCKED',error=:reason,updated_at=clock_timestamp() WHERE id=:id"
+          ),
+          {"id": self.delivery_id, "reason": reason},
+        )
+      else:
+        await db.execute(
+          text(
+            "UPDATE development_data_download_budget SET proof_attempts=proof_attempts+1,updated_at=clock_timestamp() WHERE delivery_id=:id"
+          ),
+          {"id": self.delivery_id},
+        )
+      if self.owner is not None:
+        await self.owner._guard_ingestion_owner(db)
+      await db.commit()
+    return reason
+
   async def schedule(self, action="read", *, _db=None):
     changes = {
       "read": None,
@@ -47,7 +93,7 @@ class DevelopmentDownloadBudget:
     )
     if action not in changes:
       raise ValueError("invalid delivery schedule action")
-    async with (self.session_factory() if _db is None else nullcontext(_db)) as db:
+    async with self.session_factory() if _db is None else nullcontext(_db) as db:
       if self.owner is not None:
         await self.owner._guard_ingestion_owner(db)
       await db.execute(

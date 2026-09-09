@@ -307,6 +307,39 @@ async def _recheck_local_partition(identity, request, receipt, budget):
   )
 
 
+async def request_partition_delivery(request: HistoryPartitionRequest) -> dict:
+  """Submit/query the Data API; only its Worker advances downloads and ingestion."""
+  from quantx_contracts.market_data_service import HistoryDemand
+
+  from .local_market_data_client import LocalMarketDataClient
+
+  client = LocalMarketDataClient()
+  demand = HistoryDemand.model_validate(request.model_dump())
+  try:
+    identity = await client.submit_history_demand(demand)
+    status = await client.history_demand(identity, expected_partition=demand)
+  finally:
+    await client.close()
+  if status is None:
+    raise ValueError("Submitted history demand disappeared")
+  if status.delivery_status == "LOCAL_VERIFIED":
+    # The legacy aggregate result builder still reads frozen source evidence.
+    # This is a readonly bridge; it never rechecks, repairs, or drives ingestion.
+    receipt = await get_export(status.delivery_id)
+    if receipt and receipt["state"] == "LOCAL_VERIFIED":
+      return receipt["manifest"]
+    return {
+      "id": status.delivery_id,
+      "status": "WAITING_LOCAL_PROOF",
+      "reason": "LOCAL_DELIVERY_PROOF_UNAVAILABLE",
+    }
+  return {
+    "id": status.delivery_id or identity,
+    "status": status.delivery_status or "WAITING_SOURCE",
+    "reason": status.reason_code,
+  }
+
+
 async def run_range(instruments: list[str], period: str, start: date, end: date) -> int:
   if end < start:
     raise ValueError("Invalid date range")
@@ -454,7 +487,7 @@ async def request_remote_history(
       key = (request.period, request.instrument, request.trading_date)
       if key in receipts:
         continue
-      result = await import_partition(request)
+      result = await request_partition_delivery(request)
       partition_status[key] = {
         **request.model_dump(mode="json"),
         "id": result.get("id"),

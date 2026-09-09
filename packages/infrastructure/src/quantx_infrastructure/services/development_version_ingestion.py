@@ -150,6 +150,9 @@ async def recheck_development_storage_version(
       "status": "WAITING_LOCAL_PROOF",
       "reason": schedule["wait_reason"],
     }
+  reason = await budget.reserve_proof()
+  if reason:
+    return {"id": identity, "status": "BLOCKED", "reason": reason}
   try:
     if not isinstance(receipt, dict) or not isinstance(
       receipt.get("local_verification"), dict
