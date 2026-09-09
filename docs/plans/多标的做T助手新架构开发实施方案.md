@@ -674,6 +674,11 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   证据 `.codex_screenshots/p6-live-readiness.xml`、`p6-live-readiness-final.xml`。
   激活测试使用真实隔离准入/状态仓库、合成审批与 mock 组合读取；不等同完整真实账户整链验收。
   尚未创建业务库 LIVE source，RUNNING 重启后入场仍须后续 handler 的重新预热门禁。
+- Engine 已注册 `T_ASSISTANT_PREPARE_LIVE_CANARY`：严格限定命令字段，绑定账户、
+  PAPER source、目标配置、既有审批 event key/hash 和 head CAS；拒绝随命令注入审批内容。
+  重投复用原执行，失败不改变 PAPER 配置头，不创建 LIVE source。
+  准入/READY/排空联合 46 项通过，证据 `.codex_screenshots/p6-live-release-command.xml`。
+  尚未暴露 API 发布入口或实现正式 P5 证据审批写入；此命令只消费已有审批。
 - 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

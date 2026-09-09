@@ -236,6 +236,14 @@ async def _dispatch(
   command_id: Optional[str] = None,
 ) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
+  if command_type == "T_ASSISTANT_PREPARE_LIVE_CANARY":
+    from .t_assistant_live_admission import dispatch_live_canary_preparation
+
+    async with AsyncSessionLocal() as db, db.begin():
+      execution_id = await dispatch_live_canary_preparation(
+        db, payload=payload, now=utcnow().replace(tzinfo=UTC)
+      )
+    return {"success": True, "execution_id": execution_id}
   if command_type == "T_ASSISTANT_APPROVE_ENTRY":
     from quantx_infrastructure.services.t_entry_confirmation import confirm_live_entry
 

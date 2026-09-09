@@ -60,6 +60,50 @@ def canary_instrument_codes(payload):
   return tuple(codes)
 
 
+async def dispatch_live_canary_preparation(db, *, payload, now):
+  """Execute a release command bound to an existing immutable approval."""
+  required = {
+    "account_id",
+    "source_execution_id",
+    "config_version_id",
+    "approval_event_key",
+    "approval_hash",
+    "expected_head_version",
+  }
+  if (
+    not isinstance(payload, dict)
+    or set(payload) != required
+    or any(
+      not isinstance(payload[key], str) or not payload[key].strip()
+      for key in required - {"expected_head_version"}
+    )
+    or not _hash(payload["approval_hash"])
+  ):
+    raise ValueError("LIVE_CANARY_COMMAND_INVALID")
+  source = await db.get(TAssistantExecutionRecord, payload["source_execution_id"])
+  if source is None or source.account_id != payload["account_id"]:
+    raise ValueError("LIVE_CANARY_COMMAND_ACCOUNT_CONFLICT")
+  approval = await db.scalar(
+    select(TAssistantExecutionEventRecord).where(
+      TAssistantExecutionEventRecord.execution_id == payload["source_execution_id"],
+      TAssistantExecutionEventRecord.event_key == payload["approval_event_key"],
+    )
+  )
+  if (
+    approval is None
+    or stable_manifest_hash(approval.payload) != payload["approval_hash"]
+  ):
+    raise ValueError("LIVE_CANARY_COMMAND_APPROVAL_CONFLICT")
+  return await prepare_live_canary_execution(
+    db,
+    source_execution_id=payload["source_execution_id"],
+    config_version_id=payload["config_version_id"],
+    approval_event_key=payload["approval_event_key"],
+    expected_head_version=payload["expected_head_version"],
+    now=now,
+  )
+
+
 async def prepare_live_canary_execution(
   db,
   *,

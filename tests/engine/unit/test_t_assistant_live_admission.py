@@ -195,3 +195,66 @@ async def test_retry_does_not_accept_changed_source_authorization(sessions):
   async with sessions() as db, db.begin():
     with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
       await prepare(db, source)
+
+
+@pytest.mark.parametrize("damage", [None, "account", "approval", "injected", "version"])
+async def test_engine_preparation_command_binds_existing_approval(
+  sessions, monkeypatch, damage
+):
+  import quantx_engine.command_processor as processor
+  from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+
+  source = await seed(sessions)
+  async with sessions() as db:
+    approval = await db.scalar(
+      select(TAssistantExecutionEventRecord).where(
+        TAssistantExecutionEventRecord.execution_id == source,
+        TAssistantExecutionEventRecord.event_key == "approve-1",
+      )
+    )
+    approval_hash = stable_manifest_hash(approval.payload)
+  payload = dict(
+    account_id="account-1",
+    source_execution_id=source,
+    config_version_id="config-2",
+    approval_event_key="approve-1",
+    approval_hash=approval_hash,
+    expected_head_version=1,
+  )
+  if damage == "account":
+    payload["account_id"] = "another-account"
+  elif damage == "approval":
+    payload["approval_hash"] = "0" * 64
+  elif damage == "injected":
+    payload["p5_outcome"] = "PASSED"
+  elif damage == "version":
+    payload["expected_head_version"] = True
+  monkeypatch.setattr(processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(processor, "utcnow", lambda: NOW + timedelta(seconds=1))
+
+  async def dispatch():
+    return await processor._dispatch(
+      "T_ASSISTANT_PREPARE_LIVE_CANARY", payload, command_id="release-1"
+    )
+
+  if damage:
+    with pytest.raises(ValueError):
+      await dispatch()
+    async with sessions() as db:
+      assert (
+        await db.get(TTradeGlobalConfig, "config-1")
+      ).desired_environment == "PAPER"
+      assert (
+        await db.scalar(
+          select(TAssistantExecutionRecord.execution_id).where(
+            TAssistantExecutionRecord.environment == "LIVE"
+          )
+        )
+        is None
+      )
+  else:
+    result = await dispatch()
+    assert await dispatch() == result
+    async with sessions() as db:
+      row = await db.get(TAssistantExecutionRecord, result["execution_id"])
+      assert result["success"] and row.status == "WARMING"
