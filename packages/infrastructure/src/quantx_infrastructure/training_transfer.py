@@ -1,4 +1,4 @@
-"""Explicit authenticated SFTP channel for the Trainer's bundle adapters."""
+"""Explicit authenticated SFTP channel for training input and result bundles."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 import paramiko
 from quantx_contracts.training_bundle import TrainingBundle
+
 from quantx_infrastructure.training_bundle_store import (
   BundleTransferError,
   SFTPBundlePublisher,
@@ -18,7 +19,9 @@ from quantx_infrastructure.training_bundle_store import (
   reject_links,
 )
 
-from quantx_trainer.config import TrainerConfigurationError
+
+class TransferConfigurationError(ValueError):
+  pass
 
 
 @dataclass(frozen=True, repr=False)
@@ -84,8 +87,8 @@ class TransferConfig:
         raise ValueError
       return cls(**values)
     except Exception:
-      raise TrainerConfigurationError(
-        "Trainer SFTP configuration is invalid or its identity files are unavailable"
+      raise TransferConfigurationError(
+        "Training SFTP configuration is invalid or its identity files are unavailable"
       ) from None
 
 
@@ -98,13 +101,13 @@ class TrainingStore:
   def fetch(
     self, bundle: TrainingBundle, cache_root: Path, *, minimum_free_bytes: int
   ) -> Path:
-    reader = self.datasets if bundle.kind == "DATASET" else self.artifacts
+    reader = self.datasets if bundle.kind in {"DATASET", "CERTIFICATION_INPUT"} else self.artifacts
     return materialize_bundle(
       reader, bundle, cache_root, reserve_bytes=minimum_free_bytes, cancel=self.cancel
     )
 
   def publish(self, bundle: TrainingBundle, directory: Path) -> str:
-    publisher = self.datasets if bundle.kind == "DATASET" else self.artifacts
+    publisher = self.datasets if bundle.kind in {"DATASET", "CERTIFICATION_INPUT"} else self.artifacts
     return publisher.publish(directory, bundle, cancel=self.cancel)
 
 

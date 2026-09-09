@@ -125,3 +125,49 @@ async def test_missing_histories_are_actionable_and_never_certified(monkeypatch)
     "历史股票池",
     "指标复权依赖",
   }
+
+
+@pytest.mark.asyncio
+async def test_certify_exports_and_reuses_frozen_inputs_without_computing(tmp_path, monkeypatch):
+  from contextlib import asynccontextmanager
+  from unittest.mock import AsyncMock
+
+  from quantx_research import next_day_selection_dataset
+  from quantx_research.certification_inputs import load_certification_inputs
+
+  from tests.research.test_frozen_source import CODES, END, START, inputs
+
+  source, calendar, _ = inputs()
+  calendar.get_next_trading_date = AsyncMock(return_value=END)
+  request_config = {"date_start": START.isoformat(), "date_end": "2026-01-06", "stock_codes": [CODES[0]],
+                    "st_file": "st.csv", "industry_file": "industry.csv", "delisting_file": "delisting.csv"}
+  hashes = {}
+  for key in ["st_file", "industry_file", "delisting_file"]:
+    path = tmp_path / request_config[key]
+    path.write_text("event_date,stock_code,value\n2026-01-05,600000.SH,0\n")
+    hashes[key] = preparation.file_hash(path)
+  monkeypatch.setenv("QUANTX_RESEARCH_EVIDENCE_ROOT", str(tmp_path))
+  monkeypatch.setattr(preparation, "require_development_export", lambda: None)
+  monkeypatch.setattr(preparation, "coverage", AsyncMock(return_value={"ready": True, "stock_codes": [CODES[0]], "file_hashes": hashes, "checks": []}))
+
+  @asynccontextmanager
+  async def opened():
+    yield source
+
+  def forbidden(*args, **kwargs):
+    pytest.fail("Worker export must not perform certification or reopen inputs on retry")
+
+  monkeypatch.setattr(preparation, "InfrastructureResearchDataSource", opened)
+  monkeypatch.setattr(preparation, "TradingDateHelper", lambda: calendar)
+  monkeypatch.setattr(next_day_selection_dataset, "certify_next_day_selection_dataset", forbidden)
+  attempt = tmp_path / "attempt"
+  attempt.mkdir()
+  request = {"kind": "CERTIFY", "config": request_config, "dataset_version": "export-v1"}
+  result = await preparation.execute(request, attempt)
+  assert result["ready"] is True and "sample_count" not in result
+  reference = result["certification_input"]
+  load_certification_inputs(attempt / "certification-inputs", dataset_version="export-v1", manifest_sha256=reference["manifest_sha256"])
+  monkeypatch.setattr(preparation, "coverage", forbidden)
+  monkeypatch.setattr(preparation, "InfrastructureResearchDataSource", forbidden)
+  retried = await preparation.execute(request, attempt)
+  assert retried["certification_input"] == reference

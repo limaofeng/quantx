@@ -18,6 +18,7 @@ from quantx_infrastructure.services.research_preparation import (
   download_preview,
   evidence_file,
   reject_links,
+  require_development_export,
   root,
 )
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
@@ -385,14 +386,23 @@ async def execute(request, directory):
       ]
       + checks,
     }
+  if kind != "CERTIFY":
+    raise ValueError("Unknown preparation job kind")
+  require_development_export()
+  from quantx_research.certification_inputs import (
+    certification_input_reference,
+    export_certification_inputs,
+  )
+
+  inputs = directory / "certification-inputs"
+  reject_links(inputs)
+  if inputs.exists():
+    digest = file_hash(inputs / "manifest.json")
+    reference = certification_input_reference(inputs, dataset_version=request["dataset_version"], manifest_sha256=digest)
+    return {"ready": True, "dataset_version": request["dataset_version"], "certification_input": reference.model_dump(mode="json"), "checks": []}
   report = await coverage(config)
   if not report["ready"]:
     return report
-  from quantx_research.next_day_selection_dataset import (
-    certify_next_day_selection_dataset,
-    load_certified_dataset_manifest,
-  )
-
   template = load_next_day_selection_config(
     root() / "apps/research/configs/next_day_selection_v1.yaml"
   ).model_dump(mode="json")
@@ -419,7 +429,7 @@ async def execute(request, directory):
     if file_hash(path) != report["file_hashes"][key]:
       raise ValueError("历史证据已变化，请重新检查")
     # Freeze the exact validated bytes for this job; user edits cannot race certification.
-    frozen = directory / path.name
+    frozen = directory / f"{target}{path.suffix}"
     reject_links(frozen)
     frozen.write_bytes(path.read_bytes())
     if file_hash(frozen) != report["file_hashes"][key]:
@@ -428,16 +438,15 @@ async def execute(request, directory):
   config_path = directory / "config.yaml"
   reject_links(config_path)
   config_path.write_text(yaml.safe_dump(template, allow_unicode=True), encoding="utf-8")
-  output = await certify_next_day_selection_dataset(
-    config_path, dataset_version=request["dataset_version"]
-  )
-  manifest = load_certified_dataset_manifest(output)
+  async with InfrastructureResearchDataSource() as source:
+    digest = await export_certification_inputs(
+      config_path, source, TradingDateHelper(), inputs,
+      dataset_version=request["dataset_version"],
+    )
+  reference = certification_input_reference(inputs, dataset_version=request["dataset_version"], manifest_sha256=digest)
   return {
-    "ready": True,
-    "dataset_version": manifest["dataset_version"],
-    "manifest_sha256": manifest["manifest_sha256"],
-    "sample_count": manifest["quality"]["sample_count"],
-    "checks": report["checks"],
+    "ready": True, "dataset_version": request["dataset_version"],
+    "certification_input": reference.model_dump(mode="json"), "checks": report["checks"],
   }
 
 

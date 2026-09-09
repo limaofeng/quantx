@@ -204,7 +204,7 @@ async def preflight(config: TrainerConfig) -> dict[str, str]:
   # Do not contact Prefect if database identity or privilege isolation is wrong.
   await check_database(config)
   await check_prefect(config)
-  from quantx_trainer.transfer import TransferConfig, check_store
+  from quantx_infrastructure.training_transfer import TransferConfig, check_store
 
   try:
     transfer = TransferConfig.load(config.transfer_config, state_root=config.state_root)

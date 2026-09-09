@@ -53,7 +53,7 @@ def _no_links(path):
 
 
 async def export_frozen_source(
-  source, calendar, directory, *, start, end, batch_size=300
+  source, calendar, directory, *, start, end, batch_size=300, stock_codes=None, benchmark_code=None
 ):
   """Export an explicit inclusive window; caller owns source/snapshot lifetime.
 
@@ -69,9 +69,20 @@ async def export_frozen_source(
   directory.parent.mkdir(parents=True, exist_ok=True)
   staging = Path(tempfile.mkdtemp(prefix=".source-", dir=directory.parent))
   try:
-    instruments = normalize_instruments(
-      await source.list_instruments(instrument_types=("stock", "index"))
-    )
+    if benchmark_code is None:
+      instruments = normalize_instruments(
+        await source.list_instruments(instrument_types=("stock", "index"))
+      )
+    else:
+      stocks = normalize_instruments(await source.list_instruments(instrument_types=("stock",), codes=stock_codes))
+      benchmark = normalize_instruments(await source.list_instruments(instrument_types=("index",), codes=[benchmark_code]))
+      stocks = stocks[stocks.instrument_type.eq("stock")]
+      if stock_codes is not None:
+        stocks = stocks[stocks.stock_code.isin(stock_codes)]
+      benchmark = benchmark[benchmark.instrument_type.eq("index") & benchmark.stock_code.eq(benchmark_code)]
+      instruments = pd.concat([stocks, benchmark], ignore_index=True).drop_duplicates("stock_code")
+      if benchmark.empty or (stock_codes is not None and set(stock_codes) - set(stocks.stock_code)):
+        raise ValueError("Frozen source is missing requested instrument metadata")
     codes = sorted(set(instruments.stock_code.dropna().astype(str)))
     if not codes:
       raise ValueError("Frozen source requires instruments")

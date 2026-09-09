@@ -160,6 +160,8 @@ async def test_certification_handoff_is_owner_fenced_immutable_and_executor_rout
     with pytest.raises(ValueError, match="归属"):
       await repo.requeue_trainer_inputs(job_id, expected_flow_run_id="export-owner")
     await repo.handoff_certification(job_id, expected_flow_run_id="export-owner", reference=reference)
+    assert await repo.certification_handoff_status(job_id, expected_flow_run_id="export-owner") == "QUEUED"
+    assert await repo.certification_handoff_status(job_id, expected_flow_run_id="other") is None
     # Commit acknowledgement loss: identical retry is harmless and does not
     # overwrite the subsequent Trainer owner.
     await repo.handoff_certification(job_id, expected_flow_run_id="export-owner", reference=reference.model_copy(update={"bundle": reference.bundle.model_copy(update={"files": tuple(reversed(reference.bundle.files))})}))

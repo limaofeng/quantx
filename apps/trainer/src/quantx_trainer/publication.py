@@ -7,18 +7,21 @@ import os
 import re
 import tempfile
 import threading
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
 
 from quantx_contracts.training_bundle import BundleFile, TrainingBundle
-from quantx_infrastructure.training_bundle_store import reject_links, verify_bundle
+from quantx_infrastructure.training_bundle_store import (
+  publication_lock,
+  reject_links,
+  verify_bundle,
+)
 from quantx_infrastructure.training_process_evidence import (
   inspect_execution,
   local_success_recorded,
 )
 from quantx_infrastructure.training_result import safe_public_details
-
-from quantx_trainer.transfer import TransferConfig, open_store
+from quantx_infrastructure.training_transfer import TransferConfig, open_store
 
 
 class PublicationError(RuntimeError):
@@ -148,26 +151,6 @@ async def _supervised_io(
       task.result()
     raise
 
-
-@contextmanager
-def publication_lock(directory: Path):
-  """Serialize a run's transfers across processes; the OS releases on exit."""
-  path = directory / "publication.lock"
-  reject_links(path)
-  with path.open("a+b") as stream:
-    if os.name == "nt":
-      import msvcrt
-
-      if stream.tell() == 0:
-        stream.write(b"0")
-        stream.flush()
-      stream.seek(0)
-      msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-    else:
-      import fcntl
-
-      fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    yield
 
 
 def freeze_publication(path: Path, bundle: TrainingBundle, owner: str) -> None:

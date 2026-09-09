@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import threading
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol
 
@@ -367,3 +368,24 @@ def materialize_bundle(
     raise
   except Exception:
     raise BundleTransferError("BUNDLE_TRANSFER_INTERRUPTED") from None
+
+
+@contextmanager
+def publication_lock(directory: Path):
+  """Serialize a run's transfers across processes; the OS releases on exit."""
+  path = directory / "publication.lock"
+  reject_links(path)
+  with path.open("a+b") as stream:
+    if os.name == "nt":
+      import msvcrt
+
+      if stream.tell() == 0:
+        stream.write(b"0")
+        stream.flush()
+      stream.seek(0)
+      msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+      import fcntl
+
+      fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    yield

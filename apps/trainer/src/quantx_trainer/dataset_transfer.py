@@ -12,6 +12,7 @@ from quantx_infrastructure.training_dataset_store import (
   resolve_dataset_directory,
 )
 from quantx_infrastructure.training_host_guard import HostPolicy, host_guard_root
+from quantx_infrastructure.training_transfer import TransferConfig, open_store
 
 from quantx_trainer.publication import (
   _supervised_io,
@@ -19,7 +20,6 @@ from quantx_trainer.publication import (
   read_object,
   result_bundle,
 )
-from quantx_trainer.transfer import TransferConfig, open_store
 
 
 def dataset_bundle(dataset, *, root, cancel=None):

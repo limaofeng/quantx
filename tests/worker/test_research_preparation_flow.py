@@ -97,7 +97,7 @@ async def test_download_reuses_scope_and_rechecks_without_certification(
 async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(monkeypatch, tmp_path, unconfirmed):
   stopped = asyncio.Event()
   running = asyncio.Event()
-  job = SimpleNamespace(job_id="job", flow_run_id="owner")
+  job = SimpleNamespace(job_id="job", flow_run_id="owner", kind="DOWNLOAD")
 
   @asynccontextmanager
   async def session():
@@ -171,3 +171,16 @@ async def test_keep_alive_does_not_depend_on_training_progress(monkeypatch):
   with pytest.raises(asyncio.CancelledError):
     await preparation.keep_alive("job", "owner")
   assert len(ticks) == 10
+
+
+@pytest.mark.asyncio
+async def test_interrupted_spawn_cannot_make_export_retryable(tmp_path, monkeypatch):
+  import asyncio
+  from types import SimpleNamespace
+  from unittest.mock import AsyncMock
+
+  from quantx_worker.prefector.flows import research_preparation_flow as preparation
+
+  monkeypatch.setattr(preparation.asyncio, "create_subprocess_exec", AsyncMock(side_effect=asyncio.CancelledError))
+  with pytest.raises(preparation.PreparationProcessUnconfirmed, match="SPAWN_UNCONFIRMED"):
+    await preparation.run_research(SimpleNamespace(kind="CERTIFY", request={}), tmp_path)

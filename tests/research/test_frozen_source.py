@@ -216,3 +216,17 @@ async def test_frozen_source_runs_real_feature_builder_with_identical_output(tmp
   assert results[0][1].calendar.equals(results[1][1].calendar)
   assert results[1][1].quality["source_provenance"] == frozen.provenance
   assert len(frozen.provenance["manifest_sha256"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_explicit_export_never_queries_unrequested_stocks(tmp_path):
+  source, calendar, _ = inputs()
+  source.list_instruments.return_value = pd.concat([
+    source.list_instruments.return_value,
+    pd.DataFrame({"stock_code": ["600001.SH"], "instrument_type": ["stock"]}),
+  ], ignore_index=True)
+  directory = await export_frozen_source(source, calendar, tmp_path / "source", start=START, end=END, stock_codes=[CODES[0]], benchmark_code=CODES[1])
+  frozen = FrozenResearchDataSource(directory)
+  assert frozen.codes == set(CODES)
+  for call in source.load_daily_bars.await_args_list:
+    assert set(call.args[0]).issubset(CODES)

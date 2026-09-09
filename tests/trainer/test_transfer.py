@@ -6,13 +6,17 @@ import threading
 from dataclasses import replace
 from pathlib import PurePosixPath
 from time import monotonic, sleep
+from types import SimpleNamespace
 
 import paramiko
 import pytest
 from quantx_contracts.training_bundle import BundleFile, TrainingBundle
 from quantx_infrastructure.training_bundle_store import BundleTransferError
-from quantx_trainer.config import TrainerConfigurationError
-from quantx_trainer.transfer import TransferConfig, open_store
+from quantx_infrastructure.training_transfer import (
+  TransferConfig,
+  TransferConfigurationError,
+  open_store,
+)
 
 
 class Filesystem(paramiko.SFTPServerInterface):
@@ -265,6 +269,22 @@ def test_transfer_config_rejects_invalid_identity_and_paths(tmp_path, field, val
   filename.write_text(
     "\n".join(f"{name} = {json.dumps(item)}" for name, item in values.items())
   )
-  with pytest.raises(TrainerConfigurationError) as caught:
+  with pytest.raises(TransferConfigurationError) as caught:
     TransferConfig.load(filename, state_root=root)
   assert "private material" not in str(caught.value)
+
+
+@pytest.mark.parametrize("kind", ["DATASET", "CERTIFICATION_INPUT", "RESULT", "RELEASE"])
+def test_bundle_kinds_use_the_same_store_for_publish_and_fetch(kind, tmp_path, monkeypatch):
+  from quantx_infrastructure import training_transfer as module
+
+  bundle = TrainingBundle(schema_version=1, kind=kind, source_id="version", files=[BundleFile(path="manifest.json", size=0, sha256="a" * 64)])
+  calls = []
+  datasets = SimpleNamespace(publish=lambda *args, **kwargs: calls.append("datasets"))
+  artifacts = SimpleNamespace(publish=lambda *args, **kwargs: calls.append("artifacts"))
+  store = module.TrainingStore(datasets=datasets, artifacts=artifacts)
+  store.publish(bundle, tmp_path)
+  expected = datasets if kind in {"DATASET", "CERTIFICATION_INPUT"} else artifacts
+  monkeypatch.setattr(module, "materialize_bundle", lambda reader, *args, **kwargs: reader)
+  assert store.fetch(bundle, tmp_path, minimum_free_bytes=0) is expected
+  assert calls == ["datasets" if expected is datasets else "artifacts"]

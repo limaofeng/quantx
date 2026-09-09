@@ -11,9 +11,6 @@ from prefect import flow
 from prefect.runtime import flow_run
 from quantx_infrastructure.async_process_stop import stop_async_process
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
-from quantx_infrastructure.repositories.stock_selection_training_repository import (
-  StockSelectionTrainingRepository,
-)
 from quantx_infrastructure.services.research_preparation import (
   ResearchPreparationRepository,
   reject_links,
@@ -23,10 +20,11 @@ from quantx_infrastructure.services.research_preparation_window import (
   _full_live_runtime,
   is_critical_trading_window,
 )
-from quantx_infrastructure.training_dataset_store import (
-  certification_values,
-)
 
+from quantx_worker.prefector.flows.certification_transfer import (
+  export_transfer_config,
+  publish_certification_input,
+)
 from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
   daily_market_data_sync_flow,
 )
@@ -50,15 +48,18 @@ async def run_research(job, directory: Path):
   if result_file.exists():
     result_file.unlink()
   request.write_text(json.dumps({"kind": job.kind, **job.request}), encoding="utf-8")
-  process = await asyncio.create_subprocess_exec(
-    sys.executable,
-    "-m",
-    "quantx_research.preparation_job",
-    str(request),
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-  )
+  try:
+    process = await asyncio.create_subprocess_exec(
+      sys.executable,
+      "-m",
+      "quantx_research.preparation_job",
+      str(request),
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
+      creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+  except BaseException:
+    raise PreparationProcessUnconfirmed("PREPARATION_PROCESS_SPAWN_UNCONFIRMED") from None
   try:
     await process.wait()
     if process.returncode != 0 or not result_file.is_file():
@@ -85,12 +86,13 @@ async def keep_alive(job_id, owner):
 async def perform(job, directory):
   if job.kind == "GPU":
     raise ValueError("GPU preparation belongs to Trainer")
+  transfer = export_transfer_config() if job.kind == "CERTIFY" else None
   await update_job(
     job.job_id, expected_flow_run_id=job.flow_run_id,
     phase={
       "COVERAGE": "检查覆盖",
       "DOWNLOAD": "检查下载范围",
-      "CERTIFY": "检查并认证",
+      "CERTIFY": "检查并导出冻结输入",
       "GPU": "执行资格基准",
     }[job.kind],
   )
@@ -167,14 +169,12 @@ async def perform(job, directory):
     result = refreshed
   failed = job.kind in {"CERTIFY", "GPU"} and result.get("ready") is not True
   if job.kind == "CERTIFY" and not failed:
-    version = job.request["dataset_version"]
-    if result.get("dataset_version") != version:
-      raise ValueError("Research certification returned another dataset identity")
-    values = await asyncio.to_thread(
-      certification_values, dataset_version=version, manifest_sha256=result["manifest_sha256"],
-    )
+    reference = await publish_certification_input(job, directory, result, transfer)
     async with AsyncSessionLocal() as db:
-      await StockSelectionTrainingRepository(db).certify_dataset(values)
+      await ResearchPreparationRepository(db).handoff_certification(
+        job.job_id, expected_flow_run_id=job.flow_run_id, reference=reference,
+      )
+    return
   await update_job(
     job.job_id, expected_flow_run_id=job.flow_run_id,
     status="FAILED" if failed else "SUCCEEDED",
@@ -232,6 +232,15 @@ async def research_preparation_dispatch_flow():
     heartbeat.cancel()
     stopped = await asyncio.gather(work, heartbeat, return_exceptions=True)
     unconfirmed = any(isinstance(value, PreparationProcessUnconfirmed) for value in stopped)
+    if failure and job.kind == "CERTIFY":
+      # A commit acknowledgement or heartbeat may fail after ownership moved.
+      # Observe the durable handoff before trying to mark the old owner failed.
+      async with AsyncSessionLocal() as db:
+        handed_off = await ResearchPreparationRepository(db).certification_handoff_status(
+          job.job_id, expected_flow_run_id=job.flow_run_id,
+        )
+      if handed_off is not None:
+        failure = None
     if failure and not unconfirmed:
       await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, status="FAILED", **failure)
   return {"job_id": job.job_id, **({"status": "RUNNING", "reason": "PREPARATION_PROCESS_STOP_UNCONFIRMED"} if unconfirmed else {})}

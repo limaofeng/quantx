@@ -86,9 +86,9 @@ timeout_seconds = 10
 
 密钥和 known_hosts 必须是状态目录内的普通文件，不接受符号链接、junction 或硬链接。部署时为服务身份设置私钥文件 ACL，并从可信通道核对服务端主机密钥后写入指定 known_hosts；非标准 SSH 端口使用 `[host]:port` 条目。不会自动接受或更新主机密钥，也不使用 SSH agent、默认私钥、相邻 OpenSSH 证书、密码或交互式口令回退。
 
-服务端使用独立受限 SFTP 账号，只开放指定数据和制品目录，允许暂存、读回、删除临时文件和原子 rename。Trainer 既读取冻结数据，也需回传其构建认证的数据集；`DATASET` 发布到数据根目录，`RESULT`/`RELEASE` 发布到制品根目录，已完成 bundle 不覆盖。账号的文件系统隔离、禁止 shell/转发及权限配置属于部署验收，客户端预检不能证明这些服务端限制已生效。两个远端根目录必须独立且不嵌套。
+服务端使用独立受限 SFTP 账号，只开放指定数据和制品目录，允许暂存、读回、删除临时文件和原子 rename。Trainer 既读取冻结数据，也需回传其构建认证的数据集；`DATASET`/`CERTIFICATION_INPUT` 发布到数据根目录，`RESULT`/`RELEASE` 发布到制品根目录，已完成 bundle 不覆盖。账号的文件系统隔离、禁止 shell/转发及权限配置属于部署验收，客户端预检不能证明这些服务端限制已生效。两个远端根目录必须独立且不嵌套。
 
-`quantx_trainer.transfer.open_store` 连接现有 bundle 适配器，提供 `fetch` 和 `publish`；会话退出或失败均关闭连接。连接、认证、SFTP 子系统握手和文件 I/O 有显式超时。协议行为以 [Paramiko SSHClient 文档](https://docs.paramiko.org/en/stable/api/client.html) 及锁定依赖的实现为依据；额外的握手截止时间覆盖其 SFTP 建链前未应用通道读写超时的窗口。
+`quantx_infrastructure.training_transfer.open_store` 连接现有 bundle 适配器，提供 `fetch` 和 `publish`；会话退出或失败均关闭连接。连接、认证、SFTP 子系统握手和文件 I/O 有显式超时。协议行为以 [Paramiko SSHClient 文档](https://docs.paramiko.org/en/stable/api/client.html) 及锁定依赖的实现为依据；额外的握手截止时间覆盖其 SFTP 建链前未应用通道读写超时的窗口。
 
 ## 主机高资源门禁
 
@@ -173,12 +173,15 @@ Trainer 调度器使用同一约束：每次独立调用使用独立标识，发
 conda run -n quantx-train python -m quantx_trainer.main publish-dataset --config C:\Users\limao\QuantXTraining\state\trainer.toml --dataset-version <dataset_version>
 ```
 
-命令重新核验认证证据，发布并读回 bundle 后，才登记不可替换的 `source_bundle`。迁移 `20260910_0074` 与开发角色的数据集 UPDATE 权限必须先由运维应用；本地尚未部署。旧数据集缺失传输清单时不可训练，需要先完成发布。Trainer 侧认证结果自动发布与恢复已接入；Worker 冻结输入发布和交接调用仍待接入。
+命令重新核验认证证据，发布并读回 bundle 后，才登记不可替换的 `source_bundle`。迁移 `20260910_0074` 与开发角色的数据集 UPDATE 权限必须先由运维应用；本地尚未部署。旧数据集缺失传输清单时不可训练，需要先完成发布。Trainer 侧认证结果自动发布与恢复、Worker 冻结输入发布与原子交接已接入；运行端配置和跨机器验收尚未完成。
 
 调度领取后按清单从受限 SFTP 拉取至 `state_root/dataset-cache/<bundle_id>`，逐文件校验后原子完成，再核对认证清单与数据库投影，成功后才启动 Research。磁盘保留空间来自主机策略；下载和核验共享运行归属/取消/心跳监督，部分文件可供后续重试复用。最终评估按父运行的 `artifact_bundle` 自动下载至 `state_root/parent-cache/<bundle_id>`，校验数据库 manifest 哈希、父运行身份和 Research 内部文件清单后传给计算子进程。Research 以认证清单和开发锁核验父制品，不再要求目录名等于 run_id。输入阶段建立按执行归属隔离的监督者/请求记录，后续调度只有在监督者确定退出、没有任何计算进程记录、数据库仍为原归属 PREFLIGHT 且尚无进度时才重新排队；已有取消请求则收敛为 CANCELLED。新领取复用完整/部分缓存并保留旧诊断证据。领取事务持有队列行锁时先落盘输入监督者证据，再提交 RUNNING；写入失败回滚，提交确认丢失仍保留证据。常驻进程中，本次尝试退出会在所有输入 I/O 结束后由原监督者写入结束标记；后续调度可恢复领取确认丢失、元数据断联、输入异常及取消所遗留的任务，不必等待整个进程退出。已有计算记录仍排除输入重排；结束标记无法写入则保留待核验。跨机器与进程级有界终止验收尚未完成。
 
 ### GPU 资格准备
 
-`trainer-preparation` 领取 GPU 及已登记 `certification_input` 的 CERTIFY 任务，使用同一显式运行配置与 `quantx-train-pool`。Worker 只领取 COVERAGE、DOWNLOAD 和尚未交接的 CERTIFY；其冻结输入导出/发布调用仍待接入，端到端迁移尚未完成。认证输入下载至 `state_root/certification-cache/<bundle_id>`，计算只使用冻结文件，结果登记与发布完成后才写入成功。Trainer 从已登记 bundle 拉取数据集，GPU wheel 证据固定为 `state_root/gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl`，资格结果写入 `state_root/gpu/qualification.json`，能力探测读取同一路径。Research 子进程仅接收文件路径和隔离环境，不接收数据库/Prefect 凭据。
+`trainer-preparation` 领取 GPU 及已登记 `certification_input` 的 CERTIFY 任务，使用同一显式运行配置与 `quantx-train-pool`。Worker 只领取 COVERAGE、DOWNLOAD 和尚未交接的 CERTIFY；Worker 的 CERTIFY 路径只导出冻结输入并发布，不再执行认证计算。发布回读成功后按原归属原子交接；传输失败保留文件供重试。认证输入下载至 `state_root/certification-cache/<bundle_id>`，计算只使用冻结文件，结果登记与发布完成后才写入成功。Trainer 从已登记 bundle 拉取数据集，GPU wheel 证据固定为 `state_root/gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl`，资格结果写入 `state_root/gpu/qualification.json`，能力探测读取同一路径。Research 子进程仅接收文件路径和隔离环境，不接收数据库/Prefect 凭据。
 
-准备监督端每 10 秒核对归属并写心跳，保存请求及计算进程身份，退出未确认保持 RUNNING。异步启动返回句柄前被打断时保留 STARTING，不开放重试。资格或认证计算完成后若数据库登记、制品发布或终态写入失败，保持 RUNNING；后续调度在新领取与计算门禁之前恢复结果处理。认证恢复核对原请求、零退出码、输入清单和结果制品，再幂等登记与发布，不重复计算。正常执行与恢复共用尝试锁，恢复要求明确零退出码、原请求绑定和完整结果，可在原监督进程仍存活时收敛，不重跑资格基准。主机门禁退出码 75 在记录退出后按原归属重新排队，后续重新领取生成新归属；其他明确的非零退出记录失败，即使存在 ready 结果也不登记成功。未知退出继续保留运行态。GPU 与认证输入下载阶段同样在领取提交前写入监督者证据；本次尝试结束后写结束标记。只在无计算记录且输入确认停止时按原归属重排，复用原缓存；写盘失败回滚领取。缺少退出记录的中途崩溃收敛、运行端部署与真实 GPU 资格验收仍待完成。
+准备监督端每 10 秒核对归属并写心跳，保存请求及计算进程身份，退出未确认保持 RUNNING。异步启动返回句柄前被打断时保留 STARTING，不开放重试。资格或认证计算完成后若数据库登记、制品发布或终态写入失败，保持 RUNNING；后续调度在新领取与计算门禁之前恢复结果处理。认证恢复核对原请求、零退出码、输入清单和结果制品，再幂等登记与发布，不重复计算。正常执行与恢复共用尝试锁，恢复要求明确零退出码、原请求绑定和完整结果，可在原监督进程仍存活时收敛，不重跑资格基准。主机门禁退出码 75 在记录退出后按原归属重新排队，后续重新领取生成新归属；其他明确的非零退出记录失败，即使存在 ready 结果也不登记成功。未知退出继续保留运行态。GPU 与认证输入下载阶段同样在领取提交前写入监督者证据；本次尝试结束后写结束标记。只在无计算记录且输入确认停止时按原归属重排，复用原缓存；写盘失败回滚领取。缺少退出记录的中途崩溃收敛、Worker 崩溃恢复、运行端部署与真实 GPU 资格验收仍待完成。
+
+
+Worker 认证导出只允许 `environment=development`。启动开发 Worker 前，显式设置 `QUANTX_RESEARCH_TRANSFER_CONFIG`，指向 `<代码根目录>/.runtime/research-preparation/` 内的绝对 TOML 路径；字段与上述 SFTP 配置相同，私钥及 known_hosts 也必须位于该状态根目录内。认证输入与 Trainer 使用同一数据根目录；受限账号和服务端权限需单独部署。配置缺失会在导出前拒绝执行。导出按认证股票范围和基准指数冻结行情、元数据、复权证据及历史文件；已有完整输入可在同一任务重试中复用。Worker 心跳失败或取消会等待上传线程退出，再开放失败重试；交接确认丢失会先读取持久化交接状态，避免用旧归属写失败。

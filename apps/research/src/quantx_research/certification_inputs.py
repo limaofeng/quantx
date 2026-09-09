@@ -81,6 +81,7 @@ async def export_certification_inputs(
       start=start,
       end=end,
       batch_size=config.runtime.batch_size,
+      stock_codes=config.data.stock_codes, benchmark_code=config.data.benchmark_code,
     )
     files = {
       path.relative_to(staging).as_posix(): {

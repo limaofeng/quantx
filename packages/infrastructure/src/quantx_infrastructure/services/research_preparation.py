@@ -23,6 +23,13 @@ from quantx_infrastructure.models.research_preparation import (
 )
 
 
+def require_development_export():
+  from quantx_infrastructure.config.settings import settings
+
+  if settings.environment != "development":
+    raise ValueError("Certification input export requires the development environment")
+
+
 def now():
   return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -258,6 +265,15 @@ class ResearchPreparationRepository:
     if row:
       await self.db.refresh(row)
     return row
+
+  async def certification_handoff_status(self, job_id, *, expected_flow_run_id):
+    return await self.db.scalar(
+      select(Job.status).where(
+        Job.job_id == job_id, Job.kind == "CERTIFY",
+        Job.request["export_flow_run_id"].as_string() == expected_flow_run_id,
+        Job.request["certification_input"]["manifest_sha256"].as_string().is_not(None),
+      )
+    )
 
   async def handoff_certification(self, job_id, *, expected_flow_run_id, reference):
     """Called only after immutable input publication and remote readback succeed."""

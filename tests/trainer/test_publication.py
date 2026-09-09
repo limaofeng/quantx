@@ -269,7 +269,7 @@ def test_store_passes_cancellation_into_upload_source_verification(result):
     BundleTransferError,
     SFTPBundlePublisher,
   )
-  from quantx_trainer.transfer import TrainingStore
+  from quantx_infrastructure.training_transfer import TrainingStore
 
   bundle = publication.result_bundle(
     result.directory, run_id="run-1", run_kind="DEVELOPMENT"
