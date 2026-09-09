@@ -828,8 +828,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   前序组件证据保留 `p6-live-{adapter-wiring,source-locks,dispatch-regression,staging-regression,
   review-regression}.log`。隔离测试覆盖真实 Gate/reducer、容量与事务；部分审查/调度使用
   替身，锁顺序测试不等同 PostgreSQL 并发演练。没有无替身券商整链或统一验收结论。
+- 隔离组合验证已贯通已消费确认→真实账户 cut 重新分配→Engine Gate 构建→持久化 Gate
+  审查→容量/OrderSizer/风控/最终授权→公共请求暂存→最新审查。成功、暂存后账户禁用、
+  暂存后确认撤销三种场景通过；与确认组件联合 28 项通过。证据
+  `.codex_screenshots/p6-live-isolated-confirmation-regression.log`。候选材料、已消费设备
+  challenge、账户快照与行情为合成输入，服务实现未替换；尚未覆盖设备确认 API、
+  真实行情到候选生成、账户 admission 到 outbox 的完整组合，不等同无替身券商整链。
 - 剩余开发顺序：
-  验证已接线 LIVE 入场的隔离完整链路→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 隔离 admission/最终命令与回报链→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

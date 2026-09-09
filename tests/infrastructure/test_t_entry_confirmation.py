@@ -120,8 +120,8 @@ async def seed_confirmable(sessions):
   )
   async with sessions() as db, db.begin():
     repo = TAllocationRepository(db)
-    batch = await _prepared(repo, snapshot, candidates)
-    claim = await _claim(repo, batch, snapshot, candidates)
+    batch = await _prepared(repo, snapshot, candidates, now=NOW)
+    claim = await _claim(repo, batch, snapshot, candidates, now=NOW)
     await repo.commit(claim=claim, snapshot=snapshot, candidates=candidates, now=NOW)
     head = await db.get(TTradeGlobalConfig, "config-1")
     head.desired_environment = "LIVE"
