@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, time
 from math import isfinite
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.trading.market_session import classify_market_data_session
@@ -357,6 +357,7 @@ async def evaluate_backtest_comparison(
     if reasons:
       failures.append({"scenario": scenario, "reasons": reasons})
     cases[scenario] = {
+      "scenario_index": index,
       "metrics": metrics,
       "execution_id": run.execution.execution_id,
       "result_hash": result["hash"],
@@ -486,4 +487,46 @@ def verify_backtest_admission_conclusion(
     != sorted(failures, key=lambda item: item["scenario"])
   ):
     raise ValueError("BACKTEST_ADMISSION_CONCLUSION_CONFLICT")
+  _verify_comparison_result_artifacts(Path(directory), frozen, report)
   return evidence
+
+
+def _verify_comparison_result_artifacts(directory, frozen, report):
+  indices = set()
+  symbols = sorted(frozen["request"]["runtime_options"]["initial_positions"])
+  for scenario, case in report["cases"].items():
+    index = case["scenario_index"]
+    if type(index) is not int or index < 0 or index in indices:
+      raise ValueError("BACKTEST_RESULT_SCENARIO_INDEX_INVALID")
+    indices.add(index)
+    controls = case["single_symbol_controls"]
+    if [control["code"] for control in controls] != symbols:
+      raise ValueError("BACKTEST_RESULT_CONTROL_SCOPE_CONFLICT")
+    expected = deepcopy(frozen["request"])
+    expected["runtime_options"]["broker_parameters"]["slippage_rate"] = frozen[
+      "scenarios"
+    ][scenario]
+    targets = [("portfolio", case, expected)]
+    for control_index, control in enumerate(controls):
+      single = deepcopy(expected)
+      for name in (
+        "initial_positions",
+        "initial_buckets",
+        "profiles",
+        "industries",
+        "envelope_policies",
+      ):
+        single["runtime_options"][name] = {
+          control["code"]: single["runtime_options"][name][control["code"]]
+        }
+      targets.append((f"single-{control_index}", control, single))
+    for name, reference, config in targets:
+      execution_id = reference["execution_id"]
+      if not isinstance(execution_id, str) or str(UUID(execution_id)) != execution_id:
+        raise ValueError("BACKTEST_RESULT_EXECUTION_ID_INVALID")
+      store = TAssistantBacktestStore(directory / str(index) / name / execution_id)
+      if store.manifest["material"]["frozen"]["config"] != config:
+        raise ValueError("BACKTEST_RESULT_CONFIG_SCOPE_CONFLICT")
+      store.read_verified_result(expected_hash=reference["result_hash"])
+  if indices != set(range(len(report["cases"]))):
+    raise ValueError("BACKTEST_RESULT_SCENARIO_INDEX_INVALID")

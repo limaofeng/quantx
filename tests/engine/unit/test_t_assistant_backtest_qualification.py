@@ -175,9 +175,10 @@ async def test_frozen_policy_conclusion_is_recomputed(tmp_path, damage):
     assert result["report"]["material"]["p6_allowed"] is False
 
 
+@pytest.mark.parametrize("damage", [None, "portfolio", "single-0"])
 @pytest.mark.parametrize("minimum_return", [-1.0, 1.0])
 async def test_conclusion_handles_multiple_scenarios_in_original_order(
-  tmp_path, minimum_return
+  tmp_path, minimum_return, damage
 ):
   from dataclasses import replace
 
@@ -195,6 +196,27 @@ async def test_conclusion_handles_multiple_scenarios_in_original_order(
     policy=approved,
   )
   saved = json.loads((directory / "report.json").read_text())
+  if damage:
+    import sqlite3
+
+    case = report["cases"]["z"]
+    reference = case if damage == "portfolio" else case["single_symbol_controls"][0]
+    database = (
+      directory
+      / str(case["scenario_index"])
+      / damage
+      / reference["execution_id"]
+      / "facts.sqlite3"
+    )
+    with sqlite3.connect(database) as db:
+      db.execute("UPDATE backtest_frames SET facts='{}' WHERE frame_index=0")
+    with pytest.raises(ValueError, match="BACKTEST_FRAME_HASH_MISMATCH"):
+      evaluation.verify_backtest_admission_conclusion(
+        directory,
+        expected_report_hash=saved["hash"],
+        expected_policy_hash=report["evidence"]["admission_policy_hash"],
+      )
+    return
   checked = evaluation.verify_backtest_admission_conclusion(
     directory,
     expected_report_hash=saved["hash"],

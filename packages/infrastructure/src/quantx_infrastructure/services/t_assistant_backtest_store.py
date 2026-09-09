@@ -152,6 +152,48 @@ class TAssistantBacktestStore:
         previous = row[2]
         yield {**material, "hash": previous}
 
+  def read_verified_result(self, *, expected_hash):
+    """Read a finished result against one consistent snapshot of its full facts."""
+    with self._connection() as db:
+      db.execute("BEGIN")
+      versions = db.execute(
+        "SELECT manifest FROM t_assistant_backtest_versions"
+      ).fetchall()
+      if versions != [(self._encode(self.manifest),)]:
+        raise ValueError("BACKTEST_VERSION_CHANGED")
+      execution_id = self.manifest["material"]["execution_id"]
+      if db.execute(
+        "SELECT execution_id, environment, status FROM t_assistant_executions"
+      ).fetchall() != [(execution_id, "BACKTEST", "STOPPED")]:
+        raise ValueError("BACKTEST_FINISHED_EXECUTION_REQUIRED")
+      rows = db.execute("SELECT manifest FROM backtest_results").fetchall()
+      if len(rows) != 1:
+        raise ValueError("BACKTEST_SINGLE_RESULT_REQUIRED")
+      result = json.loads(rows[0][0])
+      material = result["material"]
+      if (
+        result["hash"] != expected_hash
+        or stable_manifest_hash(material) != expected_hash
+        or material["version_hash"] != self.manifest["hash"]
+        or material["execution_id"] != execution_id
+      ):
+        raise ValueError("BACKTEST_RESULT_HASH_CONFLICT")
+      count, previous = 0, self.manifest["hash"]
+      for index, row in enumerate(
+        db.execute(
+          "SELECT frame_index, previous, hash, facts FROM backtest_frames ORDER BY frame_index"
+        )
+      ):
+        frame = {"index": index, "previous": previous, "facts": json.loads(row[3])}
+        if row[:3] != (index, previous, stable_manifest_hash(frame)):
+          raise ValueError("BACKTEST_FRAME_HASH_MISMATCH")
+        count, previous = index + 1, row[2]
+      if material["frame_count"] != count or material["last_frame_hash"] != previous:
+        raise ValueError("BACKTEST_RESULT_PREFIX_CONFLICT")
+      if self._read(self.directory / "result.json") != result:
+        raise ValueError("BACKTEST_RESULT_EXPORT_DIVERGED")
+      return result
+
   def commit_frame(self, *, index, previous, facts):
     if type(index) is not int or index < 0:
       raise ValueError("BACKTEST_FRAME_INDEX_INVALID")
