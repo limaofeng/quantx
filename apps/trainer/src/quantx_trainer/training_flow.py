@@ -31,6 +31,11 @@ from quantx_infrastructure.training_dataset_store import (
   _within,
   resolve_dataset_directory,
 )
+from quantx_infrastructure.training_host_guard import (
+  HostAdmissionDenied,
+  HostResourceGuard,
+  host_guard_root,
+)
 from quantx_infrastructure.training_process_evidence import (
   begin_execution,
   inspect_execution,
@@ -119,6 +124,17 @@ def _probe_capability() -> dict[str, Any]:
   except (TypeError, ValueError, json.JSONDecodeError):
     return unavailable
   return dict(value) if isinstance(value, Mapping) else unavailable
+
+
+def _host_admission_reason() -> str | None:
+  """Read host policy and resources without initializing a compute backend.
+
+  The child still acquires the exclusive host guard and rechecks admission.
+  """
+  try:
+    return HostResourceGuard(host_guard_root()).resource_reason()
+  except HostAdmissionDenied as exc:
+    return str(exc)
 
 
 def find_research_run_directory(
@@ -927,10 +943,12 @@ async def stock_selection_training_dispatch_flow(
     timestamp = now or _now()
     repository = StockSelectionTrainingRepository(db)
     lost = await recover_lost_training_runs(repository, now=timestamp)
-    probe = await asyncio.to_thread(_probe_capability)
-    heartbeat_status, heartbeat_details = _probe_details(probe)
-    if probe.get("probe_failed") or probe.get("cpu_available") is not True:
+    heartbeat_details = await repository.get_execution_capability(now=now or _now())
+    if heartbeat_details.get("cpu_available") is not True:
       return {"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"}
+    admission_reason = await asyncio.to_thread(_host_admission_reason)
+    if admission_reason:
+      return {"status": "QUEUED", "reason": admission_reason}
     flow_id = (
       prefect_flow_run_id
       or os.environ.get("PREFECT_FLOW_RUN_ID", "")

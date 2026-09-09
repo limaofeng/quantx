@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_contracts.training_bundle import BundleFile, TrainingBundle
@@ -108,6 +110,33 @@ async def session_factory():
     yield sessions
   finally:
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age", [0, 181, -6])
+async def test_execution_capability_requires_fresh_certificate(age):
+  now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+  details = {
+    "cpu_available": True,
+    "requirement_hash": "a" * 64,
+    "environment": {"lightgbm_version": "4.6.0"},
+  }
+  row = SimpleNamespace(
+    details=details, status="CPU_AVAILABLE",
+    updated_at=now - timedelta(seconds=age),
+  )
+  repo = StockSelectionTrainingRepository(SimpleNamespace(get=AsyncMock(return_value=row)))
+  execution = await repo.get_execution_capability(now=now)
+  public = await repo.get_capability(now=now)
+  if age == 0:
+    assert execution["environment"] == details["environment"]
+    assert execution["requirement_hash"] == details["requirement_hash"]
+    assert public["cpu_available"] is True
+  else:
+    assert execution == {}
+    assert public["cpu_available"] is False
+  assert "environment" not in public
+  assert "requirement_hash" not in public
 
 
 @pytest.mark.asyncio

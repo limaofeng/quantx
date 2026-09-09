@@ -426,14 +426,12 @@ class StockSelectionTrainingRepository:
     )
     return [_normalize_row_timestamps(row) for row in result.scalars().all()]
 
-  async def get_capability(
+  async def _read_capability_certificate(
     self,
     *,
     now: datetime | None = None,
     max_age_seconds: int = HEARTBEAT_MAX_AGE_SECONDS,
-  ) -> dict[str, Any]:
-    """Read the latest worker capability certificate."""
-
+  ) -> tuple[Mapping[str, Any], datetime | None, bool]:
     heartbeat = await self.db.get(RuntimeComponentHeartbeat, COMPONENT_NAME)
     current = _as_utc(now or _utcnow(), "now")
     updated = _as_utc(_row_value(heartbeat, "updated_at"), "updated_at")
@@ -447,6 +445,28 @@ class StockSelectionTrainingRepository:
     details = _safe_capability_json(_row_value(heartbeat, "details", {}) or {})
     if not isinstance(details, Mapping):
       details = {}
+    return {
+      **details,
+      "status": details.get("status") or _row_value(heartbeat, "status", ""),
+    }, updated, fresh
+
+  async def get_execution_capability(
+    self, *, now: datetime | None = None,
+  ) -> dict[str, Any]:
+    """Internal execution evidence; stale certificates never authorize work."""
+    details, _, fresh = await self._read_capability_certificate(now=now)
+    return dict(details) if fresh else {}
+
+  async def get_capability(
+    self,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: int = HEARTBEAT_MAX_AGE_SECONDS,
+  ) -> dict[str, Any]:
+    """Read the public projection of the latest capability certificate."""
+    details, updated, fresh = await self._read_capability_certificate(
+      now=now, max_age_seconds=max_age_seconds,
+    )
     qualification = details.get("qualification")
     if not isinstance(qualification, Mapping):
       qualification = {}
@@ -458,9 +478,7 @@ class StockSelectionTrainingRepository:
     environment_hash = str(details.get("environment_requirement_hash") or "").lower()
     if not _HASH_RE.fullmatch(environment_hash):
       environment_hash = ""
-    raw_status = str(
-      details.get("status") or _row_value(heartbeat, "status", "")
-    ).upper()
+    raw_status = str(details.get("status") or "").upper()
     if not fresh:
       status = "CPU_AVAILABLE"
       gpu_status = "GPU_UNAVAILABLE_RUNTIME"
