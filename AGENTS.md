@@ -19,9 +19,10 @@
 
 ## 运行与进程边界
 
-- Python 虚拟环境统一使用 Conda，不创建或使用 `.venv`、`venv`、virtualenv。API、Engine、Worker、Research、Monitor 与验证工具使用独立的 `quantx` Conda 环境；QMT Agent 使用 `xtquant-demo`，不得把研究依赖安装进券商环境。脚本通过明确的 Conda 环境或该环境的 Python 绝对路径运行；依赖同步工具也必须显式指向 Conda Python，不能隐式创建 `.venv`。
+- Python 虚拟环境统一使用 Conda，不创建或使用 `.venv`、`venv`、virtualenv。API、Engine、Worker、macOS Research、Monitor 与验证工具使用 `quantx` Conda 环境；Windows 独立开发 Trainer 及其 Research 子进程使用 `quantx-train`，不得安装到生产环境；QMT Agent 使用 `xtquant-demo`，不得把研究依赖安装进券商环境。脚本通过明确的 Conda 环境或该环境的 Python 绝对路径运行；依赖同步工具也必须显式指向 Conda Python，不能隐式创建 `.venv`。
 
-- Windows 为 production 实盘环境，macOS 为 dev 开发环境。QMT/XTData/XTTrading、券商运行时和设备密钥只在 Windows；macOS 使用独立本地数据服务、paper 执行和只读远程行情接口，不连接生产数据库、Redis、Prefect，也不启动生产 Engine 或 QMT Agent。
+- Windows 主链默认为 production 实盘环境，macOS 为 dev 开发环境。Windows 可承载显式隔离的开发 Trainer：独立代码、`quantx-train`、开发配置、状态目录和开发数据权限，不继承生产或券商配置，生产 full 启停不代管 Trainer。QMT/XTData/XTTrading、券商运行时和设备密钥只在 Windows；macOS 使用独立本地数据服务、paper 执行和只读远程行情接口，不连接生产数据库、Redis、Prefect，也不启动生产 Engine 或 QMT Agent。
+- 所有高资源 Research CLI（含直接训练/准备作业入口）必须通过共享主机门禁，机器策略位置与格式见 apps/trainer/README.md。缺少策略、锁状态不明或旧执行未收敛时禁止绕过；开发 ENV 不解除实盘时段保护。异常运行证据不得通过直接删除来恢复任务。
 - 根目录统一入口：
   ```powershell
   .\ops\quantx.ps1 up -Environment production -Profile full

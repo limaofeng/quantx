@@ -3,6 +3,10 @@
 `quantx-research` 是 QuantX 的离线只读研究应用。它不属于常规 API、Engine
 或 Worker 运行链路，也不会触发行情同步或写入业务数据库。
 
+高资源 CLI 及直接训练/准备作业入口必须先通过[主机资源门禁](../trainer/README.md#主机高资源门禁)。
+请先按目标机器配置允许时段和资源预算；配置缺失、并发占用、未收敛的旧执行或预算不足时拒绝执行，退出码为 `75`。
+门禁独立于 `ENV` 和运行 profile，运行中越过窗口会请求停止并在宽限期后强制退出。
+
 ## 日级指标与条件交集研究
 
 `study: indicator-study` 使用 `quantx_domain.indicators` 的同一份版本化定义、

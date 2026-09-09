@@ -11,13 +11,9 @@ from pathlib import Path
 from typing import Sequence
 
 from pydantic import ValidationError
-
-from quantx_research.runner import (
-  ResearchPreflightError,
-  ResearchResourceError,
-  render_existing,
-  run_study,
-  validate_study,
+from quantx_infrastructure.training_host_guard import (
+  HostAdmissionDenied,
+  high_resource_guard,
 )
 
 
@@ -142,6 +138,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
   args = build_parser().parse_args(argv)
+  if args.command == "render":
+    return _dispatch(args)
+  try:
+    with high_resource_guard():
+      return _dispatch(args)
+  except HostAdmissionDenied as exc:
+    print(f"主机训练门禁: {exc}", file=sys.stderr)
+    return 75
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+  from quantx_research.runner import (
+    ResearchPreflightError,
+    ResearchResourceError,
+    render_existing,
+    run_study,
+    validate_study,
+  )
+
   try:
     if args.command == "validate":
       result = asyncio.run(

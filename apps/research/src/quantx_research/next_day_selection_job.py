@@ -11,10 +11,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from quantx_research.next_day_selection_training import (
-  RunCancelled,
-  _safe_error,
-  execute_next_day_selection_run,
+from quantx_infrastructure.training_host_guard import (
+  HostAdmissionDenied,
+  high_resource_guard,
 )
 
 _REQUEST_KEYS = {
@@ -82,7 +81,14 @@ def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
   fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
   try:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-      json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+      json.dump(
+        value,
+        handle,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+      )
       handle.write("\n")
       handle.flush()
       os.fsync(handle.fileno())
@@ -128,7 +134,11 @@ def _cancel_reader(cancel_file: str | Path):
       return True
     # The one canonical shape is the affirmative form.  Any malformed or
     # ambiguous control file cancels conservatively as well (fail closed).
-    if isinstance(value, dict) and set(value) == {"cancel"} and value.get("cancel") is True:
+    if (
+      isinstance(value, dict)
+      and set(value) == {"cancel"}
+      and value.get("cancel") is True
+    ):
       return True
     return True
 
@@ -136,9 +146,18 @@ def _cancel_reader(cancel_file: str | Path):
 
 
 async def run_request(request: Mapping[str, Any]) -> Path:
+  from quantx_research.next_day_selection_training import execute_next_day_selection_run
+
   progress = _progress_writer(request["progress_file"])
   cancel = _cancel_reader(request["cancel_file"])
-  progress({"phase": "PREFLIGHT", "completed_units": 0, "total_units": 1, "message": "作业已启动"})
+  progress(
+    {
+      "phase": "PREFLIGHT",
+      "completed_units": 0,
+      "total_units": 1,
+      "message": "作业已启动",
+    }
+  )
   return await execute_next_day_selection_run(
     run_kind=request["run_kind"],
     spec=request["spec"],
@@ -157,7 +176,18 @@ def main(argv: list[str] | None = None) -> int:
   parser.add_argument("--request-file", type=Path, required=True)
   args = parser.parse_args(argv)
   try:
-    request = load_request(args.request_file)
+    with high_resource_guard():
+      return _execute_job(args.request_file)
+  except HostAdmissionDenied as exc:
+    print(f"主机训练门禁: {exc}", flush=True)
+    return 75
+
+
+def _execute_job(request_file: Path) -> int:
+  from quantx_research.next_day_selection_training import RunCancelled, _safe_error
+
+  try:
+    request = load_request(request_file)
     asyncio.run(run_request(request))
     return 0
   except RunCancelled:

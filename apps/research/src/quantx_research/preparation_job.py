@@ -266,10 +266,13 @@ async def execute(request, directory):
     from quantx_research.next_day_selection_dataset import resolve_dataset_directory
     from quantx_research.next_day_selection_gpu import qualify_lightgbm_gpu
 
-    build = Path(os.environ.get("QUANTX_LIGHTGBM_BUILD_EVIDENCE") or (
-      root()
-      / ".runtime/research-gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl"
-    ))
+    build = Path(
+      os.environ.get("QUANTX_LIGHTGBM_BUILD_EVIDENCE")
+      or (
+        root()
+        / ".runtime/research-gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl"
+      )
+    )
     if not build.is_file():
       return {
         "ready": False,
@@ -412,6 +415,20 @@ async def execute(request, directory):
 
 
 def main():
+  from quantx_infrastructure.training_host_guard import (
+    HostAdmissionDenied,
+    high_resource_guard,
+  )
+
+  try:
+    with high_resource_guard():
+      _execute_main()
+  except HostAdmissionDenied as exc:
+    print(f"主机训练门禁: {exc}", flush=True)
+    raise SystemExit(75) from None
+
+
+def _execute_main():
   parent = psutil.Process(os.getppid())
 
   def watch_parent():
