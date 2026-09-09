@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
       "drain",
       "resume",
       "admission-status",
+      "serve",
     ],
   )
   parser.add_argument("--config", type=Path, required=True)
@@ -39,6 +40,18 @@ def main(argv: list[str] | None = None) -> int:
   except TrainerConfigurationError as exc:
     print(f"Trainer configuration rejected: {exc}", file=sys.stderr)
     return 2
+
+  if args.command == "serve":
+    from quantx_trainer.service import serve
+
+    try:
+      serve(config, args.config)
+    except KeyboardInterrupt:
+      return 130
+    except Exception:
+      print("Trainer service stopped: SERVICE_START_OR_RUNTIME_FAILED", file=sys.stderr)
+      return 3
+    return 0
 
   if args.command in {"drain", "resume", "admission-status"}:
     from quantx_infrastructure.training_bundle_store import BundleTransferError

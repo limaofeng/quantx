@@ -1,0 +1,92 @@
+"""Foreground Trainer service, entered only after explicit runtime validation."""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+from quantx_infrastructure.training_bundle_store import publication_lock, reject_links
+
+
+async def _run_worker(config, config_path: Path):
+  # Import Prefect only after the fresh CLI process has isolated its environment.
+  from prefect.client.schemas.objects import ConcurrencyLimitConfig
+  from prefect.client.schemas.schedules import CronSchedule
+  from prefect.workers.process import ProcessWorker
+
+  from quantx_trainer.preparation_flow import trainer_preparation_flow
+  from quantx_trainer.training_flow import (
+    stock_selection_training_capability_flow,
+    stock_selection_training_dispatch_flow,
+  )
+
+  deployments = (
+    ("trainer-preparation", trainer_preparation_flow),
+    ("stock-selection-training-dispatch", stock_selection_training_dispatch_flow),
+    ("stock-selection-training-capability", stock_selection_training_capability_flow),
+  )
+  for name, flow in deployments:
+    deployment = await flow.to_deployment(
+      name=name,
+      schedules=[{"schedule": CronSchedule(cron="* * * * *", timezone="Asia/Shanghai")}],
+      parameters={"config_path": str(config_path)},
+      work_pool_name=config.prefect_pool,
+      work_queue_name="default",
+      concurrency_limit=ConcurrencyLimitConfig(
+        limit=1, collision_strategy="CANCEL_NEW"
+      ),
+      job_variables={"working_dir": str(config.code_root)},
+    )
+    await deployment.apply()
+  worker = ProcessWorker(
+    work_pool_name=config.prefect_pool,
+    work_queues=["default"],
+    name="quantx-trainer",
+    create_pool_if_not_found=False,
+    limit=3,
+  )
+  await worker.start()
+
+
+def serve(config, config_path: Path) -> None:
+  """Hold one local service lease; never inherit production/Python settings."""
+  from quantx_trainer.preflight import preflight
+
+  config_path = config_path.resolve(strict=True)
+  root = config.state_root / "service"
+  reject_links(root)
+  root.mkdir(parents=True, exist_ok=True)
+  with publication_lock(root):
+    original_environment = dict(os.environ)
+    original_directory = Path.cwd()
+    environment = config.child_environment(original_environment)
+    # Worker tasks load the explicit local config; never store credentials in
+    # Prefect deployment job variables or command-line arguments.
+    environment.pop("DATABASE_URL", None)
+    environment.update(
+      {
+        "QUANTX_TRAINER_CONFIG": str(config_path),
+        "PREFECT_HOME": str(config.state_root / "prefect"),
+        "PREFECT_PROFILES_PATH": str(config.state_root / "prefect" / "profiles.toml"),
+        "PREFECT_SERVER_ALLOW_EPHEMERAL_MODE": "false",
+        "PREFECT_LOGGING_TO_API_ENABLED": "false",
+      }
+    )
+    try:
+      os.environ.clear()
+      os.environ.update(environment)
+      os.chdir(config.code_root)
+      if sys.platform == "win32":
+        from quantx_trainer import contained_process
+
+        contained_process._JOB_HANDLE = contained_process._enter_job()
+
+      async def run():
+        await preflight(config)
+        await _run_worker(config, config_path)
+
+      asyncio.run(run())
+    finally:
+      os.chdir(original_directory)
+      os.environ.clear()
+      os.environ.update(original_environment)

@@ -211,3 +211,16 @@ python -m quantx_trainer.main resume --config C:\Users\limao\QuantXTraining\stat
 Windows 的 Research CLI 与准备计算现在经 `quantx_trainer.contained_process` 启动，在导入 Research 前将当前计算进程加入 Job Object。该 Job 仅启用 `KILL_ON_JOB_CLOSE`，不允许后代脱离；唯一句柄不可继承并保留至进程退出。创建、设置限制或加入失败均拒绝计算；保留计算进程原 PID、父进程和退出码，已有进程证据不变。机制依据 [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。macOS 保持直接计算入口。
 
 真实 Windows 正常退出/强制终止后的后代清理测试位于 `tests/trainer/test_contained_process.py`，macOS 上跳过。Job 接入不等于独立服务停止验收：所有后代退出的确认、Trainer 本身崩溃、完整排空和运行端故障测试仍需完成，不能仅凭直接子进程退出开放升级。
+
+
+### 前台常驻入口
+
+完成独立环境、开发角色、专用 Pool 和 SFTP 配置后，在 `quantx-train` 环境执行：
+
+```powershell
+python -m quantx_trainer.main serve --config C:\Users\limao\QuantXTraining\state\trainer.toml
+```
+
+`serve` 获取 `state_root/service` 的操作系统单实例锁，隔离环境变量和 Prefect 本地配置目录，执行全部预检，再登记 `trainer-preparation`、`stock-selection-training-dispatch`、`stock-selection-training-capability` 三个每分钟部署。登记全部成功才启动专用 ProcessWorker；不存在 Pool 时不自动创建。部署仅保存显式配置文件路径与工作目录，不保存数据库连接信息。服务允许三个流程并行，实际计算仍由各流程的领取与主机资源门禁控制。
+
+Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serve` 保留已有排空标记；预检/登记/运行失败退出，单实例锁随进程退出释放。它是前台运行入口，尚不替代计划要求的后台 up/down/status/logs、完整排空和停止验收。当前仅完成本地 SDK 部署契约与故障测试，未启动远端 Worker。
