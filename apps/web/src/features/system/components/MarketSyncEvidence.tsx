@@ -31,6 +31,22 @@ const evidenceSchema = z.object({
 });
 
 type Evidence = z.infer<typeof evidenceSchema>;
+const requestLabels: Record<string, string> = {
+  QUEUED: '等待采集',
+  CLAIMED: '采集中',
+  UPLOADED: '等待入库',
+  COMPLETED: '已处理',
+  FAILED: '失败',
+  BLOCKED: '已阻塞',
+};
+const reasonLabels: Record<string, string> = {
+  DATA_UNAVAILABLE: '源数据不可用',
+  SOURCE_INCOMPLETE: '源数据交付不完整',
+  XT_DATA_NO_ROWS: '行情源未返回数据',
+  PERSISTED_COVERAGE_UNPROVEN: '缺少持久化覆盖证明',
+  SOURCE_COVERAGE_MISSING: '缺少目标分区数据',
+  SOURCE_COVERAGE_UNVERIFIED: '目标分区覆盖未验证',
+};
 
 export function MarketSyncEvidence({
   runId,
@@ -40,6 +56,7 @@ export function MarketSyncEvidence({
   live: boolean;
 }) {
   const [offset, setOffset] = useState(0);
+  const [refresh, setRefresh] = useState(0);
   const [loadedOffset, setLoadedOffset] = useState(0);
   const [data, setData] = useState<Evidence | null>(null);
   const [error, setError] = useState('');
@@ -64,7 +81,7 @@ export function MarketSyncEvidence({
         poll ||= result.counts.some(
           item =>
             item.request_status !== null &&
-            !['COMPLETED', 'FAILED'].includes(item.request_status)
+            !['COMPLETED', 'FAILED', 'BLOCKED'].includes(item.request_status)
         );
         if (!stopped) {
           setData(result);
@@ -84,7 +101,7 @@ export function MarketSyncEvidence({
       controller.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [runId, offset, live]);
+  }, [runId, offset, live, refresh]);
 
   if (!error && !data?.counts.length) return null;
   const total = data?.counts.reduce((sum, item) => sum + item.count, 0) ?? 0;
@@ -93,7 +110,7 @@ export function MarketSyncEvidence({
       .filter(
         item =>
           item.request_status !== null &&
-          !['COMPLETED', 'FAILED'].includes(item.request_status)
+          !['COMPLETED', 'FAILED', 'BLOCKED'].includes(item.request_status)
       )
       .reduce((sum, item) => sum + item.count, 0) ?? 0;
   const verified =
@@ -112,7 +129,7 @@ export function MarketSyncEvidence({
         </p>
       )}
       <p className="my-2 text-ui-caption text-slate-500">
-        后台请求会在任务结束后继续收敛；入库完成与覆盖合格分别展示。
+        后台请求会在任务结束后继续收敛；请求处理完成与覆盖合格分别展示。
       </p>
       <div className="max-h-64 overflow-auto">
         <table className="w-full text-left text-ui-caption">
@@ -123,6 +140,7 @@ export function MarketSyncEvidence({
               <th>请求状态</th>
               <th>覆盖状态</th>
               <th>记录数</th>
+              <th>原因</th>
             </tr>
           </thead>
           <tbody>
@@ -139,13 +157,10 @@ export function MarketSyncEvidence({
                     {item.scope.end_time}
                   </td>
                   <td>
-                    {item.request_status === 'COMPLETED'
-                      ? '已入库'
-                      : item.request_status === 'FAILED'
-                        ? '失败'
-                        : item.request_status === null
-                          ? '请求不可用'
-                          : '处理中'}
+                    {item.request_status === null
+                      ? '请求不可用'
+                      : (requestLabels[item.request_status] ??
+                        item.request_status)}
                   </td>
                   <td>
                     {item.coverage_status === 'VERIFIED'
@@ -155,12 +170,25 @@ export function MarketSyncEvidence({
                         : '待校验'}
                   </td>
                   <td>{item.records_saved ?? '--'}</td>
+                  <td>
+                    {item.summary.reason
+                      ? (reasonLabels[item.summary.reason] ??
+                        item.summary.reason)
+                      : '--'}
+                  </td>
                 </tr>
               ))}
           </tbody>
         </table>
       </div>
       <div className="mt-2 flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setRefresh(value => value + 1)}
+        >
+          刷新状态
+        </Button>
         <Button
           size="sm"
           variant="outline"

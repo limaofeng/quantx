@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from quantx_contracts.market_data_service import HistoryDemand
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.services import data_exchange as catalog
 from quantx_infrastructure.services import development_history_import as importer
@@ -86,6 +87,8 @@ async def delivery(prepared, monkeypatch):
   for digest in files:
     catalog.content_path(digest).unlink()
 
+  remote_result = {"id": identity, "state": "READY", "manifest": case.manifest}
+
   def remote(request):
     calls.append((request.method, request.url.path))
     if "/calendar/" in request.url.path:
@@ -104,9 +107,7 @@ async def delivery(prepared, monkeypatch):
       return httpx.Response(200, json=case.manifest["reference"])
     if "/chunks/" in request.url.path:
       return httpx.Response(200, content=files[request.url.path.rsplit("/", 1)[-1]])
-    return httpx.Response(
-      200, json={"id": identity, "state": "READY", "manifest": case.manifest}
-    )
+    return httpx.Response(200, json=remote_result)
 
   client_class = httpx.AsyncClient
 
@@ -137,7 +138,11 @@ async def delivery(prepared, monkeypatch):
   monkeypatch.setattr(importer, "run_delivery_execution", locked)
   try:
     yield SimpleNamespace(
-      **vars(case), identity=identity, connection=connection, calls=calls
+      **vars(case),
+      identity=identity,
+      connection=connection,
+      calls=calls,
+      remote_result=remote_result,
     )
   finally:
     await lock_engine.dispose()
@@ -343,3 +348,56 @@ async def test_exhausted_completed_proof_budget_stops_before_external_read(deliv
   assert await importer.import_partition(case.request) == blocked
   assert len(case.connection.queries) == reads
   assert len(case.connection.lines) == 1
+
+
+@pytest.mark.parametrize(
+  "remote_reason", ["DATA_UNAVAILABLE", "unexpected provider detail"]
+)
+async def test_remote_unavailable_is_persisted_and_not_implicitly_retried(
+  delivery, remote_reason
+):
+  case = delivery
+  case.first.demand_source_kind = "REMOTE"
+  demand_id = await case.first.submit_history_demand(
+    HistoryDemand.model_validate(case.request.model_dump())
+  )
+  assert await case.first.plan_history_demand()
+  case.remote_result.update(state="INCOMPLETE", error=remote_reason)
+  case.remote_result.pop("manifest")
+  expected = (
+    "DATA_UNAVAILABLE" if remote_reason == "DATA_UNAVAILABLE" else "SOURCE_INCOMPLETE"
+  )
+  result = await importer.import_partition(case.request, owner=case.first)
+  assert result == {"id": case.identity, "status": "INCOMPLETE", "reason": expected}
+  local = await catalog.get_export(case.identity)
+  assert local["state"] == "INCOMPLETE" and local["error"] == expected
+  assert local["manifest"] is None
+  app = create_app(store=case.first, token="internal")
+  async with app.router.lifespan_context(app):
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app),
+      base_url="http://local",
+      headers={"Authorization": "Bearer internal"},
+    ) as client:
+      status = await client.get(f"/market-data/internal/v1/demands/{demand_id}")
+      assert status.status_code == 200
+      assert status.json()["reason_code"] == expected
+      assert status.json()["delivery_status"] == "INCOMPLETE"
+  assert len(case.calls) == 2 and not case.connection.lines
+  async with case.first.engine.connect() as db:
+    budget = (
+      await db.execute(
+        text("SELECT to_jsonb(b) FROM development_data_download_budget b")
+      )
+    ).scalar_one()
+  # Even if the producer later changes, this terminal task needs explicit recovery.
+  case.remote_result.update(state="READY", manifest=case.manifest)
+  assert await importer.import_partition(case.request, owner=case.first) == result
+  assert len(case.calls) == 2 and not case.connection.lines
+  assert await catalog.get_export(case.identity) == local
+  async with case.first.engine.connect() as db:
+    assert (
+      await db.execute(
+        text("SELECT to_jsonb(b) FROM development_data_download_budget b")
+      )
+    ).scalar_one() == budget

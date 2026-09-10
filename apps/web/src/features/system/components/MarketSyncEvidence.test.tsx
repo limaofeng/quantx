@@ -58,7 +58,7 @@ describe('MarketSyncEvidence', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15000);
     });
-    expect(screen.getByText('已入库')).toBeInTheDocument();
+    expect(screen.getByText('已处理')).toBeInTheDocument();
     expect(screen.getByText('待校验')).toBeInTheDocument();
     expect(screen.getByText(/覆盖合格 0/)).toBeInTheDocument();
     await act(async () => {
@@ -83,5 +83,27 @@ describe('MarketSyncEvidence', () => {
     expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
       'Bearer test-token'
     );
+  });
+  it('shows blocked state and its reason without claiming background progress', async () => {
+    const result = evidence('BLOCKED');
+    const items = result.items.map(item => ({
+      ...item,
+      summary: { reason: 'DATA_UNAVAILABLE' },
+    }));
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          json: async () => ({ ...result, items }),
+        })
+    );
+    await act(async () => {
+      render(<MarketSyncEvidence runId="blocked" live={false} />);
+    });
+    expect(screen.getByText('已阻塞')).toBeInTheDocument();
+    expect(screen.getByText('源数据不可用')).toBeInTheDocument();
+    expect(screen.getByText(/后台处理中 0/)).toBeInTheDocument();
   });
 });

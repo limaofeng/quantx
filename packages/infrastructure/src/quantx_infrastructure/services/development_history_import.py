@@ -122,6 +122,8 @@ async def _import_partition_owned(
     async with _delivery_transaction(owner) as db:
       identity = await submit_in_transaction(request, db)
   local = await get_export(identity)
+  if local["state"] == "INCOMPLETE":
+    return {"id": identity, "status": "INCOMPLETE", "reason": local["error"]}
   if isinstance(local.get("manifest"), dict) and local["manifest"].get("version") == 1:
     return await _block_legacy_delivery(
       identity, owner, "SOURCE_PROVENANCE_MIGRATION_REQUIRED"
@@ -197,13 +199,19 @@ async def _import_partition_owned(
       return {"id": identity, "status": "BLOCKED", "reason": "DELIVERY_REMOTE_EXPIRED"}
     if remote["state"] != "READY":
       if remote["state"] == "INCOMPLETE":
+        reason = (
+          "DATA_UNAVAILABLE"
+          if remote.get("error") == "DATA_UNAVAILABLE"
+          else "SOURCE_INCOMPLETE"
+        )
         async with _delivery_transaction(owner) as db:
           await db.execute(
             text(
-              "UPDATE development_data_export SET state='INCOMPLETE',error='SOURCE_INCOMPLETE' WHERE id=:id"
+              "UPDATE development_data_export SET state='INCOMPLETE',error=:reason,updated_at=clock_timestamp() WHERE id=:id"
             ),
-            {"id": identity},
+            {"id": identity, "reason": reason},
           )
+        return {"status": "INCOMPLETE", "id": identity, "reason": reason}
       elif remote["state"] in {"QUEUED", "WAITING_SOURCE"}:
         await budget.schedule("pending")
       return {"status": remote["state"], "id": identity, "reason": remote.get("error")}
