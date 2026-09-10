@@ -47,7 +47,7 @@ class ImmutableBarBundle:
   records: int
   content_sha256: str
   storage_version: str
-  coverage: tuple[tuple[str, str, str, int], ...]
+  coverage: tuple[tuple[str, str, str, int, str], ...]
 
 
 async def prepare_native_bar_bundle(payload, manifest):
@@ -61,6 +61,7 @@ async def prepare_native_bar_bundle(payload, manifest):
   # Missing days are not promoted to no-data proofs; group summaries stay in
   # the native audit, while this directory lists only observed daily coverage.
   coverage = {}
+  partition_hashes = {}
   digest, count = hashlib.sha256(), 0
   async for frame in _uploaded_content_batches(manifest):
     for row in frame.to_dict("records"):
@@ -73,6 +74,9 @@ async def prepare_native_bar_bundle(payload, manifest):
         row["time"].astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
       )
       coverage[key] = coverage.get(key, 0) + 1
+      partition_hashes.setdefault(key, hashlib.sha256()).update(
+        _canonical(normalized) + b"\n"
+      )
   if count != audit["records_received"]:
     raise ValueError("native immutable source count changed")
   content = digest.hexdigest()
@@ -88,7 +92,10 @@ async def prepare_native_bar_bundle(payload, manifest):
     count,
     content,
     version,
-    tuple((*key, value) for key, value in sorted(coverage.items())),
+    tuple(
+      (*key, value, partition_hashes[key].hexdigest())
+      for key, value in sorted(coverage.items())
+    ),
   )
 
 

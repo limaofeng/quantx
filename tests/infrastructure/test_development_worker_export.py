@@ -123,6 +123,58 @@ async def row(case):
     )
 
 
+async def test_default_dispatch_rebuilds_missing_files_from_original_fixed_version(
+  export_case, monkeypatch
+):
+  from quantx_infrastructure.services import local_history_reader, native_bar_ingestion
+  from quantx_infrastructure.services.market_data_transfer_ingestion import (
+    _iter_transfer_chunks,
+    ingest_uploaded_bar_request,
+  )
+
+  from tests.infrastructure.test_immutable_bar_storage import VersionStorage
+  from tests.infrastructure.test_market_data_transfer_ingestion import _summary
+  from tests.infrastructure.test_native_bar_ingestion import Source
+
+  case, storage = export_case, VersionStorage()
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(case.root))
+  monkeypatch.setattr(
+    native_bar_ingestion, "get_timeseries_connection", lambda: storage
+  )
+  monkeypatch.setattr(
+    local_history_reader, "get_timeseries_connection", lambda: storage
+  )
+  payload, original = case.request.agent_payload(), bar()
+  source = Source(
+    case.root,
+    payload,
+    [original, _summary([original], code=case.request.instrument, period="1m")],
+  )
+  audit = await ingest_uploaded_bar_request(source, source.identity)
+  changed = {**original, "close": original["close"] + 0.1}
+  newer = Source(
+    case.root,
+    payload,
+    [changed, _summary([changed], code=case.request.instrument, period="1m")],
+  )
+  await ingest_uploaded_bar_request(newer, newer.identity)
+  case.source.update(request_payload=payload, ingestion_result=audit)
+  monkeypatch.setattr(
+    exporter,
+    "load_uploaded_request_manifest",
+    AsyncMock(side_effect=FileNotFoundError()),
+  )
+  assert (await exporter.dispatch_once(case.first))["status"] == "processed"
+  published = await row(case)
+  assert published["state"] == "READY" and published["source_request_id"] == "original"
+  files = [
+    {**chunk, "storage_reference": str(exporter.content_path(chunk["checksum_sha256"]))}
+    for chunk in published["manifest"]["chunks"]
+  ]
+  records = next(_iter_transfer_chunks(files))
+  assert records[0]["close"] == original["close"]
+
+
 async def test_default_dispatch_publishes_once_with_original_source(
   export_case, monkeypatch
 ):

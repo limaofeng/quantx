@@ -73,35 +73,7 @@ def _publication_from_rows(rows, request):
   ):
     raise HistoryReadInvalid("NATIVE_VERSION_DIRECTORY_CAPACITY")
   row = rows[0]
-  proof = row["content"]
-  if not isinstance(proof, dict):
-    raise HistoryReadInvalid("NATIVE_VERSION_PROOF_INVALID")
-  count = proof.get("records_verified")
-  source_hash = proof.get("source_sha256")
-  if (
-    row["status"] != "verified"
-    or type(proof.get("schema_version")) is not int
-    or proof.get("schema_version") != 1
-    or type(count) is not int
-    or count <= 0
-    or str(count) != row["records"]
-    or str(count) != row["persisted"]
-    or type(proof.get("fields_verified")) is not int
-    or proof["fields_verified"] <= 0
-    or not isinstance(source_hash, str)
-    or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None
-    or source_hash != proof.get("persisted_sha256")
-    or proof.get("storage_version") != row["version"]
-    or row["version"]
-    != evidence_hash(
-      {
-        "storage_format": "native-bars-v1",
-        "payload": row["request_payload"],
-        "content_sha256": source_hash,
-      }
-    )
-  ):
-    raise HistoryReadInvalid("NATIVE_VERSION_PROOF_INVALID")
+  proof, count, source_hash = _validated_native_row(row)
   if (
     len(rows) == 2
     and rows[1]["created_at"] == row["created_at"]
@@ -189,3 +161,60 @@ async def resolve_native_daily_versions(db, request):
     ).storage_version
     for key, candidates in partitions.items()
   }
+
+
+def _validated_native_row(row):
+  from .local_history_reader import HistoryReadInvalid
+
+  proof = row["content"]
+  if not isinstance(proof, dict):
+    raise HistoryReadInvalid("NATIVE_VERSION_PROOF_INVALID")
+  count = proof.get("records_verified")
+  source_hash = proof.get("source_sha256")
+  if (
+    row["status"] != "verified"
+    or type(proof.get("schema_version")) is not int
+    or proof.get("schema_version") != 1
+    or type(count) is not int
+    or count <= 0
+    or str(count) != row["records"]
+    or str(count) != row["persisted"]
+    or type(proof.get("fields_verified")) is not int
+    or proof["fields_verified"] <= 0
+    or not isinstance(source_hash, str)
+    or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None
+    or source_hash != proof.get("persisted_sha256")
+    or proof.get("storage_version") != row["version"]
+    or row["version"]
+    != evidence_hash(
+      {
+        "storage_format": "native-bars-v1",
+        "payload": row["request_payload"],
+        "content_sha256": source_hash,
+      }
+    )
+  ):
+    raise HistoryReadInvalid("NATIVE_VERSION_PROOF_INVALID")
+  return proof, count, source_hash
+
+
+def validate_native_bar_receipt(payload, audit):
+  if not isinstance(payload, dict) or not isinstance(audit, dict):
+    raise ValueError("NATIVE_VERSION_PROOF_INVALID")
+  if not audit.get("native_storage_version"):
+    raise ValueError("NATIVE_STORAGE_VERSION_MIGRATION_REQUIRED")
+  if not isinstance(audit.get("persistence_verification"), dict):
+    raise ValueError("NATIVE_VERSION_PROOF_INVALID")
+  _validated_native_row(
+    {
+      "request_payload": payload,
+      "version": audit.get("native_storage_version"),
+      "content": audit.get("content_verification"),
+      "records": str(audit.get("records_verified")),
+      "persisted": str(
+        audit.get("persistence_verification", {}).get("records_verified")
+      ),
+      "status": audit.get("persistence_verification", {}).get("status"),
+    }
+  )
+  return audit["native_storage_version"]

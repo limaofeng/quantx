@@ -260,6 +260,12 @@ Engine 默认生命周期已接范围登记和有界归档发送，已移除实�
 不早于代次登记分钟、不晚于当前时间；恢复不授予旧源新增修订权限。已登记身份
 仍精确幂等重放。其他历史调用方及完整运行验收尚未完成。
 
+原生摄取 day_coverage 保存每分区 content_sha256。开发导出重建要求原源请求的
+固定版本、正覆盖和该摘要同时匹配，校验逐字段内容后才发布文件。Tick 保留原
+source_time_ms/tick_ordinal 并还原五档展开列，日线保留已提供的上下限价。缺少
+版本或分区证明分别返回 NATIVE_STORAGE_VERSION_MIGRATION_REQUIRED 或
+NATIVE_PARTITION_PROOF_MIGRATION_REQUIRED，不切换到其他源或未版本化表。
+
 GraphQL 使用单一 `qmtAgentConnection` 视图返回当前 Agent、五段连接链路、
 行情流与本地 journal 的非敏感指标，以及折叠的历史登记。Web 通过
 `createAgentEnrollment` 发起安全交接，使用 `cancelAgentHandover` 取消；

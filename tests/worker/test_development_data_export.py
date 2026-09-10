@@ -186,50 +186,47 @@ def test_safe_export_error_preserves_known_codes(reason):
 
 @pytest.mark.parametrize("limits", [(11.0, 9.0), (None, None)])
 async def test_persisted_daily_limits_round_trip(monkeypatch, tmp_path, limits):
-  from types import SimpleNamespace
-
   import pandas as pd
   from quantx_infrastructure.services import data_exchange_archive as archive
+  from quantx_infrastructure.services import local_history_reader, native_bar_ingestion
   from quantx_infrastructure.services.market_data_transfer_ingestion import (
+    ingest_uploaded_bar_request,
     preprocess_market_data,
   )
+
+  from tests.infrastructure.test_immutable_bar_storage import VersionStorage
+  from tests.infrastructure.test_market_data_transfer_ingestion import (
+    _kline_row,
+    _summary,
+  )
+  from tests.infrastructure.test_native_bar_ingestion import Source
 
   request = HistoryPartitionRequest(
     instrument="600000.SH", period="1d", trading_date=date(2026, 9, 7)
   )
   stamp = datetime(2026, 9, 7, tzinfo=ZoneInfo("Asia/Shanghai"))
-  stored = SimpleNamespace(
-    time=stamp,
-    open=10.0,
-    high=10.2,
-    low=9.9,
-    close=10.1,
-    pre_close=9.95,
-    volume=1000.0,
-    amount=10000.0,
-    settelement_price=0.0,
-    open_interest=0,
-    suspend_flag=0,
-    up_stop_price=limits[0],
-    down_stop_price=limits[1],
+  raw = _kline_row(
+    code=request.instrument, period="1d", time=int(stamp.timestamp() * 1000)
   )
-
-  class History:
-    async def get_kline_data(self, **kwargs):
-      return [stored]
-
-  monkeypatch.setattr(archive, "HistoricalMarketDataService", History)
-  proof = {
-    "day_coverage": [
-      {
-        "instrument_code": request.instrument,
-        "period": "1d",
-        "trading_date": "2026-09-07",
-        "point_count": 1,
-      }
-    ]
-  }
-  rows = await archive.persisted_partition(request, proof)
+  if limits[0] is not None:
+    raw.update(upperLimit=limits[0], lowerLimit=limits[1])
+  connection = VersionStorage()
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    native_bar_ingestion, "get_timeseries_connection", lambda: connection
+  )
+  monkeypatch.setattr(
+    local_history_reader, "get_timeseries_connection", lambda: connection
+  )
+  source = Source(
+    tmp_path,
+    request.agent_payload(),
+    [raw, _summary([raw], code=request.instrument, period="1d")],
+  )
+  proof = await ingest_uploaded_bar_request(source, source.identity)
+  rows = await archive.persisted_partition(
+    request, proof, source_payload=source.payload
+  )
   records = partition_records([rows], request)
   validate_bar_records_against_request(records, request.agent_payload())
   frame = preprocess_market_data("1d", {request.instrument: pd.DataFrame(rows)})

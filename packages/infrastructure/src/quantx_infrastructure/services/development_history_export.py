@@ -340,7 +340,9 @@ async def _dispatch_owned(store, owner) -> dict:
 
     if request.period == "1d":
       persisted_rows = await persisted_partition(
-        request, source.get("ingestion_result") or {}
+        request,
+        source.get("ingestion_result") or {},
+        source_payload=source["request_payload"],
       )
       records = await _joined_thread(partition_records, [persisted_rows], request)
     else:
@@ -352,7 +354,9 @@ async def _dispatch_owned(store, owner) -> dict:
         await _joined_thread(validate_bar_records_against_request, records, payload)
       except (FileNotFoundError, MarketDataValidationError):
         persisted_rows = await persisted_partition(
-          request, source.get("ingestion_result") or {}
+          request,
+          source.get("ingestion_result") or {},
+          source_payload=source["request_payload"],
         )
         records = await _joined_thread(partition_records, [persisted_rows], request)
     await _joined_thread(validate_bar_records_against_request, records, payload)
@@ -399,6 +403,9 @@ def safe_export_error(exc: Exception) -> str:
     "SOURCE_COVERAGE_MISSING",
     "PERSISTED_COVERAGE_UNPROVEN",
     "PERSISTED_COVERAGE_CHANGED",
+    "NATIVE_STORAGE_VERSION_MIGRATION_REQUIRED",
+    "NATIVE_PARTITION_PROOF_MIGRATION_REQUIRED",
+    "NATIVE_VERSION_PROOF_INVALID",
     "HISTORICAL_SOURCE_IDENTITY_MISSING",
     "EXPORT_TRANSFER_BUDGET_EXCEEDED",
     "EXPORT_DISK_BUDGET_EXCEEDED",

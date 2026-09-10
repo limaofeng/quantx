@@ -27,8 +27,9 @@ async def ingest_native_bar_bundle(
         "period": period,
         "trading_date": day,
         "point_count": count,
+        "content_sha256": content_hash,
       }
-      for code, period, day, count in version.coverage
+      for code, period, day, count, content_hash in version.coverage
     ],
   }
   if progress is not None:
