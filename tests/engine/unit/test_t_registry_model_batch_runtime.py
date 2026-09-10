@@ -20,7 +20,7 @@ from tests.infrastructure.test_t_model_registry_repository import (  # noqa: F40
 from tests.research.test_t_assistant_model_data import bar
 
 
-async def registered(sessions, tmp_path, mode):
+async def registered(sessions, tmp_path, mode, *, budget=10000):
   model = runtime(tmp_path, mode)
   artifact = model.artifact
   async with sessions() as db, db.begin():
@@ -42,7 +42,7 @@ async def registered(sessions, tmp_path, mode):
   frozen = type(model.authorization.runtime_binding).create(**material)
   model = type(model)(mode=mode, artifact=artifact,
     authorization=replace(model.authorization, registry_authorization_revision=revision, runtime_binding=frozen),
-    policy_hash=model.policy_hash, max_age_ms=model.max_age_ms, inference_budget_ms=model.budget_ms)
+    policy_hash=model.policy_hash, max_age_ms=model.max_age_ms, inference_budget_ms=budget)
   return model, TRegistryModelBatchRuntime(model=model, session_factory=sessions, clock_ms=lambda: bar().available_at_ms + 10)
 
 
@@ -494,3 +494,81 @@ async def test_accepted_minute_boundary_reaches_registered_cpu_and_snapshot(sess
   assert view.status == "VALID" and view.revision == result.revision
   assert {score.instrument_code for score in view.scores} == set(CODES)
   assert all(score.model_as_of_ms >= batch.available_at_ms for score in view.scores)
+
+
+@pytest.mark.parametrize("failure", ["cancel", "timeout"])
+async def test_cpu_call_does_not_block_loop_or_overlap_after_abandonment(sessions, tmp_path, monkeypatch, failure):
+  import threading
+
+  model, scorer = await registered(sessions, tmp_path, "ACTIVE", budget=100 if failure == "timeout" else 10000)
+  feature = bar()
+  args = dict(model_as_of_ms=feature.available_at_ms, rule_order=())
+  first = await scorer.evaluate((feature,), **args)
+  assert first.reason == "VALID"
+  entered = asyncio.Event()
+  release = threading.Event()
+  loop = asyncio.get_running_loop()
+  original = type(model.artifact).score
+  calls = []
+
+  def blocked(artifact, bar, **kwargs):
+    calls.append(bar.instrument_code)
+    loop.call_soon_threadsafe(entered.set)
+    assert release.wait(5), "test failed to release CPU worker"
+    return original(artifact, bar, **kwargs)
+
+  monkeypatch.setattr(type(model.artifact), "score", blocked)
+  args["model_as_of_ms"] += 1
+  evaluation = asyncio.create_task(scorer.evaluate((feature,), **args))
+  try:
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    # This coroutine can run while native inference remains blocked.
+    assert not release.is_set() and not scorer._inference_task.done()
+    if failure == "cancel":
+      evaluation.cancel()
+      with pytest.raises(asyncio.CancelledError):
+        await evaluation
+    else:
+      result = await asyncio.wait_for(evaluation, timeout=2)
+      assert result.reason == "MODEL_BATCH_UNAVAILABLE"
+    assert not scorer.latest.active_scores and scorer.latest.revision == first.revision
+    old_task = scorer._inference_task
+    rejected = await scorer.evaluate((feature,), **args)
+    assert rejected.reason == "MODEL_BATCH_UNAVAILABLE" and len(calls) == 1
+    assert scorer._inference_task is old_task and not old_task.done()
+    release.set()
+    await asyncio.wait_for(asyncio.shield(old_task), timeout=2)
+    assert not scorer.latest.active_scores  # A late worker cannot publish itself.
+    retry = await scorer.evaluate((feature,), **args)
+    assert retry.reason == "VALID" and retry.revision == first.revision + 1
+    assert len(calls) == 2
+  finally:
+    release.set()
+    if not evaluation.done():
+      evaluation.cancel()
+    await asyncio.gather(evaluation, return_exceptions=True)
+    if scorer._inference_task is not None:
+      await asyncio.shield(scorer._inference_task)
+
+
+async def test_busy_worker_still_records_newer_minute_input_fence(sessions, tmp_path):
+  from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+
+  from tests.engine.unit.test_t_model_minute_batch import CODES, close, config
+  from tests.research.test_t_assistant_model_data import START
+
+  _, scorer = await registered(sessions, tmp_path, "ACTIVE")
+  minute = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  older = close(minute)
+  minute.advance(instrument_codes=CODES, **config(START + 60000))
+  newer = close(minute, START + 60000)
+  pending = asyncio.get_running_loop().create_future()
+  scorer._inference_task = pending
+  try:
+    assert (await scorer.evaluate_minute(newer, rule_order=())).reason == "MODEL_BATCH_UNAVAILABLE"
+    assert scorer._minute_input_fence == (newer.interval_start_ms, newer.manifest_hash)
+  finally:
+    pending.set_result(None)
+  assert (await scorer.evaluate_minute(older, rule_order=())).reason == "MODEL_BATCH_UNAVAILABLE"
+  scorer._clock_ms = lambda: newer.available_at_ms + 1
+  assert (await scorer.evaluate_minute(newer, rule_order=())).reason == "VALID"

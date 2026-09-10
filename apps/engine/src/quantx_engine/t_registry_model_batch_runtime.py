@@ -42,6 +42,7 @@ class TRegistryModelBatchRuntime:
     self._lock = asyncio.Lock()
     self._last_visibility_ms = None
     self._minute_input_fence = None
+    self._inference_task = None
 
   @classmethod
   async def load(cls, *, root, entry, binding: TModelRuntimeBinding, self_test_manifest,
@@ -148,6 +149,8 @@ class TRegistryModelBatchRuntime:
           self._minute_input_fence = identity
         elif self._minute_input_fence is not None:
           raise ValueError("T_MODEL_MINUTE_MANIFEST_REQUIRED")
+        if self._inference_task is not None and not self._inference_task.done():
+          raise ValueError("T_MODEL_INFERENCE_STILL_RUNNING")
         artifact, auth = candidate.artifact, candidate.authorization
         if artifact is None or auth is None:
           raise ValueError("T_MODEL_BINDING_MISSING")
@@ -162,8 +165,16 @@ class TRegistryModelBatchRuntime:
             raise ValueError("T_MODEL_AUTHORIZATION_CHANGED")
           # authorize holds the registry row through this transaction. Registry
           # stage changes use CAS on that same row and cannot pass the held lock.
-          result = candidate.evaluate(bars, model_as_of_ms=model_as_of_ms, rule_order=rule_order,
-            unavailable=unavailable, input_manifest_hash=minute_batch.manifest_hash if minute_batch else None)
+          # Cancellation cannot stop a native CPU call. Keep its task shielded
+          # and tracked until terminal; its private candidate is never published
+          # on timeout/cancellation, and no replacement overlaps it.
+          self._inference_task = asyncio.create_task(asyncio.to_thread(
+            candidate.evaluate, tuple(bars), model_as_of_ms=model_as_of_ms, rule_order=rule_order,
+            unavailable=unavailable, input_manifest_hash=minute_batch.manifest_hash if minute_batch else None))
+          self._inference_task.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None)
+          result = await asyncio.wait_for(asyncio.shield(self._inference_task),
+            timeout=candidate.budget_ms / 1000)
         # Input model_as_of_ms is a lower bound. Visibility starts only after
         # the registry transaction has exited, never at minute end/request time.
         visible_at = self._clock_ms()

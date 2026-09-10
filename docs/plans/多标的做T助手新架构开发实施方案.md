@@ -766,6 +766,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   首轮唯一失败为旧 BLOCKED 测试预期，按新语义修正后 7 项预加载复验通过，未改生产逻辑。
   Ruff/差异检查通过，证据 `p8-paper-shadow-entry-final.log`、
   `p8-paper-shadow-entry-preload.log`。未执行正式 SHADOW 观察或放宽模型准入门。
+  registry CPU 评分已从事件循环同步调用切换为受跟踪的工作线程；等待受冻结
+  inference_budget_ms 约束，超时/取消立即清除可见缓存并退出授权事务。线程不可强杀，
+  因此 shield 保留句柄直到终态；每个 runtime 在旧任务未终止前拒绝再次推理，迟到结果
+  仅存在于私有 candidate，不能自行发布。新分钟在忙拒绝前仍登记单调输入 fence。
+  **96 项评分/加载/预加载回归通过**；调整 fence 顺序并补反向用例后 **48 项 registry
+  回归通过**，含真实工作线程阻塞、事件循环响应、取消/超时、旧缓存清理、无重叠重试、
+  迟到结果隔离和忙期间新分钟防回退。Ruff/差异检查通过，证据
+  `p8-cpu-task-isolation.log`、`p8-cpu-task-fence-final.log`。该验证不是生产吞吐或
+  调度验收；实际分钟调度/PIT 来源仍待接入，模型发布与 LIVE 开关保持原限制。
 
 
 
