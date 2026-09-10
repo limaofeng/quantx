@@ -564,7 +564,7 @@ _POLICIES[_release_operations_key] = replace(
 
 _register(
   "Mutation", "t-trade:control",
-  {"prepareTAssistantLegacyInventory", "previewTAssistantLegacyDrain", "confirmTAssistantLegacyDrain"},
+  {"prepareTAssistantLegacyInventory", "previewTAssistantLegacyDrain", "confirmTAssistantLegacyDrain", "completeTAssistantLegacyDrain"},
   audiences=("native",), risk="TRADING_WRITE",
 )
 _register(
@@ -586,6 +586,7 @@ _POLICIES[_legacy_source_key] = replace(
 )
 
 _TRADE_APPROVAL_FIELDS = {
+  "completeTAssistantLegacyDrain",
   "prepareTAssistantLegacyInventory",
   "previewTAssistantLegacyDrain",
   "confirmTAssistantLegacyDrain",

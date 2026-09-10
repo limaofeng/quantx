@@ -268,6 +268,17 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "completeTAssistantLegacyDrain": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "confirmAccountExecutionControl": {
         "audiences": [
           "web",

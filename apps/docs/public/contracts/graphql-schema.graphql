@@ -4146,6 +4146,9 @@ type Mutation {
   """消费原设备凭据，将同一 ENTRY 交给 Engine 重新分配；不表示成交"""
   confirmTAssistantLiveEntry(accountId: String!, executionId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
 
+  """继续原设备已确认的排空，由 Engine 复核全部义务后终结旧执行"""
+  completeTAssistantLegacyDrain(accountId: String!, drainCommandId: String!, expectedHeadVersion: Int!): TAssistantLegacyMaintenanceResult!
+
   """准备旧做 T 义务清单供复核，不停止入场、不解除绑定"""
   prepareTAssistantLegacyInventory(requestId: String!, request: TAssistantLegacyInventoryRequest!): TAssistantLegacyMaintenanceResult!
 

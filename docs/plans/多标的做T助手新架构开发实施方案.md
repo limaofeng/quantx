@@ -1334,6 +1334,20 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   恢复统一服务和实际 Caddy 契约验证后原子提交，再补重启和迟到回报整链验证。
   Web check、build、895 项测试通过，lint 无错误（1 项既有警告）；证据
   `.codex_screenshots/p6-completion-{check,lint,web-tests,build}.log`，不替代失败的 codegen。
+  2026-09-10 用户恢复开发服务后，实测本机 Caddy /health/live=200、GraphQL 查询
+  正常；已从实际 http://127.0.0.1:8080/graphql 成功 codegen，公开终结 mutation、
+  native/control+approve 权限、同原设备签名绑定、UUID 幂等入队和成功后证据查询连同
+  Web 操作文档及两份受版本管理的 GraphQL 契约快照完成原子切换。生成的 Web TS 按
+  仓库规则忽略；iOS 仍暂停，未纳入本次修改。本轮未迁移数据库、未调用业务终结命令。
+  **24 项 API/Engine 定向回归通过**；契约快照一致性通过，契约套件 **8 passed/1 failed**，
+  唯一既有失败为 Query.historyDownloadSettings 缺少 description，与此次终结接口无关。
+  root codegen、check、lint、build 与 bundle budget 通过；初次 check/build 并行均构建
+  Docs 引发输出目录冲突，改为顺序运行后全部通过。Web 全量 **894 passed/1 timeout**，
+  唯一超时文件 TTradePositionsView.test.tsx 未改代码/阈值，单独复验 **12 passed**。
+  证据 `p6-legacy-codegen-restored.log`、`p6-legacy-contract-final.log`、
+  `p6-legacy-contract-snapshots.log`、`p6-legacy-check-serial.log`、`p6-legacy-web-lint.log`、
+  `p6-legacy-build-serial.log`、`p6-legacy-web-test-run.log`、`p6-legacy-web-timeout-recheck.log`
+  均位于 .codex_screenshots/。解除本项 Caddy/codegen 阻塞，不代表 P6/P7/P8 整体验收完成。
   重启恢复独立修复：已复现 cut 提交后、命令完成前退出，重启没有旧运行时时遗漏迟到
   inbox 的错误成功。命令分发现在复核已有 cut 的当前义务，不依赖内存清理触发复核。
   **40 项定向测试与 Ruff 通过**，证据 `.codex_screenshots/p6-completion-restart-final.log`；

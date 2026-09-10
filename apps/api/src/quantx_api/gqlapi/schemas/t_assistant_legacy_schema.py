@@ -10,6 +10,7 @@ from strawberry.scalars import JSON
 from ..security import principal_from_context
 from ..t_assistant_legacy_drain_confirmation import (
   consume_drain_confirmation,
+  enqueue_legacy_completion,
   enqueue_legacy_inventory,
   issue_drain_confirmation,
   read_legacy_confirmation_status,
@@ -130,6 +131,36 @@ class TAssistantLegacyQuery:
 
 @strawberry.type
 class TAssistantLegacyMutation:
+  @strawberry.mutation(
+    description="继续原设备已确认的排空，由 Engine 复核全部义务后终结旧执行"
+  )
+  async def complete_t_assistant_legacy_drain(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    drain_command_id: str,
+    expected_head_version: int,
+  ) -> TAssistantLegacyMaintenanceResult:
+    principal = principal_from_context(info.context)
+    try:
+      async with AsyncSessionLocal() as db, db.begin():
+        identity = await enqueue_legacy_completion(
+          db,
+          principal=principal,
+          account_id=account_id,
+          drain_command_id=drain_command_id,
+          expected_head_version=expected_head_version,
+          now=datetime.now(UTC),
+        )
+      return TAssistantLegacyMaintenanceResult(
+        success=True,
+        code="COMPLETION_QUEUED",
+        message="终结请求已入队，请等待义务复核和资源清理完成",
+        engine_command_id=identity,
+      )
+    except ValueError as exc:
+      return _failed(exc)
+
   @strawberry.mutation(description="准备旧做 T 义务清单供复核，不停止入场、不解除绑定")
   async def prepare_t_assistant_legacy_inventory(
     self,

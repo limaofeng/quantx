@@ -43,6 +43,20 @@ async def test_public_maintenance_contract(monkeypatch):
   assert prepare.call_args.kwargs["request"] == dict(
     account_id="account-1", config_id="head", run_id="run", expected_head_version=1
   )
+  complete = AsyncMock(return_value="completion-1")
+  monkeypatch.setattr(legacy, "enqueue_legacy_completion", complete)
+  result = await SCHEMA.execute(
+    'mutation {completeTAssistantLegacyDrain(accountId:"account-1",drainCommandId:"original",expectedHeadVersion:2){success code engineCommandId}}',
+    context_value={"principal": principal},
+  )
+  assert not result.errors
+  assert result.data["completeTAssistantLegacyDrain"] == {
+    "success": True,
+    "code": "COMPLETION_QUEUED",
+    "engineCommandId": "completion-1",
+  }
+  assert complete.call_args.kwargs["drain_command_id"] == "original"
+  assert complete.call_args.kwargs["expected_head_version"] == 2
   confirm = AsyncMock(return_value="command-2")
   monkeypatch.setattr(legacy, "consume_drain_confirmation", confirm)
   result = await SCHEMA.execute(
@@ -82,6 +96,7 @@ async def test_public_maintenance_contract(monkeypatch):
     "prepareTAssistantLegacyInventory",
     "previewTAssistantLegacyDrain",
     "confirmTAssistantLegacyDrain",
+    "completeTAssistantLegacyDrain",
     "tAssistantLegacyMaintenanceOperation",
     "tAssistantLegacyConfirmationStatus",
     "tAssistantLegacyMaintenanceSource",

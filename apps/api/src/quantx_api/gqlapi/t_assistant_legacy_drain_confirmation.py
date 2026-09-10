@@ -3,7 +3,7 @@
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from quantx_application.t_trade_v3.portfolio_reference import aware_time
 from quantx_infrastructure.core.utils import time_utils
@@ -28,6 +28,7 @@ from .trade_approval import (
 
 ACTION = "T_ASSISTANT_LEGACY_DRAIN"
 COMMAND = "T_ASSISTANT_CONFIRM_LEGACY_DRAIN"
+COMPLETION_COMMAND = "T_ASSISTANT_COMPLETE_LEGACY_DRAIN"
 
 
 def normalize_drain_request(request):
@@ -281,7 +282,50 @@ async def read_legacy_maintenance_operation(db, *, principal, account_id, comman
   if command is None:
     return {"command_id": command_id, "status": "NOT_FOUND", "evidence": None}
   payload = dict(command.payload or {})
-  if command.command_type == "T_ASSISTANT_PREPARE_LEGACY_INVENTORY":
+  if command.command_type == COMPLETION_COMMAND:
+    if (
+      set(payload) != {"drain_command_id", "expected_head_version"}
+      or not isinstance(payload.get("drain_command_id"), str)
+      or type(payload.get("expected_head_version")) is not int
+      or payload["expected_head_version"] < 1
+    ):
+      raise ValueError("LEGACY_T_MAINTENANCE_COMMAND_INVALID")
+    original = await db.get(EngineCommandOutbox, payload["drain_command_id"])
+    if (
+      original is None
+      or original.command_type != COMMAND
+      or original.aggregate_id != command.aggregate_id
+    ):
+      raise ValueError("LEGACY_T_MAINTENANCE_SCOPE_CONFLICT")
+    drained = await read_legacy_maintenance_operation(
+      db, principal=current, account_id=account_id, command_id=original.message_id
+    )
+    if drained["status"] != "SUCCEEDED":
+      raise ValueError("LEGACY_T_COMPLETION_ORIGINAL_DRAIN_REQUIRED")
+    event = await db.get(
+      TTradeRolloutEvent, f"legacy-t-completed:{command.aggregate_id}"
+    )
+    evidence = None
+    if event is not None:
+      details = dict(event.details or {})
+      proof = details.get("evidence")
+      expected = dict(
+        config_id=drained["evidence"]["request"]["config_id"],
+        run_id=command.aggregate_id,
+        expected_head_version=payload["expected_head_version"],
+      )
+      if (
+        event.event_type != "LEGACY_T_DRAIN_COMPLETED"
+        or event.next_stage != "STOPPED"
+        or event.account_id != account_id
+        or event.actor_user_id != current.user_id
+        or details.get("request") != expected
+        or not isinstance(proof, dict)
+        or details.get("evidence_hash") != stable_manifest_hash(proof)
+      ):
+        raise ValueError("LEGACY_T_MAINTENANCE_EVIDENCE_CONFLICT")
+      evidence = details
+  elif command.command_type == "T_ASSISTANT_PREPARE_LEGACY_INVENTORY":
     if (
       payload.get("actor_id") != current.user_id
       or payload.get("account_id") != account_id
@@ -357,6 +401,72 @@ async def read_legacy_maintenance_operation(db, *, principal, account_id, comman
     "status": status,
     "evidence": evidence if status == "SUCCEEDED" else None,
   }
+
+
+async def enqueue_legacy_completion(
+  db, *, principal, account_id, drain_command_id, expected_head_version, now
+):
+  """Continue the original confirmed drain; Engine owns the final obligation proof."""
+  if (
+    not db.in_transaction()
+    or not isinstance(drain_command_id, str)
+    or not drain_command_id.strip()
+    or type(expected_head_version) is not int
+    or expected_head_version < 1
+  ):
+    raise ValueError("LEGACY_T_COMPLETION_REQUEST_INVALID")
+  now = aware_time(now).astimezone(UTC)
+  # This read checks current native authority, original device, signature and
+  # immutable drain evidence. Completion cannot manufacture a drain approval.
+  original = await db.get(EngineCommandOutbox, drain_command_id)
+  if original is None or original.command_type != COMMAND:
+    raise ValueError("LEGACY_T_COMPLETION_ORIGINAL_DRAIN_REQUIRED")
+  drained = await read_legacy_maintenance_operation(
+    db, principal=principal, account_id=account_id, command_id=drain_command_id
+  )
+  if drained["status"] != "SUCCEEDED":
+    raise ValueError("LEGACY_T_COMPLETION_ORIGINAL_DRAIN_REQUIRED")
+  request = drained["evidence"]["request"]
+  head = await db.get(
+    TTradeGlobalConfig,
+    request["config_id"],
+    with_for_update=True,
+    populate_existing=True,
+  )
+  if head is None or head.account_id != account_id:
+    raise ValueError("LEGACY_T_COMPLETION_HEAD_CONFLICT")
+  identity = str(uuid5(NAMESPACE_URL, f"quantx:legacy-completion:{drain_command_id}"))
+  payload = dict(
+    drain_command_id=drain_command_id, expected_head_version=expected_head_version
+  )
+  existing = await db.get(EngineCommandOutbox, identity)
+  if existing is not None:
+    if (
+      existing.command_type != COMPLETION_COMMAND
+      or existing.aggregate_id != original.aggregate_id
+      or existing.payload != payload
+    ):
+      raise ValueError("LEGACY_T_COMPLETION_REQUEST_CONFLICT")
+    return identity
+  if (
+    head.mode != "live"
+    or head.strategy_run_id != original.aggregate_id
+    or head.state_version != expected_head_version
+  ):
+    raise ValueError("LEGACY_T_COMPLETION_HEAD_CONFLICT")
+  db.add(
+    EngineCommandOutbox(
+      message_id=identity,
+      idempotency_key=identity,
+      command_type=COMPLETION_COMMAND,
+      aggregate_id=original.aggregate_id,
+      payload=payload,
+      available_at=now.replace(tzinfo=None),
+      processing_status="PENDING",
+    )
+  )
+  await db.flush()
+  return identity
 
 
 async def read_legacy_confirmation_status(db, *, principal, challenge_id, now):

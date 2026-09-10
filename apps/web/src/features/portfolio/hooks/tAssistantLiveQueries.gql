@@ -180,6 +180,23 @@ mutation Portfolio_ConfirmTAssistantLegacyDrain(
     engineCommandId
   }
 }
+mutation Portfolio_CompleteTAssistantLegacyDrain(
+  $accountId: String!
+  $drainCommandId: String!
+  $expectedHeadVersion: Int!
+) {
+  completeTAssistantLegacyDrain(
+    accountId: $accountId
+    drainCommandId: $drainCommandId
+    expectedHeadVersion: $expectedHeadVersion
+  ) {
+    success
+    code
+    message
+    engineCommandId
+  }
+}
+
 query Portfolio_TAssistantLegacyMaintenanceOperation(
   $accountId: String!
   $commandId: String!
