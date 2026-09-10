@@ -1432,6 +1432,10 @@ async def verify_uploaded_bar_request(
     _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
     with market_data_stage("manifest_validation"):
       audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
+    if verify_persistence is None:
+      from .native_bar_ingestion import ingest_native_bar_bundle
+
+      return await ingest_native_bar_bundle(payload, manifest, audit, read_only=True)
     verified = await _verify_uploaded_bar_coverage(
       manifest,
       payload,
@@ -1457,6 +1461,10 @@ async def ingest_uploaded_bar_request(
     _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
     with market_data_stage("manifest_validation"):
       audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
+    if save_period is save_market_data_period and verify_persistence is None:
+      from .native_bar_ingestion import ingest_native_bar_bundle
+
+      return await ingest_native_bar_bundle(payload, manifest, audit, progress=progress)
     if progress is not None:
       await progress.apply(
         "manifest",

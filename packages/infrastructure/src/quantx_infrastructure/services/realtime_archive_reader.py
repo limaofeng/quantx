@@ -3,7 +3,6 @@
 import asyncio
 import json
 import time
-from datetime import timedelta
 
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from quantx_contracts.market_data_service import HistoryPage
@@ -12,6 +11,7 @@ from sqlalchemy import text
 
 from .development_bar_publication import resolve_published_bar_version
 from .local_history_reader import HistoryReadBusy, HistoryReadInvalid
+from .native_bar_publication import resolve_native_bar_version
 
 MAX_ARCHIVE_MINUTES = 1440
 MAX_ARCHIVE_DIRECTORY_BYTES = 4 * 1024 * 1024
@@ -75,52 +75,6 @@ async def _archive_heads(db, request):
   return heads
 
 
-async def _verified_native_partition(db, request):
-  day = request.trading_date.strftime("%Y%m%d")
-  # A date-shaped request made during the session can contain only a prefix of
-  # the day even if every returned point was verified. Require a fresh download
-  # requested after the final supported 15:00 minute closed; completion time is
-  # insufficient because ingestion may finish long after collection.
-  collection_after = (request.bounds()[0] + timedelta(hours=15, minutes=1)).replace(
-    tzinfo=None
-  )
-  return bool(
-    await db.scalar(
-      text("""
-    SELECT EXISTS(SELECT 1 FROM market_data_request r
-      WHERE r.status='COMPLETED' AND r.request_payload->>'operation'='bars'
-        AND r.request_payload->>'download'='true'
-        AND r.created_at>=:collection_after
-        AND (r.request_payload->'stock_list')::jsonb @> CAST(:codes AS jsonb)
-        AND (r.request_payload->'periods')::jsonb @> '["1m"]'::jsonb
-        AND r.request_payload->>'start_time' ~ '^[0-9]{8}$'
-        AND r.request_payload->>'end_time' ~ '^[0-9]{8}$'
-        AND r.request_payload->>'start_time'<=:day AND r.request_payload->>'end_time'>=:day
-        AND r.ingestion_result->'persistence_verification'->>'status'='verified'
-        AND r.ingestion_result->'content_verification'->>'schema_version'='1'
-        AND r.ingestion_result->'content_verification'->>'records_verified' ~ '^[1-9][0-9]*$'
-        AND r.ingestion_result->'content_verification'->>'records_verified'=r.ingestion_result->>'records_verified'
-        AND r.ingestion_result->'content_verification'->>'records_verified'=r.ingestion_result->'persistence_verification'->>'records_verified'
-        AND r.ingestion_result->'content_verification'->>'fields_verified' ~ '^[1-9][0-9]*$'
-        AND r.ingestion_result->'content_verification'->>'source_sha256' ~ '^[0-9a-f]{64}$'
-        AND r.ingestion_result->'content_verification'->>'source_sha256'=r.ingestion_result->'content_verification'->>'persisted_sha256'
-        AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE
-          WHEN jsonb_typeof(r.ingestion_result::jsonb->'day_coverage')='array'
-          THEN r.ingestion_result::jsonb->'day_coverage' ELSE '[]'::jsonb END) AS coverage
-          WHERE coverage->>'instrument_code'=:instrument AND coverage->>'period'='1m'
-            AND REPLACE(coverage->>'trading_date','-','')=:day
-            AND coverage->>'point_count' ~ '^[1-9][0-9]*$'))
-  """),
-      {
-        "codes": json.dumps([request.instrument]),
-        "instrument": request.instrument,
-        "day": day,
-        "collection_after": collection_after,
-      },
-    )
-  )
-
-
 async def read_archive_history(reader, request, *, session_factory, development):
   if reader._slot.locked():
     raise HistoryReadBusy("local history query capacity exhausted")
@@ -136,11 +90,15 @@ async def read_archive_history(reader, request, *, session_factory, development)
             trading_date=request.trading_date,
           ),
         )
-        native = False
+        native = None
       else:
         version = None
-        native = await _verified_native_partition(db, request)
-      heads = {} if version or native else await _archive_heads(db, request)
+        native = await resolve_native_bar_version(db, request)
+      heads = (
+        {}
+        if version or (native and native.full_session)
+        else await _archive_heads(db, request)
+      )
     if version:
       return await reader._read_thread(
         lambda value: reader._read(
@@ -148,11 +106,14 @@ async def read_archive_history(reader, request, *, session_factory, development)
         ),
         request,
       )
-    if native or not development and not heads:
+    if native and not heads:
       return await reader._read_thread(
-        lambda value: reader._read(value, budget=budget), request
+        lambda value: reader._read(
+          value, storage_version=native.storage_version, budget=budget
+        ),
+        request,
       )
-    if development and not heads:
+    if not heads:
       raise HistoryReadInvalid("HISTORY_STORAGE_VERSION_UNAVAILABLE")
     selected = {
       minute: head for minute, head in heads.items() if head.phase == "VERIFIED"
@@ -160,9 +121,14 @@ async def read_archive_history(reader, request, *, session_factory, development)
 
     def read(value):
       archives = reader._read(value, archive_versions=selected, budget=budget)
-      if development:
+      if native is None:
         return archives
-      original = reader._read(value, excluded_minutes=heads, budget=budget)
+      original = reader._read(
+        value,
+        storage_version=native.storage_version,
+        excluded_minutes=heads,
+        budget=budget,
+      )
       rows = sorted([*archives.records, *original.records], key=lambda row: row["time"])
       if any(left["time"] == right["time"] for left, right in zip(rows, rows[1:])):
         raise HistoryReadInvalid("ARCHIVE_CANONICAL_OVERLAP")

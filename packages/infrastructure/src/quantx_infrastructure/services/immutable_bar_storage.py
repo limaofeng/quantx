@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from quantx_infrastructure.database.timeseries_operations import (
   TimeSeriesOperations,
@@ -38,6 +39,57 @@ class ImmutableBarVersion:
   records: int
   content_sha256: str
   storage_version: str
+
+
+@dataclass(frozen=True)
+class ImmutableBarBundle:
+  manifest_json: str
+  records: int
+  content_sha256: str
+  storage_version: str
+  coverage: tuple[tuple[str, str, str, int], ...]
+
+
+async def prepare_native_bar_bundle(payload, manifest):
+  """One immutable version for all partitions in an original native request."""
+  manifest_json = json.dumps(
+    {"payload": payload, "chunks": manifest}, sort_keys=True, allow_nan=False
+  )
+  audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
+  # Keep coverage proportional to received data, not the Cartesian product of
+  # codes and every calendar day in a potentially very wide request window.
+  # Missing days are not promoted to no-data proofs; group summaries stay in
+  # the native audit, while this directory lists only observed daily coverage.
+  coverage = {}
+  digest, count = hashlib.sha256(), 0
+  async for frame in _uploaded_content_batches(manifest):
+    for row in frame.to_dict("records"):
+      normalized, _ = _compare(row, row)
+      digest.update(_canonical(normalized) + b"\n")
+      count += 1
+      key = (
+        row["stock_code"],
+        row["period"],
+        row["time"].astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+      )
+      coverage[key] = coverage.get(key, 0) + 1
+  if count != audit["records_received"]:
+    raise ValueError("native immutable source count changed")
+  content = digest.hexdigest()
+  version = evidence_hash(
+    {
+      "storage_format": "native-bars-v1",
+      "payload": payload,
+      "content_sha256": content,
+    }
+  )
+  return ImmutableBarBundle(
+    manifest_json,
+    count,
+    content,
+    version,
+    tuple((*key, value) for key, value in sorted(coverage.items())),
+  )
 
 
 async def _prepare(manifest_json):
@@ -88,6 +140,11 @@ async def prepare_immutable_bar_version(store, request_id):
 
 
 async def _revalidate(version):
+  if isinstance(version, ImmutableBarBundle):
+    value = json.loads(version.manifest_json)
+    if await prepare_native_bar_bundle(value["payload"], value["chunks"]) != version:
+      raise ValueError("native immutable source or version changed")
+    return value["chunks"]
   if (
     not isinstance(version, ImmutableBarVersion)
     or await _prepare(version.manifest_json) != version
@@ -101,11 +158,18 @@ def _write_frame(connection, version, frame):
   # changes produce a different content digest and therefore a different key.
   records = frame.copy(deep=True)
   records["storage_version"] = version.storage_version
+  period = (
+    version.period
+    if isinstance(version, ImmutableBarVersion)
+    else str(frame["period"].iloc[0])
+  )
+  if not (frame["period"] == period).all():
+    raise ValueError("immutable frame mixes storage periods")
   measurement = {
     "tick": "ticks_versions",
     "1m": "kline_1m_versions",
     "1d": "kline_1d_versions",
-  }[version.period]
+  }[period]
   with single_write_attempt():
     TimeSeriesOperations(connection).write_dataframe(
       records, measurement, ["stock_code", "period", "storage_version"], batch_size=1000
@@ -159,6 +223,8 @@ async def verify_immutable_bar_version(version, *, connection):
     or proof["persisted_sha256"] != version.content_sha256
   ):
     raise ValueError("immutable storage content proof changed")
+  if isinstance(version, ImmutableBarBundle):
+    return {**proof, "storage_version": version.storage_version}
   return {
     **proof,
     "storage_version": version.storage_version,

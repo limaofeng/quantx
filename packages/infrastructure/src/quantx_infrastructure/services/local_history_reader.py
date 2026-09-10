@@ -41,6 +41,20 @@ class LocalHistoryReader:
       return await read_archive_history(
         self, request, session_factory=self.session_factory, development=False
       )
+    if self.session_factory is not None:
+      from .native_bar_publication import resolve_native_bar_version
+
+      if self._slot.locked():
+        raise HistoryReadBusy("local history query capacity exhausted")
+      async with self._slot:
+        async with asyncio.timeout(3), self.session_factory() as db:
+          version = await resolve_native_bar_version(db, request)
+        if version is None:
+          raise HistoryReadInvalid("HISTORY_STORAGE_VERSION_UNAVAILABLE")
+        return await self._read_thread(
+          lambda value: self._read(value, storage_version=version.storage_version),
+          request,
+        )
     return await self._run_read(self._read, request)
 
   async def read_published(

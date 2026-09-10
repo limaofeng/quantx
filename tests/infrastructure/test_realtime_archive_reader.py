@@ -12,7 +12,7 @@ import pyarrow as pa
 import pytest
 from quantx_contracts.market_data_service import HistoryRead
 from quantx_infrastructure.config.settings import settings
-from quantx_infrastructure.services import local_history_reader
+from quantx_infrastructure.services import local_history_reader, native_bar_ingestion
 from quantx_infrastructure.services.local_market_data_client import (
   LocalMarketDataClient,
 )
@@ -21,6 +21,10 @@ from sqlalchemy import text
 
 from tests.infrastructure.test_engine_archive_generation import archive_db  # noqa: F401
 from tests.infrastructure.test_immutable_bar_storage import VersionStorage
+from tests.infrastructure.test_market_data_transfer_ingestion import (
+  _summary,
+  _write_chunk,
+)
 from tests.infrastructure.test_realtime_archive_delivery import (
   archive_case,  # noqa: F401
   change,
@@ -98,9 +102,13 @@ class ReadStorage(VersionStorage):
 
 
 @pytest.fixture
-async def reader_case(archive_case, monkeypatch):
+async def reader_case(archive_case, monkeypatch, tmp_path):
   case = archive_case
   storage = ReadStorage()
+  case.native_dir, case.native_index = tmp_path, 0
+  monkeypatch.setattr(
+    native_bar_ingestion, "get_timeseries_connection", lambda: storage
+  )
   from quantx_infrastructure.services import realtime_archive_worker
 
   monkeypatch.setattr(
@@ -175,9 +183,65 @@ def original(case, *, offset=0, close=9.5):
   }
 
 
+async def publish_native(case, rows, *, payload=None, created_at=None, corrupt=None):
+  day = case.request.minute.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+  payload = payload or {
+    "operation": "bars",
+    "download": True,
+    "stock_list": [case.request.instrument],
+    "periods": ["1m"],
+    "start_time": day,
+    "end_time": day,
+  }
+  raw = []
+  for row in rows:
+    item = {
+      **row,
+      "code": row["stock_code"],
+      "time": int(row["time"].timestamp() * 1000),
+    }
+    del item["stock_code"]
+    for old, new in (
+      ("pre_close", "preClose"),
+      ("settelement_price", "settlementPrice"),
+      ("open_interest", "openInterest"),
+      ("suspend_flag", "suspendFlag"),
+    ):
+      item[new] = item.pop(old)
+    raw.append(item)
+  directory = case.native_dir / str(case.native_index)
+  directory.mkdir()
+  manifest = [_write_chunk(directory, [*raw, _summary(raw, period="1m")])]
+  from quantx_infrastructure.services.market_data_transfer_ingestion import (
+    _validate_bar_manifest,
+  )
+
+  audit = await native_bar_ingestion.ingest_native_bar_bundle(
+    payload, manifest, _validate_bar_manifest(manifest, payload)
+  )
+  if corrupt:
+    corrupt(audit)
+  async with case.engine.begin() as db:
+    await db.execute(
+      text("""
+      INSERT INTO market_data_request(request_id,status,request_payload,ingestion_result,created_at)
+      VALUES (:id,'COMPLETED',CAST(:payload AS JSON),CAST(:audit AS JSON),:created_at)
+    """),
+      {
+        "id": f"native-{case.native_index}",
+        "payload": json.dumps(payload),
+        "audit": json.dumps(audit),
+        "created_at": created_at or case.request.minute.replace(tzinfo=None),
+      },
+    )
+  case.native_index += 1
+  return audit
+
+
 async def test_default_reader_merges_selected_versions_before_cursor_limit(reader_case):
   case = reader_case
   case.storage.canonical = [original(case, offset=index) for index in range(4)]
+  await publish_native(case, case.storage.canonical)
   for offset in (0, 2):
     request = change(
       case.request,
@@ -197,10 +261,39 @@ async def test_default_reader_merges_selected_versions_before_cursor_limit(reade
   native_queries = [
     q["query"]
     for q in case.storage.history_queries
-    if "FROM kline_1m WHERE" in q["query"]
+    if "storage_version = $storage_version" in q["query"]
   ]
   assert all("time NOT IN" in query for query in native_queries)
   assert all(q["timeout"] <= 10 for q in case.storage.history_queries)
+
+
+async def test_default_reader_never_uses_unpublished_canonical_rows(reader_case):
+  case = reader_case
+  case.storage.canonical = [original(case)]
+  with pytest.raises(httpx.HTTPStatusError) as error:
+    await history(case)
+  assert error.value.response.status_code == 503
+  assert not case.storage.history_queries
+
+
+@pytest.mark.parametrize("same_time", [True, False])
+async def test_native_publication_uses_source_order_not_finish_order(
+  reader_case, same_time
+):
+  case = reader_case
+  created = (case.request.minute + timedelta(hours=6)).replace(tzinfo=None)
+  await publish_native(
+    case,
+    [original(case, close=9.5)],
+    created_at=created + (timedelta() if same_time else timedelta(minutes=1)),
+  )
+  await publish_native(case, [original(case, close=9.4)], created_at=created)
+  if same_time:
+    with pytest.raises(httpx.HTTPStatusError) as error:
+      await history(case)
+    assert error.value.response.status_code == 503
+  else:
+    assert (await history(case)).records[0]["close"] == 9.5
 
 
 async def test_pending_newest_revision_hides_both_old_version_and_raw_minute(
@@ -208,6 +301,7 @@ async def test_pending_newest_revision_hides_both_old_version_and_raw_minute(
 ):
   case = reader_case
   case.storage.canonical = [original(case), original(case, offset=1)]
+  await publish_native(case, case.storage.canonical)
   await case.client.submit_archive(case.request)
   await publish(case)
   await case.client.submit_archive(change(case.request, sequence=11))
@@ -268,25 +362,6 @@ async def test_native_history_priority_requires_coverage_and_content_receipt(
   await case.client.submit_archive(case.request)
   await publish(case)
   day = case.request.minute.date()
-  audit = {
-    "records_verified": 1,
-    "persistence_verification": {"status": "verified", "records_verified": 1},
-    "content_verification": {
-      "schema_version": 1,
-      "records_verified": 1,
-      "fields_verified": 13,
-      "source_sha256": "a" * 64,
-      "persisted_sha256": ("b" if source_kind == "wrong_hash" else "a") * 64,
-    },
-    "day_coverage": [
-      {
-        "instrument_code": case.request.instrument,
-        "period": "1m",
-        "trading_date": str(day),
-        "point_count": 1,
-      }
-    ],
-  }
   payload = {
     "operation": "bars",
     "download": source_kind != "cached",
@@ -295,32 +370,45 @@ async def test_native_history_priority_requires_coverage_and_content_receipt(
     "start_time": day.strftime("%Y%m%d"),
     "end_time": day.strftime("%Y%m%d"),
   }
-  if source_kind == "partial_window":
-    payload["end_time"] += "100000"
-  elif source_kind == "wrong_day":
-    audit["day_coverage"][0]["trading_date"] = str(day - timedelta(days=1))
   elapsed = {
     "intraday": timedelta(),
     "closing_minute": timedelta(hours=5, minutes=29),
     "at_boundary": timedelta(hours=5, minutes=30),
   }.get(source_kind, timedelta(hours=6))
-  async with case.engine.begin() as db:
-    await db.execute(
-      text(
-        "INSERT INTO market_data_request(request_id,status,request_payload,ingestion_result,created_at) VALUES ('native','COMPLETED',CAST(:payload AS JSON),CAST(:audit AS JSON),:created_at)"
-      ),
-      {
-        "payload": json.dumps(payload),
-        "audit": json.dumps(audit),
-        "created_at": (case.request.minute + elapsed).replace(tzinfo=None),
-      },
-    )
+
+  def corrupt(audit):
+    if source_kind == "wrong_hash":
+      audit["content_verification"]["persisted_sha256"] = "b" * 64
+    if source_kind == "wrong_day":
+      audit["day_coverage"][0]["trading_date"] = str(day - timedelta(days=1))
+
+  await publish_native(
+    case,
+    case.storage.canonical,
+    payload=payload,
+    created_at=(case.request.minute + elapsed).replace(tzinfo=None),
+    corrupt=corrupt,
+  )
+  if source_kind == "partial_window":
+    payload["end_time"] += "100000"
+    async with case.engine.begin() as db:
+      await db.execute(
+        text(
+          "UPDATE market_data_request SET request_payload=CAST(:payload AS JSON) WHERE request_id='native-0'"
+        ),
+        {"payload": json.dumps(payload)},
+      )
+  if source_kind == "wrong_hash":
+    with pytest.raises(httpx.HTTPStatusError) as error:
+      await history(case)
+    assert error.value.response.status_code == 503
+    return
   page = await history(case)
   assert page.records[0]["close"] == (9.5 if verified else 10.1)
   if verified:
+    assert len(case.storage.history_queries) == 1
     assert (
-      len(case.storage.history_queries) == 1
-      and "FROM kline_1m WHERE" in case.storage.history_queries[0]["query"]
+      "storage_version = $storage_version" in case.storage.history_queries[0]["query"]
     )
 
 
@@ -328,11 +416,9 @@ async def test_combined_storage_reads_share_the_byte_budget(reader_case):
   case = reader_case
   await case.client.submit_archive(case.request)
   await publish(case)
+  await publish_native(case, [original(case, offset=1)])
   for _, value in case.storage.points.values():
     value["unexpected_blob"] = "x" * (2200 * 1024)
-  case.storage.canonical = [
-    original(case, offset=1) | {"unexpected_blob": "x" * (2200 * 1024)}
-  ]
   with pytest.raises(httpx.HTTPStatusError) as error:
     await history(case)
   assert error.value.response.status_code == 503
