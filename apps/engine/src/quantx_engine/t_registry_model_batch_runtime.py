@@ -102,3 +102,49 @@ class TRegistryModelBatchRuntime:
         if not isinstance(exc, Exception):
           raise
         return self.latest
+
+
+  async def freeze_for_snapshot(self, *, as_of_ms, instrument_codes, rule_order):
+    """Freeze a value before registry IO; never await the scorer's publication lock.
+
+    This view is only a snapshot input, not permission to create an order. The
+    order transaction must independently validate the current registry revision.
+    """
+    model = self._model
+    frozen = model.latest
+    mode = model._bound_config[0]
+    if mode == "RULE_ONLY":
+      return TModelBatchResult(frozen.revision, "", False, "MODEL_OFF", rule_order, (), ())
+    try:
+      codes = tuple(instrument_codes)
+      scores = frozen.active_scores + frozen.shadow_scores
+      if (
+        type(as_of_ms) is not int or as_of_ms < 0
+        or not codes or any(not isinstance(code, str) or not code for code in codes)
+        or len(set(codes)) != len(codes)
+        or frozen.reason != "VALID"
+        or {score.instrument_code for score in scores} != set(codes)
+        or any(
+          not 0 <= as_of_ms - score.model_as_of_ms <= model.max_age_ms
+          or score.source_bar_end_ms > as_of_ms
+          for score in scores
+        )
+      ):
+        raise ValueError("T_MODEL_SNAPSHOT_UNAVAILABLE")
+      artifact, auth = model.artifact, model.authorization
+      if artifact is None or auth is None:
+        raise ValueError("T_MODEL_BINDING_MISSING")
+      async with self._sessions() as db, db.begin():
+        current = await TModelRegistryRepository(db).authorize(
+          model_id=artifact.model_id, model_version=artifact.model_version,
+          expected_revision=auth.registry_authorization_revision, mode=mode,
+          artifact_sha256=auth.artifact_sha256,
+          policy_compatibility_hash=auth.policy_compatibility_hash,
+        )
+        if current.gate_conclusion != auth.gate_conclusion:
+          raise ValueError("T_MODEL_AUTHORIZATION_CHANGED")
+      return replace(frozen, execution_rule_order=rule_order)
+    except Exception:
+      return TModelBatchResult(
+        frozen.revision, "", mode == "ACTIVE", "MODEL_SNAPSHOT_UNAVAILABLE", rule_order, (), (),
+      )

@@ -640,6 +640,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   模拟提交延迟 25ms 后的时间后移、重放不改时，以及缓存/重算两路径的时钟故障；Ruff/差异
   检查通过，证据 `p8-model-visibility-final.log`。仅同步离线 scorer 仍接收显式实验时点；
   完整分钟调度与 snapshot 的实际接线仍未完成，不把该组件测试计为正式 P8 门通过。
+  授权 scorer 新增 freeze_for_snapshot：在 registry IO 前固定不可变缓存值，复核观察时点
+  可见性/分数年龄、显式标的集合完整覆盖及当前 registry 授权，返回独立快照输入并保留当前
+  规则顺序。等待授权期间发布的新 revision 不进入已开始的视图；未来、过期、覆盖缺失或撤权
+  返回 MODEL_SNAPSHOT_UNAVAILABLE（ACTIVE 阻断、SHADOW 保留规则语义），不回退旧分数。
+  **26 项授权评分/视图测试通过**，含真实 registry/CPU scorer 及并发发布屏障，Ruff/差异
+  检查通过，证据 `p8-model-snapshot-view.log`。该视图入口尚未写入 TDecisionSnapshot 的
+  完整模型契约，也未接通完整分钟调度；pending/outbox 创建仍须在使用点另行复核授权。
+
 
 
 

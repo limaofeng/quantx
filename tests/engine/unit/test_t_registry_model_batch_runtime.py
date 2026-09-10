@@ -197,3 +197,67 @@ async def test_publication_clock_failure_clears_previous_cache(sessions, tmp_pat
   result = await scorer.evaluate((feature,), **args)
   assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == 1
   assert result.entry_blocked and not result.active_scores
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+@pytest.mark.parametrize("damage", ["future", "stale", "universe", "revoke"])
+async def test_snapshot_rechecks_visibility_and_registry(sessions, tmp_path, mode, damage):
+  model, scorer = await registered(sessions, tmp_path, mode)
+  feature = bar()
+  batch = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=())
+  as_of = feature.available_at_ms + 10
+  codes = (feature.instrument_code,)
+  args = dict(as_of_ms=as_of, instrument_codes=codes, rule_order=("current-rule-order",))
+  frozen = await scorer.freeze_for_snapshot(**args)
+  assert frozen.manifest_hash == batch.manifest_hash and frozen.reason == "VALID"
+  assert frozen.execution_rule_order == ("current-rule-order",)
+  if damage == "future":
+    args["as_of_ms"] -= 1
+  elif damage == "stale":
+    args["as_of_ms"] += model.max_age_ms + 1
+  elif damage == "universe":
+    args["instrument_codes"] += ("000001.SZ",)
+  else:
+    async with sessions() as db, db.begin():
+      await TModelRegistryRepository(db).set_stage(
+        model_id=model.artifact.model_id, model_version=model.artifact.model_version,
+        expected_revision=model.authorization.registry_authorization_revision,
+        stage="SUSPENDED", actor_id="reviewer", reason="snapshot revoke", now=NOW,
+      )
+  unavailable = await scorer.freeze_for_snapshot(**args)
+  assert unavailable.reason == "MODEL_SNAPSHOT_UNAVAILABLE"
+  assert unavailable.entry_blocked == (mode == "ACTIVE")
+  assert not unavailable.active_scores and not unavailable.shadow_scores
+  assert frozen.reason == "VALID" and frozen.manifest_hash == batch.manifest_hash
+
+
+async def test_snapshot_does_not_adopt_batch_published_during_registry_read(sessions, tmp_path, monkeypatch):
+  _, scorer = await registered(sessions, tmp_path, "ACTIVE")
+  feature = bar()
+  first = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=())
+  entered, release = asyncio.Event(), asyncio.Event()
+  original = TModelRegistryRepository.authorize
+
+  async def blocked(repo, **kwargs):
+    if asyncio.current_task().get_name() == "snapshot-read":
+      entered.set()
+      await release.wait()
+    return await original(repo, **kwargs)
+
+  monkeypatch.setattr(TModelRegistryRepository, "authorize", blocked)
+  pending = asyncio.create_task(scorer.freeze_for_snapshot(
+    as_of_ms=feature.available_at_ms + 10, instrument_codes=(feature.instrument_code,), rule_order=(),
+  ), name="snapshot-read")
+  try:
+    await asyncio.wait_for(entered.wait(), 2)
+    scorer._clock_ms = lambda: feature.available_at_ms + 20
+    second = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms + 1, rule_order=())
+    assert second.revision == 2
+    release.set()
+    frozen = await asyncio.wait_for(pending, 2)
+    assert frozen.revision == 1 and frozen.manifest_hash == first.manifest_hash
+    assert scorer.latest.revision == 2
+  finally:
+    if not pending.done():
+      pending.cancel()
+      await asyncio.gather(pending, return_exceptions=True)
