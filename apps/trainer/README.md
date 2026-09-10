@@ -136,6 +136,10 @@ timeout_seconds = 10
 
 `quantx_infrastructure.training_transfer.open_store` 连接现有 bundle 适配器，提供 `fetch` 和 `publish`；会话退出或失败均关闭连接。连接、认证、SFTP 子系统握手和文件 I/O 有显式超时。协议行为以 [Paramiko SSHClient 文档](https://docs.paramiko.org/en/stable/api/client.html) 及锁定依赖的实现为依据；额外的握手截止时间覆盖其 SFTP 建链前未应用通道读写超时的窗口。
 
+开发存储可使用 `ops/config/compose.trainer-store.yaml` 单独部署。显式设置 `QUANTX_DEV_TRAINER_BIND_HOST`（开发机 LAN IPv4）、`QUANTX_TRAINER_STORE_ROOT`（绝对私有目录）、`QUANTX_STORE_UID` 和 `QUANTX_STORE_GID`，再执行 `docker compose -f ops/config/compose.trainer-store.yaml up -d`。该入口只管理存储容器，公开指定地址的 2222 端口；镜像固定摘要并使用 amd64 平台。
+
+部署前在私有目录准备 `identity/ssh_host_ed25519_key`、`authorized_keys/` 下的各客户端公钥，以及 `datasets/`、`artifacts/`。主机私钥权限为 0600，数据目录归指定 UID/GID；客户端私钥单独保存，不挂入容器。受限用户为 `trainer`，客户端远端根目录仍为 `/datasets` 与 `/artifacts`。随附 `trainer-store.sshd_config` 强制密钥认证和 chroot 内的 SFTP，禁止 shell、TTY、转发及隧道；只挂载主机密钥、公钥和两个存储目录。部署后使用实际客户端身份验证写入、改名、回读以及目录隔离，不能仅凭容器启动成功判断验收通过。
+
 ## 主机高资源门禁
 
 Research 的研究、数据预检、认证、训练、GPU 探测和资格命令，以及直接训练/准备作业入口，共用 `quantx_infrastructure.training_host_guard`。仅重绘已有报告无需高资源准入。门禁拒绝或运行中保护停止的 CLI 退出码为 `75`，不能按训练成功处理。

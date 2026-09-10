@@ -1,0 +1,15 @@
+name: quantx-trainer-store
+services:
+  sftp:
+    image: atmoz/sftp@sha256:dfa61ea26a339a46bda98accfa31f24d912b19812517ecaf3be49e6a15422b24
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "${QUANTX_DEV_TRAINER_BIND_HOST:?Set the development LAN IPv4}:2222:22"
+    command: "trainer::${QUANTX_STORE_UID:?Set the storage owner UID}:${QUANTX_STORE_GID:?Set the storage owner GID}"
+    volumes:
+      - ./trainer-store.sshd_config:/etc/ssh/sshd_config:ro
+      - ${QUANTX_TRAINER_STORE_ROOT:?Set an absolute private store directory}/identity/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro
+      - ${QUANTX_TRAINER_STORE_ROOT:?Set an absolute private store directory}/authorized_keys:/home/trainer/.ssh/keys:ro
+      - ${QUANTX_TRAINER_STORE_ROOT:?Set an absolute private store directory}/datasets:/home/trainer/datasets
+      - ${QUANTX_TRAINER_STORE_ROOT:?Set an absolute private store directory}/artifacts:/home/trainer/artifacts
