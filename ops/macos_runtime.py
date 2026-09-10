@@ -288,6 +288,7 @@ def main() -> None:
           command,
           cwd=directory,
           env={**env, "DATABASE_PROCESS_ROLE": name},
+          stdin=subprocess.DEVNULL,
           stdout=log,
           stderr=log,
           start_new_session=True,
