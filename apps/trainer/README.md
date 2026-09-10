@@ -278,7 +278,7 @@ python -m quantx_trainer.main serve --config C:\Users\limao\QuantXTraining\state
 
 `serve` 获取 `state_root/service` 的操作系统单实例锁，隔离环境变量和 Prefect 本地配置目录，执行全部预检，再登记 `trainer-preparation`、`stock-selection-training-dispatch`、`stock-selection-training-capability` 三个每分钟部署。登记全部成功才启动专用 ProcessWorker；不存在 Pool 时不自动创建。部署仅保存显式配置文件路径与工作目录，不保存数据库连接信息。服务允许三个流程并行，实际计算仍由各流程的领取与主机资源门禁控制。
 
-Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serve` 保留已有排空标记；预检/登记/运行失败退出，单实例锁随进程退出释放。它是前台运行入口；后台 up/down/status/logs 已另行接入，完整排空和停止验收仍需完成。当前仅完成本地 SDK 部署契约与故障测试，未启动远端 Worker。
+Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serve` 保留已有排空标记；预检/登记/运行失败退出，单实例锁随进程退出释放。它是前台运行入口；后台 up/down/status/logs 已另行接入，完整排空和停止验收仍需完成。独立 Windows 开发身份已实际完成部署注册、Worker 循环和根入口停止；版本及证据见实施计划检查点，CPU/GPU 训练闭环仍须独立验收。
 
 
 服务运行时可在另一终端执行 `python -m quantx_trainer.main status --config <同一配置绝对路径>`。查询不连接开发控制面，返回 `ALIVE`、`OFFLINE`、`STALE` 或 `UNKNOWN`。只有单实例锁占用、主机/PID/创建时间/解释器/配置哈希匹配且本地心跳不超过 30 秒，才报告 `ALIVE`；证据每 10 秒刷新。`phase` 区分预检、部署注册、进入 Worker 循环和退出阶段；不代表控制面或 GPU 健康。存活身份匹配时同时返回 `heartbeat_at`（Unix 秒）和 `code`：启动时核验的提交、部署清单摘要与 `dirty` 标记。代码身份在本实例后续心跳中保持不变；它是启动快照，不是持续完整性证明。没有部署清单的开发目录三个代码字段均为 null，不猜测已冻结版本。非法或缺失代码字段、非有限心跳时间返回 UNKNOWN。`status` 还返回独立的 `admission`：OPEN、DRAINING 或 UNKNOWN；查询不创建准入目录、不修改标记，无法核验时退出码为 3。DRAINING 仅表示禁止新领取，不证明已有任务、子进程或数据库状态已收敛，需继续检查 `execution_state` 和停止结果。`host_resources` 返回全机时段、可用内存与最小磁盘余量的只读快照、预算配置和稳定原因码；PASS 仅覆盖这三项，主机锁与计算进程 CPU/RSS/GPU 预算仍标为 NOT_INSPECTED。查询不探测 GPU、不启动监控、不领取锁；政策或资源无法核验时显示 UNKNOWN，status 退出码为 3。`backend` 展示最近一次成功写入数据库后的本地能力快照，包含 CPU 可用性、GPU 状态和环境摘要；配置哈希必须一致，90 秒内为 FRESH，过期仅返回 STALE 与时间，不再展示旧资格。丢失、损坏或未来时间为 UNKNOWN；CPU-only 探测没有 GPU 证据时 GPU 状态为 null。该字段仅作离线观察，不用于领取授权；读取它不触发 GPU 探测或网络请求，其缺失本身不改变 status 退出码。同一快照的 `activity` 展示数据库标记 QUEUED/RUNNING 的训练及 Trainer 准备任务（GPU、已交接冻结输入的 CERTIFY），单条只读查询按运行中优先取最多 50 条，超限标记 `truncated`。显示任务标识、类型、阶段与训练进度，不暴露请求/路径；阶段按日志规则脱敏。该列表不是进程存活证据，`execution_state` 固定为 NOT_INSPECTED；与资格快照一同过期并隐藏，不能据此推断已排空。`dispatch.training` / `dispatch.preparation` 分别展示最近一次实际调度决定及稳定原因码；开始执行时替换旧排队原因，90 秒后仅显示 STALE。配置或调度类型不匹配、损坏记录为 UNKNOWN。写入观察文件失败不影响已领取任务，只记录固定错误码；它不参与领取授权。训练领取事务直接返回具体结果：`RUNNING_TRAINING_EXISTS` 表示观察到运行中训练，`NO_CLAIMABLE_QUEUED_RUN` 表示没有取得可领取排队行（可能为空、已取消或被其他事务锁定），`CLAIM_INTEGRITY_CONFLICT` 表示领取提交发生完整性冲突且已回滚。前两种不能混称“队列为空”；IDLE 只表示本次未领取，不证明全系统没有运行中任务。`OFFLINE` 表示查询时服务锁可获取，残留状态文件不会让服务显示在线。
@@ -297,7 +297,7 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 在独立 `quantx-train` 环境执行 `python -m quantx_trainer.main up --config <配置绝对路径>`。命令启动后台 `serve`，使用明确的 Conda 解释器、代码目录和隔离环境，不继承终端输入输出。每次启动的标准输出与错误保存在对应 `service-launches/<attempt>/stdout.log`、`stderr.log`，供诊断首次心跳前或部署注册时的失败。无任务筛选的 `logs` 同时读取生命周期事件和最近一次启动输出；每个输出流最多读取末尾 128 KiB，按指定行数截取并脱敏，拒绝链接与非法启动指针。原始文件保留在受限状态目录。
 
-启动前保存请求哈希和 STARTING 证据，启动后记录子进程身份。`up` 最多观察 10 秒；`ALIVE` 仅表示本地服务身份与心跳已确认，仍应检查阶段和控制面能力。超时返回 `START_PENDING`、退出码 3，保留原进程。再次调用先检查服务和上次启动证据；未知启动不会重复创建进程，只有确认旧尝试退出后才允许新的启动。已在线的服务直接返回当前状态，排空标记不会被清除。`state_root/service-launches` 保存逐次启动证据。
+启动前保存请求哈希和 STARTING 证据，启动后记录子进程身份。`up` 最多观察 10 秒；`ALIVE` 仅表示本地服务身份与心跳已确认，仍应检查阶段和控制面能力。超时返回 `START_PENDING`、退出码 3，保留原进程。再次调用先检查服务和上次启动证据；未知启动不会重复创建进程，只有确认旧尝试退出后才允许新的启动。已在线的服务直接返回当前状态，排空标记不会被清除。`state_root/service-launches` 保存逐次启动证据。Windows 状态快照原子替换遇到短暂文件共享冲突时最多重试 1 秒，保持旧快照完整；持续错误仍使发布失败。
 
 `up` 与协作式 `down` 已接入根运维脚本，Windows 完整停止/后代退出验收仍需完成。
 
