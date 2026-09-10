@@ -45,16 +45,27 @@ async def archive_case(archive_db, monkeypatch):
   )
   for name in (
     "20260909_0065_market_data_worker_lease.py",
+    "20260909_0066_market_data_demand.py",
     "20260910_0085_realtime_archive_inbox.py",
     "20260910_0087_archive_recovery_scope.py",
+    "20260910_0088_archive_recovery_partitions.py",
   ):
     spec = importlib.util.spec_from_file_location("archive_dependency", root / name)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     async with engine.begin() as db:
-      if name.startswith("20260909"):
+      if name.startswith("20260909_0065"):
         await db.execute(
           text("CREATE TABLE market_data_request(request_id text PRIMARY KEY)")
+        )
+      if name.startswith("20260909_0066"):
+        await db.execute(
+          text("CREATE TABLE development_data_export(id text PRIMARY KEY)")
+        )
+        await db.execute(
+          text(
+            "CREATE TABLE holidays(market text, year integer, date date, description text)"
+          )
         )
 
       def upgrade(connection):
@@ -62,6 +73,8 @@ async def archive_case(archive_db, monkeypatch):
         migration.upgrade()
 
       await db.run_sync(upgrade)
+      if name.startswith("20260910_0087"):
+        scope_migration = migration
   owners = []
   for _ in range(2):
     owner = object.__new__(MarketDataWorkerStore)
@@ -118,7 +131,8 @@ async def archive_case(archive_db, monkeypatch):
             scope=scope,
             store=catalog.RealtimeArchiveStore(engine),
             client=client,
-            migration=migration,
+            migration=scope_migration,
+            recovery_migration=migration,
           )
         finally:
           await client.close()

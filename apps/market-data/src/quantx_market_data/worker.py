@@ -139,6 +139,13 @@ async def run(store, stop: asyncio.Event) -> None:
       advanced = await advance_realtime_archive(store)
       await _pause(stop, 0.05 if advanced else 1)
 
+  async def archive_recovery():
+    from quantx_infrastructure.services.archive_recovery import advance_archive_recovery
+
+    while not stop.is_set():
+      await advance_archive_recovery(store)
+      await _pause(stop, 1)
+
   from quantx_infrastructure.services.market_data_staging_cleanup import (
     run_market_data_staging_sweeper,
   )
@@ -150,6 +157,7 @@ async def run(store, stop: asyncio.Event) -> None:
     asyncio.create_task(receipts()),
     asyncio.create_task(dispatch()),
     asyncio.create_task(archives()),
+    asyncio.create_task(archive_recovery()),
     asyncio.create_task(stop.wait()),
   ]
   if getattr(store, "demand_source_kind", None) == "REMOTE":

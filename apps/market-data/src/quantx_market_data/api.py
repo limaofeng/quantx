@@ -145,7 +145,12 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
         )
         await connection.execute(
           text(
-            "SELECT generation,instrument,start_minute FROM engine_archive_scope LIMIT 0"
+            "SELECT generation,instrument,start_minute,next_day,ended_at FROM engine_archive_scope LIMIT 0"
+          )
+        )
+        await connection.execute(
+          text(
+            "SELECT generation,instrument,trading_date,demand_id,state FROM engine_archive_recovery LIMIT 0"
           )
         )
     except Exception:

@@ -120,7 +120,7 @@ async def reader_case(archive_case, monkeypatch):
     # is tested by the default delivery suite; here it must not route to raw data.
     await db.execute(
       text(
-        "CREATE TABLE development_data_export(id text PRIMARY KEY,state text,request json,manifest json)"
+        "ALTER TABLE development_data_export ADD COLUMN state text, ADD COLUMN request json, ADD COLUMN manifest json"
       )
     )
     await db.execute(

@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from contextlib import nullcontext
 
 from quantx_contracts.market_data_service import HistoryDemand, HistoryDemandResult
 from sqlalchemy import text
@@ -71,14 +72,21 @@ class MarketDataDemandStore(DurableRuntimeStore):
       "REMOTE" if settings.environment == "development" else "AGENT"
     )
 
-  async def submit_history_demand(self, demand: HistoryDemand) -> str:
+  async def submit_history_demand(
+    self, demand: HistoryDemand, *, _connection=None
+  ) -> str:
     encoded = json.dumps(
       demand.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
     )
     identity = hashlib.sha256(
       f"history-demand-v1:{self.demand_source_kind}:{encoded}".encode()
     ).hexdigest()
-    async with self.engine.begin() as connection:
+    transaction = (
+      nullcontext(_connection) if _connection is not None else self.engine.begin()
+    )
+    async with asyncio.timeout(3), transaction as connection:
+      if _connection is not None:
+        await self._guard_ingestion_owner(connection)
       # Serialize admission, not collection. The cap also applies across API processes.
       await connection.execute(text("SELECT pg_advisory_xact_lock(817234593)"))
       exists = await connection.scalar(
@@ -104,6 +112,8 @@ class MarketDataDemandStore(DurableRuntimeStore):
       """),
         {"id": identity, "partition": encoded, "kind": self.demand_source_kind},
       )
+      if _connection is not None:
+        await self._guard_ingestion_owner(connection)
     return identity
 
   async def history_demand(self, demand_id: str) -> dict | None:

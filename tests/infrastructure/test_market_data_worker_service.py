@@ -147,6 +147,7 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
       "20260910_0084_engine_archive_generation.py",
       "20260910_0085_realtime_archive_inbox.py",
       "20260910_0087_archive_recovery_scope.py",
+      "20260910_0088_archive_recovery_partitions.py",
     ):
       archive_path = path.with_name(filename)
       spec = importlib.util.spec_from_file_location("archive_tables", archive_path)
@@ -158,6 +159,9 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
         archive_migration.op = SimpleNamespace(
           get_bind=operations.get_bind,
           create_foreign_key=operations.create_foreign_key,
+          add_column=operations.add_column,
+          alter_column=operations.alter_column,
+          execute=operations.execute,
           create_index=operations.create_index,
           create_table=lambda *args, **kwargs: operations.create_table(
             *args, prefixes=["TEMPORARY"], **kwargs
@@ -340,7 +344,11 @@ async def test_api_status_is_read_only_and_resume_preserves_identity(workers):
 
 
 async def test_worker_joins_active_ingestion_before_releasing_lease(monkeypatch):
-  from quantx_infrastructure.services import realtime_archive_worker
+  from quantx_infrastructure.services import archive_recovery, realtime_archive_worker
+
+  monkeypatch.setattr(
+    archive_recovery, "advance_archive_recovery", AsyncMock(return_value=False)
+  )
 
   monkeypatch.setattr(
     realtime_archive_worker, "advance_realtime_archive", AsyncMock(return_value=False)

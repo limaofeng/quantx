@@ -58,8 +58,9 @@ class RealtimeArchiveStore:
         raise ArchiveCapacity("ARCHIVE_SCOPE_CAPACITY")
       await db.execute(
         text("""
-        INSERT INTO engine_archive_scope(generation,instrument,start_minute)
-        VALUES (:generation,:instrument,:start_minute)
+        INSERT INTO engine_archive_scope(generation,instrument,start_minute,next_day)
+        VALUES (:generation,:instrument,:start_minute,
+          (CAST(:start_minute AS timestamptz) AT TIME ZONE 'Asia/Shanghai')::date)
       """),
         params,
       )
@@ -73,19 +74,6 @@ class RealtimeArchiveStore:
       raise ArchiveCapacity("ARCHIVE_REQUEST_TOO_LARGE")
     async with asyncio.timeout(3), self.engine.begin() as db:
       await db.execute(text("SELECT pg_advisory_xact_lock(817234595)"))
-      covered = await db.scalar(
-        text("""
-        SELECT EXISTS(SELECT 1 FROM engine_archive_scope
-        WHERE generation=:generation AND instrument=:instrument AND start_minute<=:minute)
-      """),
-        {
-          "generation": request.generation,
-          "instrument": request.instrument,
-          "minute": request.minute,
-        },
-      )
-      if not covered:
-        raise ArchiveRejected("ARCHIVE_RECOVERY_SCOPE_MISSING")
       existing = await db.scalar(
         text("SELECT request FROM realtime_archive_revision WHERE request_id=:id"),
         {"id": identity},
@@ -94,6 +82,26 @@ class RealtimeArchiveStore:
         if existing != request.model_dump(mode="json"):
           raise ArchiveRejected("ARCHIVE_CONTENT_CONFLICT")
         return identity
+      scope = (
+        (
+          await db.execute(
+            text("""
+        SELECT start_minute,ended_at FROM engine_archive_scope
+        WHERE generation=:generation AND instrument=:instrument FOR UPDATE
+      """),
+            {
+              "generation": request.generation,
+              "instrument": request.instrument,
+            },
+          )
+        )
+        .mappings()
+        .one_or_none()
+      )
+      if scope is None or scope["start_minute"] > request.minute:
+        raise ArchiveRejected("ARCHIVE_RECOVERY_SCOPE_MISSING")
+      if scope["ended_at"] is not None:
+        raise ArchiveRejected("ARCHIVE_RECOVERY_SCOPE_CLOSED")
       try:
         await verify_engine_archive_generation(db, request.generation)
       except RuntimeError:

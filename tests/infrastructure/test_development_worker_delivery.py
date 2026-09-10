@@ -112,7 +112,11 @@ async def test_malformed_partition_isolated_from_next_delivery(delivery):
 
 
 async def test_download_wait_does_not_block_renewal_receipts_or_shutdown(monkeypatch):
-  from quantx_infrastructure.services import realtime_archive_worker
+  from quantx_infrastructure.services import archive_recovery, realtime_archive_worker
+
+  monkeypatch.setattr(
+    archive_recovery, "advance_archive_recovery", AsyncMock(return_value=False)
+  )
 
   monkeypatch.setattr(
     realtime_archive_worker, "advance_realtime_archive", AsyncMock(return_value=False)

@@ -215,7 +215,10 @@ continuity_generation、stream_id、sequence、分钟和 sealed 构成，同身�
 原范围才表示持久化成功。相同范围可在源退出后重放；同代次同标的不允许改变起点，
 新范围必须属于当前活跃 Engine，每代次最多 10000 个标的。修订无范围或早于起点时
 返回 409 / ARCHIVE_RECOVERY_SCOPE_MISSING。范围独立于发送队列、修订及接收确认
-保留，不能将接收成功当作缺口修复完成；运行结束区间和补数证明的对账尚待接通。
+保留，不能将接收成功当作缺口修复完成。Data Worker 独立循环按范围逐日关联原
+HistoryDemand，等待上海时间 15:01 后规划；交易日生成 WAITING 关联，周末/明确休市
+生成带依据的 NO_SESSION，缺少有效日历则等待。源失效时持久化保守结束时间，之后
+仅可重放已接受身份，不能新增修订。补数证明通过并关闭 WAITING 的接线仍待完成。
 
 GET 返回固定请求、WRITE / READBACK / VERIFIED / BLOCKED、写入和回读累计次数、
 下一次重试时间、原因及证明。独立 Data Worker 在每次 IO 前持久化尝试，写入与回读
