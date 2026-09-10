@@ -44,12 +44,12 @@ def evening():
   ("hour", "minute", "reason"),
   [
     (9, 14, None),
-    (9, 15, "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"),
-    (16, 29, "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"),
+    (9, 15, None),
+    (16, 29, None),
     (16, 30, None),
   ],
 )
-def test_weekday_protection_independent_of_development_profile(
+def test_configured_window_allows_training_during_trading_hours(
   root, monkeypatch, hour, minute, reason
 ):
   monkeypatch.setenv("ENV", "development")
@@ -246,12 +246,12 @@ def test_abrupt_exit_does_not_allow_stale_pid_based_reuse(root):
 
 def test_resource_and_window_rechecked_at_success_boundary(root):
   timestamp = [evening()]
-  with pytest.raises(HostAdmissionDenied, match="TRADING_OR_POST_CLOSE"):
+  with pytest.raises(HostAdmissionDenied, match="OUTSIDE_ALLOWED_TRAINING_WINDOW"):
     with HostResourceGuard(root, now=lambda: timestamp[0]):
-      timestamp[0] = datetime(2026, 9, 10, 9, 15, tzinfo=SHANGHAI)
+      timestamp[0] = datetime(2026, 9, 10, 23, 59, 59, tzinfo=SHANGHAI)
   assert (
     json.loads((root / "owner.json").read_text())["reason"]
-    == "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"
+    == "OUTSIDE_ALLOWED_TRAINING_WINDOW"
   )
 
 
@@ -329,7 +329,7 @@ started = time.monotonic()
 now = lambda: (
   datetime(2026, 9, 9, 20, tzinfo=SHANGHAI)
   if time.monotonic() - started < 0.2
-  else datetime(2026, 9, 10, 9, 15, tzinfo=SHANGHAI)
+  else datetime(2026, 9, 10, 23, 59, 59, tzinfo=SHANGHAI)
 )
 try:
   with HostResourceGuard(root, now=now):
@@ -342,7 +342,7 @@ except HostAdmissionDenied:
   assert result.returncode == (0 if cooperative else 75), result.stderr
   record = json.loads((root / "owner.json").read_text())
   assert record["status"] == ("RELEASED" if cooperative else "STOP_REQUESTED")
-  assert record["reason"] == "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"
+  assert record["reason"] == "OUTSIDE_ALLOWED_TRAINING_WINDOW"
 
 
 @pytest.mark.parametrize("cooperative", [True, False])
@@ -385,11 +385,11 @@ def test_readonly_host_snapshot_uses_execution_capacity_policy(root, monkeypatch
   assert before == {p.name: p.read_bytes() for p in root.iterdir()}
 
 
-def test_host_snapshot_never_probes_resources_during_protected_window(root, monkeypatch):
+def test_host_snapshot_never_probes_resources_outside_configured_window(root, monkeypatch):
   monkeypatch.setattr(module.psutil, "virtual_memory", lambda: pytest.fail("window should reject first"))
-  value = module.host_resource_status(root, now=datetime(2026, 9, 9, 10, tzinfo=SHANGHAI))
+  value = module.host_resource_status(root, now=datetime(2026, 9, 9, 23, 59, 59, tzinfo=SHANGHAI))
   assert value["status"] == "BLOCKED"
-  assert value["reason"] == "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"
+  assert value["reason"] == "OUTSIDE_ALLOWED_TRAINING_WINDOW"
 
 
 def test_host_snapshot_missing_policy_is_unknown_without_creating_files(tmp_path):

@@ -122,9 +122,6 @@ class HostPolicy:
       return "HOST_CLOCK_UNKNOWN"
     local = now.astimezone(SHANGHAI)
     current = local.time()
-    # Conservative weekday protection includes public holidays; no production DB.
-    if local.weekday() < 5 and wall_time(9, 15) <= current < wall_time(16, 30):
-      return "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"
     if not any(
       local.weekday() in days and start <= current < end
       for days, start, end in self.windows
