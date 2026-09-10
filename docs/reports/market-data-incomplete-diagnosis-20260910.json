@@ -1,0 +1,588 @@
+{
+  "observed_at": "2026-09-10T04:34:33.991109+00:00",
+  "read_only": true,
+  "scope": "Exact 11 original INCOMPLETE IDs from inventory-mapping-661324ba.json",
+  "evidence": [
+    {
+      "remote_path": "F:/Workspace/quantx/.runtime/diagnostics/incomplete-details-450c1af8.json",
+      "sha256": "18bf3187367745defb49402a0bd00cce722f2f144990a8f59b04de4e6bb01594"
+    },
+    {
+      "remote_path": "F:/Workspace/quantx/.runtime/diagnostics/incomplete-files-causes-450c1af8.json",
+      "sha256": "df29f85def640784df42a59c3e13570dcc39b0d80e439f70d11fe0f4d697a236"
+    }
+  ],
+  "code_snapshot": "abf61288",
+  "findings": {
+    "error_codes": {
+      "ValueError": 9,
+      "PERSISTED_COVERAGE_UNPROVEN": 2
+    },
+    "zero_saved_and_verified": 11,
+    "missing_ingestion_progress": 11,
+    "missing_native_version": 11,
+    "missing_original_request_directory": 11
+  },
+  "limitations": [
+    "Current missing files do not establish the cause of the historical ValueError.",
+    "Zero saved/verified counts alone do not establish an authoritative no-data outcome.",
+    "No Influx scan, source collection, migration, budget reset or task-state write was performed."
+  ],
+  "next_required_evidence": [
+    "Recover original source files from retained backups and validate the original manifest checksums before attempting file-based migration.",
+    "Inspect original day-coverage semantics and collection outcomes before deciding whether a zero-row source can prove no data.",
+    "Keep original delivery and source IDs and exhausted or unknown budgets; do not manufacture success by replacing sources or initializing budgets to zero."
+  ],
+  "entries": [
+    {
+      "id": "196359a855cfb5bd547b13442c27996d2cd212f3b1a83c1c91eff92ec3926c07",
+      "state": "INCOMPLETE",
+      "source_request_id": "38e3a5c1-9413-4546-98b8-60440dc45372",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "PERSISTED_COVERAGE_UNPROVEN",
+      "error_sha256": "872dd962b840f4f5c37f4ab4845954ef29474f6b843595e41ee6fec9ee67acf2",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "196359a855cfb5bd547b13442c27996d2cd212f3b1a83c1c91eff92ec3926c07",
+        "source_request_id": "38e3a5c1-9413-4546-98b8-60440dc45372",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 212,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "1f22314ef8e7080f7557a8db3e663c8fe2fc4e751584fb2e05fa9a821859fe65",
+      "state": "INCOMPLETE",
+      "source_request_id": "015d515d-617f-43ff-b4de-bb610a291577",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "1f22314ef8e7080f7557a8db3e663c8fe2fc4e751584fb2e05fa9a821859fe65",
+        "source_request_id": "015d515d-617f-43ff-b4de-bb610a291577",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 212,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "33d7a49ea492b05100eba9ee6f7921d9405fc4ae665dd8b870264a62465ff34c",
+      "state": "INCOMPLETE",
+      "source_request_id": "9ee6ecad-0f6c-44e1-b444-06f2b253b13f",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 9,
+      "original_file_diagnostic": {
+        "id": "33d7a49ea492b05100eba9ee6f7921d9405fc4ae665dd8b870264a62465ff34c",
+        "source_request_id": "9ee6ecad-0f6c-44e1-b444-06f2b253b13f",
+        "stage": "partition",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          9
+        ],
+        "compressed_bytes": 268,
+        "existing_files": 0,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": null,
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "development_history_export.py",
+            "function": "partition_records",
+            "line": 62
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "_iter_transfer_chunks",
+            "line": 907
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "_read_transfer_chunk",
+            "line": 856
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "_read_chunk_bytes",
+            "line": 832
+          }
+        ]
+      }
+    },
+    {
+      "id": "34ef857a798c736a690155d8e6317bb79bd6605dfeace7b5868141a8c310498a",
+      "state": "INCOMPLETE",
+      "source_request_id": "1c12b978-9c3c-4e0d-8453-6106abd99ef0",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "34ef857a798c736a690155d8e6317bb79bd6605dfeace7b5868141a8c310498a",
+        "source_request_id": "1c12b978-9c3c-4e0d-8453-6106abd99ef0",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 212,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "37d1b7467cae1b9cd9a1b72973bb415e32e88135ad658ce06a325d31a3f54ff9",
+      "state": "INCOMPLETE",
+      "source_request_id": "0cd8afd3-1203-4d38-bb4c-1751959b381c",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "37d1b7467cae1b9cd9a1b72973bb415e32e88135ad658ce06a325d31a3f54ff9",
+        "source_request_id": "0cd8afd3-1203-4d38-bb4c-1751959b381c",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 215,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "4455041e4590acb4f782876bd0c340b5cfaecedb478405f302116aa939883eed",
+      "state": "INCOMPLETE",
+      "source_request_id": "71937a0b-7c54-4478-8b9b-40e2ac4f6c1e",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "4455041e4590acb4f782876bd0c340b5cfaecedb478405f302116aa939883eed",
+        "source_request_id": "71937a0b-7c54-4478-8b9b-40e2ac4f6c1e",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 212,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "5b63b8c380d3a65634289f747a5318a189d3a536d0e1ec508b031f786cf46611",
+      "state": "INCOMPLETE",
+      "source_request_id": "79489eb4-1ec2-45ff-ac6f-2528d8a6bc73",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "5b63b8c380d3a65634289f747a5318a189d3a536d0e1ec508b031f786cf46611",
+        "source_request_id": "79489eb4-1ec2-45ff-ac6f-2528d8a6bc73",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 215,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "8d412bf0e4ccadbb98724f2934ce25c56d4f631ac073079edebc648a350d4fd2",
+      "state": "INCOMPLETE",
+      "source_request_id": "0f312bd3-8e62-47d4-b516-448f7dd7c7e5",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "8d412bf0e4ccadbb98724f2934ce25c56d4f631ac073079edebc648a350d4fd2",
+        "source_request_id": "0f312bd3-8e62-47d4-b516-448f7dd7c7e5",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 215,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "b5b919e1099dfaf91aa58605fa059b509cc328e7d15ea9d492e5419abde7d78a",
+      "state": "INCOMPLETE",
+      "source_request_id": "81b313d2-e423-4ed0-bf48-39ab6ac60903",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "b5b919e1099dfaf91aa58605fa059b509cc328e7d15ea9d492e5419abde7d78a",
+        "source_request_id": "81b313d2-e423-4ed0-bf48-39ab6ac60903",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 215,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "bf91d56fbf424389fc2e9916c9968f191315994dc2fde66563ca9e64512527de",
+      "state": "INCOMPLETE",
+      "source_request_id": "eeae7522-3ff8-4e40-85ff-1b7a9b325365",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "ValueError",
+      "error_sha256": "aedbd4afd2977a291063bee1272366e7411eec87998693fac977fabbd76f1c00",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "bf91d56fbf424389fc2e9916c9968f191315994dc2fde66563ca9e64512527de",
+        "source_request_id": "eeae7522-3ff8-4e40-85ff-1b7a9b325365",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 212,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    },
+    {
+      "id": "ddb5769e923e29db9161be76929ccb053b0faf0d3ecc5608dcb7ea41df55b06d",
+      "state": "INCOMPLETE",
+      "source_request_id": "727ae1f0-b5d9-44cc-b787-2cfc74a64773",
+      "source_status": "COMPLETED",
+      "expected_chunks": 1,
+      "received_chunks": 1,
+      "error_code": "PERSISTED_COVERAGE_UNPROVEN",
+      "error_sha256": "872dd962b840f4f5c37f4ab4845954ef29474f6b843595e41ee6fec9ee67acf2",
+      "same_source": true,
+      "has_ingestion_progress": false,
+      "has_native_storage_version": false,
+      "records_saved": 0,
+      "records_verified": 0,
+      "records_received": 0,
+      "records_failed": null,
+      "persistence_verification_present": true,
+      "content_verification_present": false,
+      "day_coverage_count": 1,
+      "original_file_diagnostic": {
+        "id": "ddb5769e923e29db9161be76929ccb053b0faf0d3ecc5608dcb7ea41df55b06d",
+        "source_request_id": "727ae1f0-b5d9-44cc-b787-2cfc74a64773",
+        "stage": "manifest",
+        "manifest_files": 1,
+        "staging_root_exists": true,
+        "staging_root_matches_deployment": true,
+        "request_directory_exists": false,
+        "transfer_records": [
+          1
+        ],
+        "compressed_bytes": 215,
+        "status": "failed",
+        "exception_type": "MarketDataValidationError",
+        "cause_type": "FileNotFoundError",
+        "reason_code": "MarketDataValidationError",
+        "frames": [
+          {
+            "file": "incomplete-files-causes-450c1af8.py",
+            "function": "run",
+            "line": 35
+          },
+          {
+            "file": "market_data_transfer_ingestion.py",
+            "function": "load_uploaded_request_manifest",
+            "line": 971
+          }
+        ]
+      }
+    }
+  ]
+}
