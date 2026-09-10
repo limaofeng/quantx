@@ -18,6 +18,8 @@ const evidenceSchema = z.object({
       request_id: z.string(),
       coverage_status: z.string(),
       request_status: z.string().nullable(),
+      request_phase: z.string().nullable(),
+      request_reason: z.string().nullable(),
       records_saved: z.string().nullable(),
       scope: z.object({
         stock_list: z.array(z.string()),
@@ -39,7 +41,15 @@ const requestLabels: Record<string, string> = {
   FAILED: '失败',
   BLOCKED: '已阻塞',
 };
+const phaseLabels: Record<string, string> = {
+  VALIDATE: '校验文件',
+  WRITE: '写入行情',
+  READBACK: '回读核验',
+  FINALIZE: '完成发布',
+};
 const reasonLabels: Record<string, string> = {
+  READBACK_BUDGET_EXHAUSTED: '回读核验额度耗尽',
+  INGESTION_RETRY_BUDGET_EXHAUSTED: '摄取重试额度耗尽',
   DATA_UNAVAILABLE: '源数据不可用',
   SOURCE_INCOMPLETE: '源数据交付不完整',
   XT_DATA_NO_ROWS: '行情源未返回数据',
@@ -47,6 +57,10 @@ const reasonLabels: Record<string, string> = {
   SOURCE_COVERAGE_MISSING: '缺少目标分区数据',
   SOURCE_COVERAGE_UNVERIFIED: '目标分区覆盖未验证',
 };
+
+function reasonLabel(reason: string | null | undefined) {
+  return reason ? (reasonLabels[reason] ?? reason) : '--';
+}
 
 export function MarketSyncEvidence({
   runId,
@@ -138,6 +152,7 @@ export function MarketSyncEvidence({
               <th>分区</th>
               <th>标的 / 周期 / 日期</th>
               <th>请求状态</th>
+              <th>摄取阶段</th>
               <th>覆盖状态</th>
               <th>记录数</th>
               <th>原因</th>
@@ -148,7 +163,7 @@ export function MarketSyncEvidence({
               data?.items.map(item => (
                 <tr
                   key={item.batch_index}
-                  title={`${item.request_id} ${item.summary.reason ?? ''}`}
+                  title={`${item.request_id} ${item.request_reason ?? item.summary.reason ?? ''}`}
                 >
                   <td>{item.batch_index}</td>
                   <td className="font-mono">
@@ -163,6 +178,11 @@ export function MarketSyncEvidence({
                         item.request_status)}
                   </td>
                   <td>
+                    {item.request_phase
+                      ? (phaseLabels[item.request_phase] ?? item.request_phase)
+                      : '--'}
+                  </td>
+                  <td>
                     {item.coverage_status === 'VERIFIED'
                       ? '合格'
                       : item.coverage_status === 'INCOMPLETE'
@@ -171,10 +191,7 @@ export function MarketSyncEvidence({
                   </td>
                   <td>{item.records_saved ?? '--'}</td>
                   <td>
-                    {item.summary.reason
-                      ? (reasonLabels[item.summary.reason] ??
-                        item.summary.reason)
-                      : '--'}
+                    {reasonLabel(item.request_reason ?? item.summary.reason)}
                   </td>
                 </tr>
               ))}

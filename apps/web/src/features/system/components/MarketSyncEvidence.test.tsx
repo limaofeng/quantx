@@ -19,6 +19,8 @@ const evidence = (status: string, count = 1) => ({
       request_id: 'request-1',
       coverage_status: 'PENDING',
       request_status: status,
+      request_phase: null,
+      request_reason: null,
       records_saved: status === 'COMPLETED' ? '5166' : null,
       scope: {
         stock_list: ['601318.SH'],
@@ -89,21 +91,23 @@ describe('MarketSyncEvidence', () => {
     const items = result.items.map(item => ({
       ...item,
       summary: { reason: 'DATA_UNAVAILABLE' },
+      request_phase: 'READBACK',
+      request_reason: 'READBACK_BUDGET_EXHAUSTED',
     }));
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          json: async () => ({ ...result, items }),
-        })
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ ...result, items }),
+      })
     );
     await act(async () => {
       render(<MarketSyncEvidence runId="blocked" live={false} />);
     });
     expect(screen.getByText('已阻塞')).toBeInTheDocument();
-    expect(screen.getByText('源数据不可用')).toBeInTheDocument();
+    expect(screen.getByText('回读核验额度耗尽')).toBeInTheDocument();
+    expect(screen.getByText('回读核验')).toBeInTheDocument();
+    expect(screen.queryByText('源数据不可用')).not.toBeInTheDocument();
     expect(screen.getByText(/后台处理中 0/)).toBeInTheDocument();
   });
 });

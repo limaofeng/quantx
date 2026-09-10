@@ -25,7 +25,7 @@ async def test_paged_audit_survives_flow_exit_and_joins_later_ingestion():
       await connection.execute(
         text("""CREATE TEMP TABLE market_data_request (
         request_id VARCHAR(36), status VARCHAR(16), completed_at TIMESTAMP,
-        ingestion_result JSON) ON COMMIT DROP""")
+        ingestion_result JSON, ingestion_progress JSON) ON COMMIT DROP""")
       )
 
       class BoundEngine:
@@ -43,7 +43,7 @@ async def test_paged_audit_survives_flow_exit_and_joins_later_ingestion():
         2, {"periods": ["tick"]}, "request-2", "INCOMPLETE", {"reason": "empty"}
       )
       await connection.execute(
-        text("""INSERT INTO market_data_request VALUES
+        text("""INSERT INTO market_data_request(request_id,status,completed_at,ingestion_result) VALUES
         ('request-1','COMPLETED',timezone('utc',now()),json_build_object('records_saved',5166)),
         ('request-2','COMPLETED',timezone('utc',now()),json_build_object('records_saved',0))""")
       )
@@ -54,6 +54,16 @@ async def test_paged_audit_survives_flow_exit_and_joins_later_ingestion():
       assert page[0]["records_saved"] == "5166"
       assert page[0]["scope"] == {"periods": ["tick"]}
       assert (await audit.page(offset=1, limit=1))[0]["batch_index"] == 2
+      await connection.execute(
+        text("""UPDATE market_data_request SET status='BLOCKED',
+        ingestion_progress='{"phase":"READBACK","reason_code":"READBACK_BUDGET_EXHAUSTED"}'
+        WHERE request_id='request-2'""")
+      )
+      blocked = (await audit.page(offset=1, limit=1))[0]
+      assert blocked["request_status"] == "BLOCKED"
+      assert blocked["request_phase"] == "READBACK"
+      assert blocked["request_reason"] == "READBACK_BUDGET_EXHAUSTED"
+      assert blocked["summary"]["reason"] == "empty"
       await audit.record(
         1, {"periods": ["tick"]}, "request-1", "VERIFIED", {"records_saved": 5166}
       )

@@ -51,6 +51,8 @@ class MarketDataSyncAudit:
             text("""
         SELECT p.batch_index, p.scope, p.request_id, p.coverage_status, p.summary,
                p.updated_at, r.status AS request_status, r.completed_at,
+               r.ingestion_progress->>'phase' AS request_phase,
+               r.ingestion_progress->>'reason_code' AS request_reason,
                COALESCE(p.summary ->> 'records_saved',
                         CASE WHEN r.status='COMPLETED'
                         THEN r.ingestion_result ->> 'records_saved' END) AS records_saved
