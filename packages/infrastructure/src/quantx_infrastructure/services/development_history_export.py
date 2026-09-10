@@ -33,6 +33,8 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
 )
 
 from .development_delivery_execution import run_delivery_execution
+from .development_delivery_manifest import validate_delivery_manifest
+from .development_source_proof import delivery_version, source_proof
 from .local_history_reader import HistoryReadInvalid
 from .market_data_staging_cleanup import _joined_thread
 
@@ -374,6 +376,7 @@ async def _dispatch_owned(store, owner) -> dict:
   try:
     from .data_exchange_archive import persisted_partition
 
+    provenance = source_proof(source, request)
     if request.period == "1d":
       persisted_rows = await persisted_partition(
         request,
@@ -401,17 +404,17 @@ async def _dispatch_owned(store, owner) -> dict:
     chunks = await _joined_thread(publish, records)
     reference = await export_reference(request.instrument, request.trading_date)
     manifest = {
-      "version": 1,
+      "version": 2,
       "payload": payload,
       "chunks": chunks,
       "reference": reference,
       "source_request_id": source_id,
-      "data_version": hashlib.sha256(
-        json.dumps({"chunks": chunks, "reference": reference}, sort_keys=True).encode()
-      ).hexdigest(),
+      "source_proof": provenance,
       "coverage": "SOURCE_VERIFIED",
       "rows": len(records) - 1,
     }
+    manifest["data_version"] = delivery_version(manifest)
+    validate_delivery_manifest(manifest, request)
     async with _transaction(store, owner) as update:
       result = await update.execute(
         text("""
@@ -437,6 +440,7 @@ async def _dispatch_owned(store, owner) -> dict:
 def safe_export_error(exc: Exception) -> str:
   known = {
     "SOURCE_COVERAGE_MISSING",
+    "SOURCE_PROVENANCE_INVALID",
     "PERSISTED_COVERAGE_UNPROVEN",
     "PERSISTED_COVERAGE_CHANGED",
     "NATIVE_STORAGE_VERSION_MIGRATION_REQUIRED",

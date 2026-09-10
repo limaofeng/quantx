@@ -222,8 +222,18 @@ HistoryDemand，等待上海时间 15:01 后规划；交易日生成 WAITING 关
 仅可重放已接受身份，不能新增修订。默认恢复循环每轮另核验一个到期 WAITING：
 AGENT 需求在有收盘后原生固定版本证明时关闭为 VERIFIED，并记录原 demand_id、
 原关联源、实际证明源、版本、摘要、验证行数及时间；不替换原关联或重开预算。
-缺少版本、仅盘中版本或证明损坏时记录原因，5 分钟后再检查。REMOTE 尚缺整日来源
-证明时保持 WAITING_REMOTE_SESSION_PROOF；完成交付本身不等同于归档缺口已关闭。
+缺少版本、仅盘中版本或证明损坏时记录原因，5 分钟后再检查。REMOTE 仅检查原需求
+已绑定的 delivery_id：v2 清单完整性、原生源范围、上海时间 15:01 后创建且 download=true、
+本地已提交的逐字段回读证明、分区内容摘要全部一致后，关闭为 VERIFIED，记录原需求、
+交付、远端源、来源版本、本地版本和摘要。缺少合格整日证明保持 WAITING_REMOTE_SESSION_PROOF；
+损坏清单或证明记录 REMOTE_SESSION_PROOF_INVALID，不替换交付、不新建需求。
+
+行情交付清单 v2 增加 source_proof，包含原源 UTC 创建时间、原始 payload、原生固定版本、
+全源摘要与验证计数、目标分区摘要与行数。data_version 对整个清单计算 SHA256（仅排除
+自身及本地回读收据），因此原 source_request_id、来源证明和参考数据均绑定同一身份。
+导出先验证原生收据；导入在写入前核对实际文件内容与源分区摘要，回读后才发布。
+v1 清单返回 SOURCE_PROVENANCE_MIGRATION_REQUIRED，已有交付在恢复入口被 BLOCKED，
+保留原清单、ID、文件与累计预算；读取目录排除 v1。迁移工具和上线切换仍待完成。
 
 GET 返回固定请求、WRITE / READBACK / VERIFIED / BLOCKED、写入和回读累计次数、
 下一次重试时间、原因及证明。独立 Data Worker 在每次 IO 前持久化尝试，写入与回读

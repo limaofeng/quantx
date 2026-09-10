@@ -164,7 +164,7 @@ async def verify_archive_recovery(owner):
       (
         await db.execute(
           text("""
-        SELECT r.*,d.source_kind,d.source_request_id FROM engine_archive_recovery r
+        SELECT r.*,d.source_kind,d.source_request_id,d.delivery_id FROM engine_archive_recovery r
         JOIN market_data_demand d ON d.demand_id=r.demand_id
         WHERE r.state='WAITING' AND r.next_probe_at<=clock_timestamp()
         ORDER BY r.next_probe_at,r.generation,r.instrument,r.trading_date
@@ -179,7 +179,33 @@ async def verify_archive_recovery(owner):
       return False
     reason, evidence = "WAITING_NATIVE_VERSION", None
     if row["source_kind"] != "AGENT":
+      from quantx_contracts.data_exchange import HistoryPartitionRequest
+
+      from .development_bar_publication import resolve_remote_session_proof
+
       reason = "WAITING_REMOTE_SESSION_PROOF"
+      try:
+        remote = await resolve_remote_session_proof(
+          db,
+          HistoryPartitionRequest(
+            instrument=row["instrument"], period="1m", trading_date=row["trading_date"]
+          ),
+          row["delivery_id"],
+        )
+      except ValueError:
+        reason = "REMOTE_SESSION_PROOF_INVALID"
+      else:
+        if remote is not None:
+          evidence = {
+            **remote,
+            "schema_version": 1,
+            "demand_id": row["demand_id"],
+            "original_source_request_id": row["source_request_id"],
+            "instrument": row["instrument"],
+            "period": "1m",
+            "trading_date": row["trading_date"].isoformat(),
+          }
+          reason = None
     else:
       try:
         version = await resolve_native_bar_version(

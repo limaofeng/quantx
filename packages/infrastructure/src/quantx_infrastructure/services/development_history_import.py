@@ -122,6 +122,10 @@ async def _import_partition_owned(
     async with _delivery_transaction(owner) as db:
       identity = await submit_in_transaction(request, db)
   local = await get_export(identity)
+  if isinstance(local.get("manifest"), dict) and local["manifest"].get("version") == 1:
+    return await _block_legacy_delivery(
+      identity, owner, "SOURCE_PROVENANCE_MIGRATION_REQUIRED"
+    )
   if local["state"] == "BLOCKED":
     return {"id": identity, "status": "BLOCKED", "reason": local["error"]}
   budget = DevelopmentDownloadBudget(AsyncSessionLocal, identity, owner=owner)
@@ -225,9 +229,10 @@ async def _import_partition_owned(
     return await _ingest_local_partition(identity, request, manifest, ingestion_store)
 
 
-async def _block_legacy_delivery(identity, owner):
+async def _block_legacy_delivery(
+  identity, owner, reason="LOCAL_STORAGE_VERSION_MIGRATION_REQUIRED"
+):
   # Preserve the old receipt, files, checkpoints and reserved attempts verbatim.
-  reason = "LOCAL_STORAGE_VERSION_MIGRATION_REQUIRED"
   async with _delivery_transaction(owner) as db:
     await db.execute(
       text(
@@ -242,6 +247,10 @@ async def _ingest_local_partition(identity, request, manifest, ingestion_store):
   from .development_version_ingestion import ingest_development_storage_version
   from .market_data_ingestion_progress import evidence_hash
 
+  if isinstance(manifest, dict) and manifest.get("version") == 1:
+    return await _block_legacy_delivery(
+      identity, ingestion_store.owner, "SOURCE_PROVENANCE_MIGRATION_REQUIRED"
+    )
   prior = await ingestion_store.status()
   if prior is not None and isinstance(manifest, dict):
     legacy_hash = evidence_hash(
@@ -298,6 +307,10 @@ async def _ingest_local_partition(identity, request, manifest, ingestion_store):
 async def _recheck_local_partition(identity, request, receipt, budget):
   from .development_version_ingestion import recheck_development_storage_version
 
+  if isinstance(receipt, dict) and receipt.get("version") == 1:
+    return await _block_legacy_delivery(
+      identity, budget.owner, "SOURCE_PROVENANCE_MIGRATION_REQUIRED"
+    )
   audit = receipt.get("local_verification") if isinstance(receipt, dict) else None
   if isinstance(audit, dict) and "immutable_storage" not in audit:
     return await _block_legacy_delivery(identity, budget.owner)

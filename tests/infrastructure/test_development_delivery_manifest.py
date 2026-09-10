@@ -2,8 +2,6 @@
 # ruff: noqa: F811
 
 import copy
-import hashlib
-import json
 from datetime import date
 
 import httpx
@@ -14,9 +12,11 @@ from quantx_infrastructure.services import development_history_import as importe
 from quantx_infrastructure.services.development_download_budget import (
   DeliveryRemoteUnavailable,
 )
+from quantx_infrastructure.services.development_source_proof import delivery_version
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from tests.infrastructure.development_source_fixture import provenance
 from tests.infrastructure.test_development_download_budget import install_budget_schema
 from tests.infrastructure.test_market_data_durable_progress import (
   durable_store,  # noqa: F401
@@ -29,7 +29,8 @@ REQUEST = HistoryPartitionRequest(
 
 def manifest():
   result = {
-    "version": 1,
+    "version": 2,
+    "source_proof": provenance(REQUEST),
     "payload": REQUEST.agent_payload(),
     "chunks": [
       {
@@ -50,12 +51,7 @@ def manifest():
 
 
 def version(value):
-  value["data_version"] = hashlib.sha256(
-    json.dumps(
-      {"chunks": value["chunks"], "reference": value["reference"]},
-      sort_keys=True,
-    ).encode()
-  ).hexdigest()
+  value["data_version"] = delivery_version(value)
 
 
 @pytest.mark.parametrize(
@@ -219,3 +215,28 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
       await connection.scalar(text("SELECT manifest FROM development_data_export"))
       == original
     )
+
+
+@pytest.mark.parametrize(
+  "field", ["source_request_id", "source_proof", "rows", "reference"]
+)
+def test_delivery_identity_covers_source_provenance(field):
+  item = manifest()
+  if field == "source_request_id":
+    item[field] = "replacement-source"
+  elif field == "source_proof":
+    item[field]["source_created_at"] = "2026-09-07T06:00:00+00:00"
+  elif field == "rows":
+    item[field] += 1
+  else:
+    item[field]["changed"] = True
+  with pytest.raises(ValueError, match="DELIVERY_"):
+    delivery.validate_delivery_manifest(item, REQUEST)
+
+
+def test_legacy_manifest_requires_explicit_provenance_migration():
+  item = manifest()
+  item["version"] = 1
+  item.pop("source_proof")
+  with pytest.raises(ValueError, match="SOURCE_PROVENANCE_MIGRATION_REQUIRED"):
+    delivery.validate_delivery_manifest(item, REQUEST)

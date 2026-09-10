@@ -77,6 +77,7 @@ def _binding(row, version):
     or version.trading_date != request.trading_date.isoformat()
     or type(version.records) is not int
     or version.records != manifest["rows"]
+    or version.content_sha256 != manifest["source_proof"]["partition_sha256"]
     or not isinstance(version.content_sha256, str)
     or re.fullmatch(r"[0-9a-f]{64}", version.content_sha256) is None
   ):
@@ -255,6 +256,7 @@ _VISIBLE_VERSION_QUERY = """
     JOIN development_data_export e ON e.id=v.delivery_id
     JOIN development_data_ingestion i ON i.delivery_id=v.delivery_id
     WHERE e.state='LOCAL_VERIFIED' AND i.progress->>'phase'='VERIFIED'
+      AND e.manifest->>'version'='2'
       AND v.proof IS NOT NULL AND v.source_version=e.manifest->>'data_version'
       AND e.request->>'instrument'=v.stock_code AND e.request->>'period'=v.period
       AND e.request->>'trading_date'=to_char(v.trading_date,'YYYY-MM-DD')
@@ -313,4 +315,84 @@ async def resolve_published_daily_versions(db, request):
     raise ValueError("published daily version lookup exceeded its row budget")
   return {
     (row["stock_code"], row["trading_date"]): row["storage_version"] for row in rows
+  }
+
+
+async def resolve_remote_session_proof(db, request, delivery_id):
+  """Use the demand's fixed delivery and its committed local content proof."""
+  from .development_source_proof import validate_source_proof
+
+  if delivery_id is None:
+    return None
+  row = (
+    (
+      await db.execute(
+        text(
+          _VISIBLE_VERSION_QUERY.replace("SELECT v.*", "SELECT v.*,e.manifest")
+          + " AND v.delivery_id=:id AND v.stock_code=:code AND v.period=:period AND v.trading_date=:day"
+        ),
+        {
+          "id": delivery_id,
+          "code": request.instrument,
+          "period": request.period,
+          "day": request.trading_date,
+        },
+      )
+    )
+    .mappings()
+    .one_or_none()
+  )
+  if row is None:
+    return None
+  manifest = {k: v for k, v in row["manifest"].items() if k != "local_verification"}
+  validate_delivery_manifest(manifest, request)
+  source = manifest["source_proof"]
+  proof = row["proof"]
+  expected = {
+    "schema_version": 1,
+    "records_verified": row["records"],
+    "source_sha256": row["content_sha256"],
+    "persisted_sha256": row["content_sha256"],
+    "storage_version": row["storage_version"],
+    "code": request.instrument,
+    "period": request.period,
+    "trading_date": request.trading_date.isoformat(),
+  }
+  if (
+    row["verified_at"] is None
+    or not isinstance(proof, dict)
+    or set(proof) != {*expected, "fields_verified"}
+    or any(proof[k] != v for k, v in expected.items())
+    or any(
+      type(proof[k]) is not int
+      for k in ("schema_version", "records_verified", "fields_verified")
+    )
+    or proof["fields_verified"] <= 0
+    or source["partition_records"] != row["records"]
+    or source["partition_sha256"] != row["content_sha256"]
+    or row["storage_version"]
+    != evidence_hash(
+      {
+        "storage_format": 1,
+        "code": request.instrument,
+        "period": request.period,
+        "trading_date": request.trading_date.isoformat(),
+        "content_sha256": row["content_sha256"],
+      }
+    )
+  ):
+    raise ValueError("REMOTE_SESSION_PROOF_INVALID")
+  if not validate_source_proof(source, request):
+    return None
+  return {
+    "kind": "REMOTE_FULL_SESSION_VERSION",
+    "delivery_id": delivery_id,
+    "proof_source_request_id": manifest["source_request_id"],
+    "source_version": manifest["data_version"],
+    "storage_version": row["storage_version"],
+    "content_sha256": row["content_sha256"],
+    "records_verified": row["records"],
+    "fields_verified": proof["fields_verified"],
+    "source_created_at": source["source_created_at"],
+    "native_storage_version": source["native_storage_version"],
   }

@@ -465,6 +465,7 @@ async def test_development_published_history_version_precedes_realtime_revision(
   )
   manifest = {
     "data_version": "a" * 64,
+    "version": 2,
     "local_verification": {"immutable_storage": proof},
   }
   async with case.engine.begin() as db:

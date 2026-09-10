@@ -3,6 +3,7 @@
 
 import asyncio
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -53,18 +54,40 @@ async def export_case(workers, tmp_path, monkeypatch):
     """),
       {"request": request.model_dump_json()},
     )
+  from quantx_infrastructure.services.immutable_bar_storage import (
+    prepare_native_bar_bundle,
+  )
+
+  bundle = await prepare_native_bar_bundle(request.agent_payload(), files)
   source = {
     "status": "COMPLETED",
+    "request_payload": request.agent_payload(),
+    "created_at": datetime(2026, 9, 7, 8),
     "development_only": False,
     "ingestion_result": {
+      "native_storage_version": bundle.storage_version,
+      "records_verified": bundle.records,
+      "persistence_verification": {
+        "status": "verified",
+        "records_verified": bundle.records,
+      },
+      "content_verification": {
+        "schema_version": 1,
+        "records_verified": bundle.records,
+        "fields_verified": 8,
+        "storage_version": bundle.storage_version,
+        "source_sha256": bundle.content_sha256,
+        "persisted_sha256": bundle.content_sha256,
+      },
       "day_coverage": [
         {
           "instrument_code": request.instrument,
           "period": request.period,
           "trading_date": str(request.trading_date),
           "point_count": 1,
+          "content_sha256": bundle.coverage[0][4],
         }
-      ]
+      ],
     },
   }
   monkeypatch.setattr(first, "market_data_request", AsyncMock(return_value=source))
@@ -177,6 +200,21 @@ async def test_default_dispatch_rebuilds_missing_files_from_original_fixed_versi
     return
   assert result["status"] == "processed"
   published = await row(case)
+  from quantx_infrastructure.services.development_delivery_manifest import (
+    validate_delivery_manifest,
+  )
+  from quantx_infrastructure.services.development_history_import import ImportedTransfer
+  from quantx_infrastructure.services.immutable_bar_storage import (
+    prepare_immutable_bar_version,
+  )
+
+  validate_delivery_manifest(published["manifest"], case.request)
+  imported = await prepare_immutable_bar_version(
+    ImportedTransfer(published["manifest"]), "export"
+  )
+  assert (
+    imported.content_sha256 == published["manifest"]["source_proof"]["partition_sha256"]
+  )
   assert published["state"] == "READY" and published["source_request_id"] == "original"
   files = [
     {**chunk, "storage_reference": str(exporter.content_path(chunk["checksum_sha256"]))}

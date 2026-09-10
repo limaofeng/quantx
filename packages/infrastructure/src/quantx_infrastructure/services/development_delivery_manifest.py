@@ -1,11 +1,11 @@
 """Bound and pin remote export evidence before downloading any content."""
 
-import hashlib
 import json
 
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from sqlalchemy import text
 
+from .development_source_proof import delivery_version, validate_source_proof
 from .market_data_transfer_ingestion import (
   MAX_TRANSFER_CHUNK_COMPRESSED_BYTES,
   MAX_TRANSFER_CHUNK_RECORDS,
@@ -32,12 +32,15 @@ async def read_delivery_metadata(client, method, path, **kwargs):
 
 
 def validate_delivery_manifest(manifest, request: HistoryPartitionRequest):
+  if isinstance(manifest, dict) and manifest.get("version") == 1:
+    raise ValueError("SOURCE_PROVENANCE_MIGRATION_REQUIRED")
   if not isinstance(manifest, dict) or set(manifest) != {
     "version",
     "payload",
     "chunks",
     "reference",
     "source_request_id",
+    "source_proof",
     "data_version",
     "coverage",
     "rows",
@@ -45,7 +48,7 @@ def validate_delivery_manifest(manifest, request: HistoryPartitionRequest):
     raise ValueError("DELIVERY_MANIFEST_INVALID")
   if (
     type(manifest["version"]) is not int
-    or manifest["version"] != 1
+    or manifest["version"] != 2
     or manifest["payload"] != request.agent_payload()
     or manifest["coverage"] != "SOURCE_VERIFIED"
     or not isinstance(manifest["reference"], dict)
@@ -95,13 +98,10 @@ def validate_delivery_manifest(manifest, request: HistoryPartitionRequest):
   encoded = json.dumps(manifest, allow_nan=False)
   if len(encoded.encode()) > MAX_DELIVERY_METADATA_BYTES:
     raise ValueError("DELIVERY_METADATA_BUDGET_EXCEEDED")
-  expected = hashlib.sha256(
-    json.dumps(
-      {"chunks": chunks, "reference": manifest["reference"]},
-      sort_keys=True,
-      allow_nan=False,
-    ).encode()
-  ).hexdigest()
+  validate_source_proof(manifest["source_proof"], request)
+  if manifest["source_proof"]["partition_records"] != manifest["rows"]:
+    raise ValueError("DELIVERY_SOURCE_COUNT_INVALID")
+  expected = delivery_version(manifest)
   if manifest["data_version"] != expected:
     raise ValueError("DELIVERY_VERSION_INVALID")
 

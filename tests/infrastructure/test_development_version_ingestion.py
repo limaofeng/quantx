@@ -143,3 +143,78 @@ async def test_failed_receipt_never_publishes_partial_reference_or_version(prepa
     await LocalHistoryReader(connection).read_published(
       query(case), session_factory=case.factory
     )
+
+
+@pytest.mark.parametrize("prepared", [False], indirect=True)
+async def test_source_partition_digest_mismatch_rejects_before_writing(prepared):
+  import json
+
+  from quantx_infrastructure.services.development_bar_publication import (
+    DeliveryVersionConflict,
+  )
+  from quantx_infrastructure.services.development_source_proof import delivery_version
+
+  case, storage = prepared, VersionStorage()
+  case.manifest["source_proof"]["partition_sha256"] = "0" * 64
+  case.manifest["data_version"] = delivery_version(case.manifest)
+  async with case.first.engine.begin() as db:
+    await db.execute(
+      text(
+        "UPDATE development_data_export SET manifest=CAST(:m AS JSON) WHERE id='delivery'"
+      ),
+      {"m": json.dumps(case.manifest)},
+    )
+  with pytest.raises(DeliveryVersionConflict, match="does not match"):
+    await ingest_development_storage_version(
+      case.request, case.manifest, case.progress, connection=storage
+    )
+  assert not storage.lines
+
+
+async def test_v1_delivery_blocks_without_changing_original_progress_or_manifest(
+  prepared, monkeypatch
+):
+  import json
+
+  from quantx_infrastructure.services.development_history_import import (
+    _ingest_local_partition,
+  )
+
+  case = prepared
+  from quantx_infrastructure.services import development_history_import as importer
+
+  monkeypatch.setattr(importer, "AsyncSessionLocal", case.factory)
+  legacy = {**case.manifest, "version": 1}
+  legacy.pop("source_proof")
+  async with case.first.engine.begin() as db:
+    await db.execute(
+      text(
+        "UPDATE development_data_export SET manifest=CAST(:m AS JSON) WHERE id='delivery'"
+      ),
+      {"m": json.dumps(legacy)},
+    )
+    before = await db.scalar(
+      text(
+        "SELECT progress FROM development_data_ingestion WHERE delivery_id='delivery'"
+      )
+    )
+  result = await _ingest_local_partition(
+    "delivery", case.request, legacy, case.progress.store
+  )
+  assert result["status"] == "BLOCKED"
+  assert result["reason"] == "SOURCE_PROVENANCE_MIGRATION_REQUIRED"
+  async with case.first.engine.connect() as db:
+    assert (
+      await db.scalar(
+        text("SELECT manifest FROM development_data_export WHERE id='delivery'")
+      )
+      == legacy
+    )
+    assert (
+      await db.scalar(
+        text(
+          "SELECT progress FROM development_data_ingestion WHERE delivery_id='delivery'"
+        )
+      )
+      == before
+    )

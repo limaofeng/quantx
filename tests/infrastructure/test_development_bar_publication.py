@@ -1,7 +1,6 @@
 """Actual temporary PG publication plus immutable SDK/Arrow and reference IO."""
 # ruff: noqa: F811
 
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -80,18 +79,25 @@ async def prepared(references, workers, tmp_path, monkeypatch, request):
   if period == "1d":
     source_row["time"] -= (9 * 60 + 31) * 60 * 1000
   chunks, ref = publish(partition_records([[source_row]], request)), reference()
+  from quantx_infrastructure.services.development_source_proof import delivery_version
+
+  from tests.infrastructure.development_source_fixture import provenance
+
   manifest = {
-    "version": 1,
+    "version": 2,
     "payload": request.agent_payload(),
     "chunks": chunks,
     "reference": ref,
     "source_request_id": "source-bars",
     "coverage": "SOURCE_VERIFIED",
     "rows": 1,
-    "data_version": hashlib.sha256(
-      json.dumps({"chunks": chunks, "reference": ref}, sort_keys=True).encode()
-    ).hexdigest(),
   }
+  # Prepare genuine normalized file content before constructing source evidence.
+  version = await prepare_immutable_bar_version(ImportedTransfer(manifest), "delivery")
+  manifest["source_proof"] = provenance(
+    request, version.content_sha256, version.records
+  )
+  manifest["data_version"] = delivery_version(manifest)
   async with first.engine.begin() as db:
     await db.execute(
       text("""
@@ -228,11 +234,9 @@ async def test_same_binding_is_idempotent_but_source_version_change_is_rejected(
   assert await bind(case) == await bind(case)
   changed = json.loads(json.dumps(case.manifest))
   changed["reference"]["extra"] = True
-  changed["data_version"] = hashlib.sha256(
-    json.dumps(
-      {"chunks": changed["chunks"], "reference": changed["reference"]}, sort_keys=True
-    ).encode()
-  ).hexdigest()
+  from quantx_infrastructure.services.development_source_proof import delivery_version
+
+  changed["data_version"] = delivery_version(changed)
   async with case.factory() as db:
     await db.execute(
       text(
