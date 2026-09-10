@@ -469,3 +469,28 @@ async def test_first_minute_rejects_rehashed_context_corruption(sessions, tmp_pa
   result = await scorer.evaluate_minute(broken, rule_order=())
   assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == 0
   assert not result.active_scores and scorer._minute_input_fence is None
+
+
+async def test_accepted_minute_boundary_reaches_registered_cpu_and_snapshot(sessions, tmp_path):
+  from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+
+  from tests.engine.unit.test_t_model_minute_batch import (
+    CODES,
+    boundaries,
+    config,
+    feed,
+  )
+  from tests.research.test_t_assistant_model_data import START
+
+  _, scorer = await registered(sessions, tmp_path, "SHADOW")
+  scorer._clock_ms = lambda: START + 60020
+  minutes = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  for code in CODES:
+    feed(minutes, code)
+  batch = minutes.seal_from_accepted_ticks(boundaries())
+  result = await scorer.evaluate_minute(batch, rule_order=("unchanged",))
+  assert result.reason == "VALID" and len(result.shadow_scores) == 3
+  view = await scorer.snapshot_view(as_of_ms=START + 60020, instrument_codes=CODES, rule_order=())
+  assert view.status == "VALID" and view.revision == result.revision
+  assert {score.instrument_code for score in view.scores} == set(CODES)
+  assert all(score.model_as_of_ms >= batch.available_at_ms for score in view.scores)

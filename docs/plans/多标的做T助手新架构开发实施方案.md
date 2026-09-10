@@ -744,6 +744,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `p8-minute-context-final.log`、`p8-minute-context-corruption.log`。实际 PIT 数据提供器、
   accepted-source watermark 与 supervisor 分钟调度仍待接通；WholeQuoteHub 当前发布的
   消费进度不可直接当作事件时间封存水位，未据此制造 COMPLETE 或开放模型订单。
+  分钟组装新增 seal_from_accepted_ticks：要求计划 Universe 每个标的提供同接受流的
+  跨分钟 Tick，校验身份、连续接受序号、递增 fence、来源/收件时间；取最慢来源时间为
+  watermark、最晚收件时间为可用时间，任一缺失或错误在封存任何窗口前拒绝。边界 Tick
+  不进入上一分钟，调用方保留用于下一窗口；静默标的不由其他标的或墙钟代替封存。
+  **92 项分钟/registry 回归与 1 项边界→三标的 CPU 评分→snapshot 链路测试通过**；
+  Ruff/差异检查通过，证据 `p8-accepted-minute-watermark.log`、`p8-accepted-minute-scoring.log`。
+  这是接受流封存入口和组件链路，不是已接上实际 supervisor 的分钟调度；缺少边界时
+  保持未封存。已向用户询问 P8 市场基准指数、行业分类及数据来源，现有 portfolio 行业
+  分类证据不能冒充模型市场/行业行情上下文。Caddy 当前 503，Web 实际 codegen 门仍未完成。
 
 
 

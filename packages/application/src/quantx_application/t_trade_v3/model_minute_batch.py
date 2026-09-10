@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass
 
 from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+from quantx_domain.trading.t_assistant_market_state import AcceptedTMarketTick
 
 from .model_minute_window import TModelMinuteOutcome, TModelMinuteWindow
 
@@ -47,6 +48,7 @@ class TModelMinuteBatchRuntime:
     self._windows = self._create_windows(instrument_codes, contexts, window_config)
     self._contexts = tuple((code, contexts[code]) for code in self._windows)
     self._config = dict(window_config)
+    self._last_ticks = {}
     self.latest = None
 
   @staticmethod
@@ -71,6 +73,46 @@ class TModelMinuteBatchRuntime:
     if window is None:
       raise ValueError("T_MODEL_MINUTE_SYMBOL_NOT_PLANNED")
     window.accept_tick(tick)
+    self._last_ticks[tick.instrument_code] = tick
+
+  def seal_from_accepted_ticks(self, boundary_ticks):
+    """Derive a conservative frontier from every planned symbol's next Tick.
+
+    These must come from the same ordered acceptance path as accept_tick. They
+    belong to the following window: callers retain them for rotation, never feed
+    them into this window. A quiet symbol cannot be closed by another symbol's
+    progress or by a timer. Replay may still supply an explicit source watermark
+    through seal when its source already provides that contract.
+    """
+    ticks = tuple(boundary_ticks)
+    if (
+      any(not isinstance(tick, AcceptedTMarketTick) for tick in ticks)
+      or len(ticks) != len(self._windows)
+      or {tick.instrument_code for tick in ticks} != set(self._windows)
+    ):
+      raise ValueError("T_MODEL_MINUTE_BOUNDARY_SCOPE_INVALID")
+    end = self._config["interval_start_ms"] + 60000
+    for tick in ticks:
+      previous = self._last_ticks.get(tick.instrument_code)
+      if (
+        (tick.stream_id, tick.sample.continuity_generation)
+        != (self._config["stream_id"], self._config["continuity_generation"])
+        or tick.discontinuity_reason is not None
+        or tick.sample.source_time_ms < end
+        or tick.received_at_ms < tick.sample.source_time_ms
+        or (previous is not None and (
+          tick.accepted_sequence != previous.accepted_sequence + 1
+          or tick.market_fence_sequence <= previous.market_fence_sequence
+          or tick.received_at_ms < previous.received_at_ms
+        ))
+      ):
+        raise ValueError("T_MODEL_MINUTE_BOUNDARY_INVALID")
+    return self.seal(
+      watermark_ms=min(tick.sample.source_time_ms for tick in ticks),
+      available_at_ms=max(tick.received_at_ms for tick in ticks),
+      stream_id=self._config["stream_id"],
+      continuity_generation=self._config["continuity_generation"],
+    )
 
   def seal(self, *, watermark_ms, available_at_ms, stream_id, continuity_generation):
     if self.latest is not None:
@@ -115,4 +157,5 @@ class TModelMinuteBatchRuntime:
       raise ValueError("T_MODEL_MINUTE_RESET_REQUIRED")
     windows = self._create_windows(instrument_codes, contexts, window_config)
     self._contexts = tuple((code, contexts[code]) for code in windows)
+    self._last_ticks = {}
     self._windows, self._config, self.latest = windows, dict(window_config), None

@@ -158,3 +158,59 @@ def test_empty_batch_hash_binds_context_age():
   settings["contexts"][CODES[0]] = replace(settings["contexts"][CODES[0]], sector_context_as_of_ms=START - 1)
   second = close(TModelMinuteBatchRuntime(instrument_codes=CODES, **settings))
   assert first.outcomes == second.outcomes and first.manifest_hash != second.manifest_hash
+
+
+
+def boundaries():
+  last = ticks()[-1]
+  return tuple(replace(last, accepted_sequence=6, market_fence_sequence=6,
+    received_at_ms=START + 60010 + i,
+    sample=replace(last.sample, instrument_code=code, source_time_ms=START + 60000 + i))
+    for i, code in enumerate(CODES))
+
+
+def test_accepted_boundary_uses_slowest_source_and_latest_receipt():
+  runtime = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  for code in CODES[:2]:
+    feed(runtime, code)
+  boundary = boundaries()
+  batch = runtime.seal_from_accepted_ticks(boundary)
+  assert batch.watermark_ms == START + 60000
+  assert batch.available_at_ms == START + 60012
+  assert len(batch.complete_bars) == 2
+  assert runtime.buffered_tick_count == 0
+  assert runtime.seal_from_accepted_ticks(boundary) is batch
+  assert all(bar.source_fence_range == (1, 5) for bar in batch.complete_bars)
+  runtime.advance(instrument_codes=CODES, **config(START + 60000))
+  for tick in boundary:
+    runtime.accept_tick(tick)
+  assert runtime.buffered_tick_count == len(CODES)
+
+
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "early", "stream", "generation", "sequence", "fence", "receipt"])
+def test_bad_boundary_cannot_partially_seal_minute(damage):
+  runtime = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  for code in CODES:
+    feed(runtime, code)
+  boundary = list(boundaries())
+  tick = boundary[-1]
+  if damage == "missing":
+    boundary.pop()
+  elif damage == "duplicate":
+    boundary[-1] = boundary[0]
+  elif damage == "early":
+    boundary[-1] = replace(tick, sample=replace(tick.sample, source_time_ms=START + 59999))
+  elif damage == "stream":
+    boundary[-1] = replace(tick, stream_id="other")
+  elif damage == "generation":
+    boundary[-1] = replace(tick, sample=replace(tick.sample, continuity_generation="other"))
+  elif damage == "sequence":
+    boundary[-1] = replace(tick, accepted_sequence=8)
+  elif damage == "fence":
+    boundary[-1] = replace(tick, market_fence_sequence=5)
+  else:
+    boundary[-1] = replace(tick, received_at_ms=START + 59000)
+  with pytest.raises(ValueError, match="T_MODEL_MINUTE_BOUNDARY_"):
+    runtime.seal_from_accepted_ticks(boundary)
+  assert runtime.latest is None and runtime.buffered_tick_count == 15
+  assert len(runtime.seal_from_accepted_ticks(boundaries()).complete_bars) == 3
