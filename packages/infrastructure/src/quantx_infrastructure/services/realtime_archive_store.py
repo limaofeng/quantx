@@ -29,7 +29,7 @@ class RealtimeArchiveStore:
   def __init__(self, engine):
     self.engine = engine
 
-  async def register_scope(self, scope: ArchiveRecoveryScope):
+  async def register_scope(self, scope: ArchiveRecoveryScope, *, recover=False):
     async with asyncio.timeout(3), self.engine.begin() as db:
       await db.execute(text("SELECT pg_advisory_xact_lock(817234595)"))
       params = scope.model_dump()
@@ -44,10 +44,32 @@ class RealtimeArchiveStore:
         if existing != scope.start_minute:
           raise ArchiveRejected("ARCHIVE_SCOPE_CONFLICT")
         return scope
-      try:
-        await verify_engine_archive_generation(db, scope.generation)
-      except RuntimeError:
-        raise ArchiveRejected("ARCHIVE_GENERATION_INACTIVE") from None
+      ended_at = None
+      if recover:
+        registered_at = await db.scalar(
+          text(
+            "SELECT registered_at FROM engine_archive_generation WHERE generation=:generation"
+          ),
+          params,
+        )
+        if registered_at is None or scope.start_minute < registered_at.replace(
+          second=0, microsecond=0
+        ):
+          raise ArchiveRejected("ARCHIVE_RECOVERY_ORIGIN_INVALID")
+        try:
+          await verify_engine_archive_generation(db, scope.generation)
+        except RuntimeError:
+          ended_at = await db.scalar(text("SELECT clock_timestamp()"))
+          if scope.start_minute > ended_at:
+            raise ArchiveRejected("ARCHIVE_RECOVERY_ORIGIN_INVALID")
+        else:
+          raise ArchiveRejected("ARCHIVE_RECOVERY_SOURCE_ACTIVE")
+      else:
+        try:
+          await verify_engine_archive_generation(db, scope.generation)
+        except RuntimeError:
+          raise ArchiveRejected("ARCHIVE_GENERATION_INACTIVE") from None
+      params["ended_at"] = ended_at
       count = await db.scalar(
         text("""
         SELECT count(*) FROM engine_archive_scope WHERE generation=:generation
@@ -58,13 +80,14 @@ class RealtimeArchiveStore:
         raise ArchiveCapacity("ARCHIVE_SCOPE_CAPACITY")
       await db.execute(
         text("""
-        INSERT INTO engine_archive_scope(generation,instrument,start_minute,next_day)
-        VALUES (:generation,:instrument,:start_minute,
+        INSERT INTO engine_archive_scope(generation,instrument,start_minute,ended_at,next_day)
+        VALUES (:generation,:instrument,:start_minute,:ended_at,
           (CAST(:start_minute AS timestamptz) AT TIME ZONE 'Asia/Shanghai')::date)
       """),
         params,
       )
-      await verify_engine_archive_generation(db, scope.generation)
+      if not recover:
+        await verify_engine_archive_generation(db, scope.generation)
     return scope
 
   async def submit(self, request: ArchiveRevision):

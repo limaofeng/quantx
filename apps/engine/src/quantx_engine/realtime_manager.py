@@ -108,6 +108,7 @@ class RealTimeDataManager:
     from .archive_session import EngineArchiveSession
 
     self.archive_session = EngineArchiveSession(archive_generation)
+    await self.archive_session.start()
     self._started_loop = loop
     logger.info("实时数据管理器已启动")
 
@@ -230,6 +231,14 @@ class RealTimeDataManager:
 
     返回 RealTimePrice 格式的异步迭代器，用于 GraphQL WebSocket 推送
     """
+    # Persist recovery intent before a source callback can produce volatile data.
+    # This is local disk IO only; Data API availability never gates subscription.
+    if self.archive_session is not None:
+      from datetime import timezone
+
+      await self.archive_session.observe_scope(
+        stock_code, datetime.now(timezone.utc).replace(second=0, microsecond=0)
+      )
     # 创建队列来接收数据
     queue = asyncio.Queue(maxsize=1)
 

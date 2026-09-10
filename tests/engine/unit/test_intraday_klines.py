@@ -200,8 +200,11 @@ class FakeDividFactorService:
 
 
 @pytest.mark.asyncio
-async def test_realtime_manager_start_is_idempotent_for_same_loop(monkeypatch):
+async def test_realtime_manager_start_is_idempotent_for_same_loop(
+  monkeypatch, tmp_path
+):
   monkeypatch.setenv("QUANTX_MARKET_DATA_INTERNAL_TOKEN", "test-only")
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(tmp_path))
   manager = RealTimeDataManager()
   calls = []
 

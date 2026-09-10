@@ -201,6 +201,7 @@ GET  /market-data/internal/v1/reference-requests/{request_id}
 ```text
 POST /market-data/internal/v1/archives
 POST /market-data/internal/v1/archives/scopes
+POST /market-data/internal/v1/archives/scopes/recover
 GET  /market-data/internal/v1/archives/{request_id}
 ```
 
@@ -246,8 +247,11 @@ storage_version；15:01 后发起且 download=true 的整日源优先，否则�
 这些页不证明全天完整；latest-daily 和其他直接读取入口仍需随消费者迁移完成。
 Engine 默认生命周期已接范围登记和有界归档发送，已移除实时聚合的直接 Influx writer。
 latest-only Tick 聚合始终标记 sealed=false；版本回读通过只证明收到的聚合值已存储，
-不证明完整分钟来源。登记成功前不发送修订，登记等待不阻塞实时回调；登记前进程
-崩溃的持久化恢复仍未闭合，其他历史调用方和完整来源接线也尚未完成。
+不证明完整分钟来源。Tick 订阅建立前先将范围意图提交到本机 SQLite，再异步登记；
+登记成功前不发送修订，网络等待不阻塞实时回调。重启后从原范围和累计尝试继续，
+旧代次通过 scopes/recover 登记已结束范围：必须有原代次记录且原代次不活跃，起点
+不早于代次登记分钟、不晚于当前时间；恢复不授予旧源新增修订权限。已登记身份
+仍精确幂等重放。其他历史调用方和完整分钟来源接线尚未完成。
 
 GraphQL 使用单一 `qmtAgentConnection` 视图返回当前 Agent、五段连接链路、
 行情流与本地 journal 的非敏感指标，以及折叠的历史登记。Web 通过

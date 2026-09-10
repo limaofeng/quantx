@@ -50,10 +50,19 @@ async def _body(request, model):
 
 @router.post("/scopes", status_code=202, response_model=ArchiveRecoveryScope)
 async def register_scope(request: Request):
+  return await _register_scope(request, recover=False)
+
+
+@router.post("/scopes/recover", status_code=202, response_model=ArchiveRecoveryScope)
+async def recover_scope(request: Request):
+  return await _register_scope(request, recover=True)
+
+
+async def _register_scope(request, *, recover):
   value = await _body(request, ArchiveRecoveryScope)
   try:
     return await RealtimeArchiveStore(request.app.state.store.engine).register_scope(
-      value
+      value, recover=recover
     )
   except ArchiveRejected as exc:
     raise HTTPException(409, str(exc)) from None

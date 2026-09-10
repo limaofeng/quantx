@@ -29,13 +29,13 @@ from quantx_contracts.market_data_service import (
 
 
 class LocalMarketDataClient:
-  async def register_archive_scope(self, scope):
+  async def register_archive_scope(self, scope, *, recover=False):
     from quantx_contracts.realtime_archive import ArchiveRecoveryScope
 
     result = ArchiveRecoveryScope.model_validate(
       await self._json(
         "POST",
-        "/market-data/internal/v1/archives/scopes",
+        "/market-data/internal/v1/archives/scopes" + ("/recover" if recover else ""),
         json=scope.model_dump(mode="json"),
       )
     )

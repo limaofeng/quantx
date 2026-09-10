@@ -9,17 +9,19 @@ from tests.engine.unit.test_archive_sender import revision  # noqa: F401
 
 
 async def test_scope_wait_never_blocks_offer_and_stop_joins_transport(
-  monkeypatch, revision
+  monkeypatch, revision, tmp_path
 ):  # noqa: F811
   entered = asyncio.Event()
 
-  async def register(scope):
+  async def register(scope, **kwargs):
     entered.set()
     await asyncio.Event().wait()
 
   client = SimpleNamespace(register_archive_scope=register, close=AsyncMock())
   monkeypatch.setattr(archive_session, "LocalMarketDataClient", lambda: client)
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(tmp_path))
   session = archive_session.EngineArchiveSession(revision.generation)
+  await session.start()
   bar = SimpleNamespace(
     stock_code=revision.instrument, time=revision.minute, **revision.bar.model_dump()
   )
@@ -27,6 +29,7 @@ async def test_scope_wait_never_blocks_offer_and_stop_joins_transport(
     "lineage": (revision.continuity_generation, str(revision.stream_id)),
     "sequence": revision.sequence,
   }
+  await session.observe_scope(revision.instrument, revision.minute)
   try:
     assert not session.offer(bar, state)
     await asyncio.wait_for(entered.wait(), 1)
@@ -41,10 +44,14 @@ async def test_scope_wait_never_blocks_offer_and_stop_joins_transport(
   client.close.assert_awaited_once()
 
 
-async def test_invalid_lineage_cannot_create_scope_or_send(monkeypatch, revision):  # noqa: F811
+async def test_invalid_lineage_cannot_create_scope_or_send(
+  monkeypatch, revision, tmp_path
+):  # noqa: F811
   client = SimpleNamespace(register_archive_scope=AsyncMock(), close=AsyncMock())
   monkeypatch.setattr(archive_session, "LocalMarketDataClient", lambda: client)
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(tmp_path))
   session = archive_session.EngineArchiveSession(revision.generation)
+  await session.start()
   try:
     bar = SimpleNamespace(
       stock_code=revision.instrument, time=revision.minute, **revision.bar.model_dump()
