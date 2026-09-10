@@ -86,6 +86,7 @@ class RealTimeDataManager:
     self.historical_market_data_service = HistoricalMarketDataService()
     self.trading_time_service = TradingTimeService()
     self._started_loop: Optional[asyncio.AbstractEventLoop] = None
+    self.archive_generation: int | None = None
 
   def _previous_daily_close_cache_key(
     self, stock_code: str, tick_time: datetime
@@ -93,14 +94,21 @@ class RealTimeDataManager:
     tick_date = time_utils.to_shanghai(tick_time).date()
     return f"{stock_code}:{tick_date.isoformat()}"
 
-  async def start(self):
+  async def start(self, *, archive_generation: int):
     """启动实时数据管理器"""
     loop = asyncio.get_running_loop()
+    if type(archive_generation) is not int or archive_generation <= 0:
+      raise ValueError("Engine archive generation must be a positive integer")
     if self._started_loop is loop:
+      if self.archive_generation != archive_generation:
+        raise RuntimeError("cannot replace archive generation on a running manager")
       return
 
     # 设置主事件循环到统一订阅管理器
     self.subscription_manager.set_main_loop(loop)
+    # Aggregates from a previous Engine run cannot acquire the new generation.
+    self.tick_minute_klines.clear()
+    self.archive_generation = archive_generation
     self._started_loop = loop
     logger.info("实时数据管理器已启动")
 
@@ -120,6 +128,7 @@ class RealTimeDataManager:
       self._tick_handles.clear()
       self._kline_handles.clear()
       self._started_loop = None
+      self.archive_generation = None
 
       logger.info("实时数据管理器已停止")
     except Exception as e:

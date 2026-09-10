@@ -31,6 +31,10 @@ from quantx_infrastructure.services.auto_exit_plan_service import (
   ActiveRuntimeExitPlanOwnerAuditFailure,
   AutoExitPlanService,
 )
+from quantx_infrastructure.services.engine_archive_generation import (
+  ENGINE_LOCK_NAME,
+  register_engine_archive_generation,
+)
 from quantx_infrastructure.services.limit_up_radar import limit_up_radar_monitor
 from quantx_infrastructure.services.t_trade_monitor_projection_service import (
   t_trade_monitor_projection_service,
@@ -55,7 +59,6 @@ from .t_trade_runtime import t_trade_global_monitor
 from .warm_cache import intraday_warm_cache
 
 logger = logging.getLogger(__name__)
-ENGINE_LOCK_NAME = "quantx-engine-singleton-v1"
 ENGINE_LEASE_ACQUIRE_TIMEOUT_SECONDS = 90.0
 ENGINE_LEASE_RETRY_SECONDS = 2.0
 ENGINE_LEASE_IDLE_TIMEOUT_SECONDS = 60
@@ -622,6 +625,9 @@ async def run_engine() -> None:
     # while the detached connection is physically closed during shutdown.
     _detach_engine_lease_connection(lock_connection)
     await _acquire_engine_lease(lock_connection)
+    archive_generation = await register_engine_archive_generation(
+      lock_connection, str(uuid.uuid4())
+    )
   except Exception:
     await lock_connection.close()
     await db_manager.shutdown()
@@ -634,7 +640,7 @@ async def run_engine() -> None:
     set_intraday_warm_cache(intraday_warm_cache)
     await market_data_service.initialize()
     await whole_quote_hub.start()
-    await realtime_manager.start()
+    await realtime_manager.start(archive_generation=archive_generation)
     await limit_up_radar_monitor.start()
     await intraday_warm_cache.start()
     tasks = [

@@ -121,11 +121,23 @@ async def test_realtime_manager_start_is_idempotent_for_same_loop():
       return True
 
   manager.subscription_manager = FakeSubscriptionManager()
+  manager.tick_minute_klines["stale"] = {"minute": "previous run"}
 
-  await manager.start()
-  await manager.start()
+  await manager.start(archive_generation=7)
+  assert manager.tick_minute_klines == {}
+  manager.tick_minute_klines["current"] = {"minute": "current run"}
+  await manager.start(archive_generation=7)
 
   assert len(calls) == 1
+  assert manager.archive_generation == 7
+  assert "current" in manager.tick_minute_klines
+  with pytest.raises(RuntimeError, match="cannot replace archive generation"):
+    await manager.start(archive_generation=8)
+  await manager.stop()
+  assert manager.archive_generation is None
+  await manager.start(archive_generation=8)
+  assert manager.tick_minute_klines == {}
+  await manager.stop()
 
 
 @pytest.mark.asyncio

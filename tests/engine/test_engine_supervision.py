@@ -403,3 +403,30 @@ async def test_engine_lease_refuses_second_live_instance() -> None:
       BusyConnection(),
       timeout_seconds=0.0,
     )
+
+
+async def test_archive_generation_failure_stops_engine_before_market_start(monkeypatch):
+  from types import SimpleNamespace
+  from unittest.mock import AsyncMock
+
+  from quantx_engine import main as engine_main
+
+  connection = SimpleNamespace(close=AsyncMock())
+  monkeypatch.setattr(engine_main, "engine", SimpleNamespace(connect=AsyncMock(return_value=connection)))
+  initialize, shutdown = AsyncMock(), AsyncMock()
+  monkeypatch.setattr(engine_main.db_manager, "initialize", initialize)
+  monkeypatch.setattr(engine_main.db_manager, "shutdown", shutdown)
+  monkeypatch.setattr(engine_main, "_detach_engine_lease_connection", lambda _: None)
+  acquire = AsyncMock()
+  monkeypatch.setattr(engine_main, "_acquire_engine_lease", acquire)
+  registration = AsyncMock(side_effect=RuntimeError("generation unavailable"))
+  monkeypatch.setattr(engine_main, "register_engine_archive_generation", registration)
+  start = AsyncMock()
+  monkeypatch.setattr(engine_main.realtime_manager, "start", start)
+  with pytest.raises(RuntimeError, match="generation unavailable"):
+    await engine_main.run_engine()
+  acquire.assert_awaited_once_with(connection)
+  registration.assert_awaited_once()
+  start.assert_not_awaited()
+  connection.close.assert_awaited_once()
+  shutdown.assert_awaited_once()
