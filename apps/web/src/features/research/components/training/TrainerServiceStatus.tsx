@@ -111,7 +111,7 @@ export function TrainerServiceStatus() {
       )}
       <p className="text-ui-caption text-slate-400">
         服务运行状态与 CPU/GPU
-        资格分别上报；保护时段内不启动计算，排队任务会保留。
+        资格分别上报；资源条件不满足时不启动计算，排队任务会保留。
       </p>
       {error && (
         <p role="alert" className="text-ui-body text-amber-300">
