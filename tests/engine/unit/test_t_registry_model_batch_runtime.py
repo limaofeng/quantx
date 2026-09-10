@@ -440,3 +440,32 @@ async def test_sealed_minute_cannot_be_repaired_or_bypass_manifest(sessions, tmp
     result = await scorer.evaluate(complete.complete_bars, model_as_of_ms=complete.available_at_ms, rule_order=())
   assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == first.revision
   assert result.entry_blocked and not result.active_scores
+
+
+@pytest.mark.parametrize("damage", ["scope", "future", "bar_mismatch"])
+async def test_first_minute_rejects_rehashed_context_corruption(sessions, tmp_path, damage):
+  from dataclasses import asdict
+
+  from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+  from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+
+  from tests.engine.unit.test_t_model_minute_batch import CODES, close, config, feed
+
+  _, scorer = await registered(sessions, tmp_path, "ACTIVE")
+  minutes = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  feed(minutes, CODES[0])
+  batch = close(minutes)
+  contexts = dict(batch.contexts)
+  if damage == "scope":
+    contexts.pop(CODES[0])
+  else:
+    context = contexts[CODES[0]]
+    contexts[CODES[0]] = replace(context, sector_context_as_of_ms=(
+      batch.interval_start_ms + 1 if damage == "future" else batch.interval_start_ms - 1))
+  broken = replace(batch, contexts=tuple(contexts.items()))
+  material = asdict(broken)
+  material.pop("manifest_hash")
+  broken = replace(broken, manifest_hash=stable_manifest_hash(material))
+  result = await scorer.evaluate_minute(broken, rule_order=())
+  assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == 0
+  assert not result.active_scores and scorer._minute_input_fence is None

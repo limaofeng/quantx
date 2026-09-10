@@ -735,6 +735,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   SHADOW/ACTIVE 有效视图、身份篡改、未来/过期分数和 RULE_ONLY 回归；Ruff/差异检查通过。
   证据 `.codex_screenshots/p8-model-snapshot-final.log`。下一步仍需接通实际分钟调度、
   来源水位及 PIT 上下文；现有证据不替代 SHADOW 长时观察或正式模型准入。iOS 按用户要求暂停。
+  多标的分钟组装已取消全 Universe 共用上下文：每个计划标的必须提供不可变
+  TModelMinuteContext（能力版本、市场/行业 as_of），范围必须精确匹配；完整 bar 保留
+  对应标的时间，缺 Tick 的负结果也在批次 manifest 中保留上下文，不刷新或补造时间。
+  分钟轮换先校验全部上下文再切换，缺项/多项/未来时点不破坏上一封存批次。评分入口
+  复验上下文顺序/覆盖、时点和 Feature Bar 一致性，重新计算摘要不能绕过身份校验。
+  **80 项分钟/registry 回归与 3 项重新摘要篡改测试通过**，Ruff/差异检查通过；证据
+  `p8-minute-context-final.log`、`p8-minute-context-corruption.log`。实际 PIT 数据提供器、
+  accepted-source watermark 与 supervisor 分钟调度仍待接通；WholeQuoteHub 当前发布的
+  消费进度不可直接当作事件时间封存水位，未据此制造 COMPLETE 或开放模型订单。
 
 
 

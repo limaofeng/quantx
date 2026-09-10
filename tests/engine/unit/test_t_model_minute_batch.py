@@ -3,7 +3,10 @@
 from dataclasses import replace
 
 import pytest
-from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+from quantx_application.t_trade_v3.model_minute_batch import (
+  TModelMinuteBatchRuntime,
+  TModelMinuteContext,
+)
 
 from tests.research.test_t_assistant_model_data import START, ticks
 
@@ -12,8 +15,8 @@ CODES = ("600000.SH", "000001.SZ", "000002.SZ")
 
 def config(start=START):
   return dict(interval_start_ms=start, stream_id="stream-1", continuity_generation="generation-1",
-    capability_manifest_version="quotes-v1", market_context_as_of_ms=start,
-    sector_context_as_of_ms=start, max_gap_ms=15000, max_ticks=10)
+    contexts={code: TModelMinuteContext("quotes-v1", start, start) for code in CODES},
+    max_gap_ms=15000, max_ticks=10)
 
 
 def close(runtime, at=START):
@@ -72,7 +75,7 @@ def test_rotation_rejects_invalid_continuity_without_replacing_state(fault):
   elif fault == "generation":
     new["continuity_generation"] = "other"
   elif fault == "context":
-    new["market_context_as_of_ms"] += 1
+    new["contexts"][CODES[0]] = replace(new["contexts"][CODES[0]], market_context_as_of_ms=new["interval_start_ms"] + 1)
   with pytest.raises(ValueError):
     runtime.advance(instrument_codes=CODES, **new)
   assert runtime.latest is before
@@ -111,3 +114,47 @@ def test_empty_batch_manifest_binds_first_publication_time():
   assert first.manifest_hash != later.manifest_hash
   assert first.available_at_ms == START + 60001
   assert close(left) is first
+
+
+def test_contexts_are_per_symbol_frozen_and_recorded_even_without_ticks():
+  settings = config()
+  settings["contexts"][CODES[1]] = TModelMinuteContext("other-capability", START - 1000, START - 5000)
+  runtime = TModelMinuteBatchRuntime(instrument_codes=CODES, **settings)
+  original = dict(settings["contexts"])
+  settings["contexts"][CODES[1]] = TModelMinuteContext("later", START, START)
+  for code in CODES[:2]:
+    feed(runtime, code)
+  batch = close(runtime)
+  assert dict(batch.contexts) == original
+  bars = {bar.instrument_code: bar for bar in batch.complete_bars}
+  assert bars[CODES[1]].sector_context_as_of_ms == START - 5000
+  assert bars[CODES[1]].capability_manifest_version == "other-capability"
+  assert bars[CODES[0]].sector_context_as_of_ms == START
+  assert CODES[2] in dict(batch.contexts) and CODES[2] not in bars
+
+
+@pytest.mark.parametrize("damage", ["missing", "extra", "future", "untyped"])
+def test_bad_context_rotation_keeps_sealed_batch(damage):
+  runtime = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  prior = close(runtime)
+  settings = config(START + 60000)
+  contexts = settings["contexts"]
+  if damage == "missing":
+    contexts.pop(CODES[0])
+  elif damage == "extra":
+    contexts["999999.SH"] = contexts[CODES[0]]
+  elif damage == "future":
+    contexts[CODES[0]] = replace(contexts[CODES[0]], sector_context_as_of_ms=START + 60001)
+  else:
+    contexts[CODES[0]] = {"market_context_as_of_ms": START}
+  with pytest.raises(ValueError, match="T_MODEL_MINUTE_"):
+    runtime.advance(instrument_codes=CODES, **settings)
+  assert runtime.latest is prior
+
+
+def test_empty_batch_hash_binds_context_age():
+  settings = config()
+  first = close(TModelMinuteBatchRuntime(instrument_codes=CODES, **settings))
+  settings["contexts"][CODES[0]] = replace(settings["contexts"][CODES[0]], sector_context_as_of_ms=START - 1)
+  second = close(TModelMinuteBatchRuntime(instrument_codes=CODES, **settings))
+  assert first.outcomes == second.outcomes and first.manifest_hash != second.manifest_hash

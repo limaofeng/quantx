@@ -101,6 +101,7 @@ class TRegistryModelBatchRuntime:
           material = asdict(minute_batch)
           digest = material.pop("manifest_hash")
           outcomes = minute_batch.outcomes
+          contexts = dict(minute_batch.contexts)
           if (
             stable_manifest_hash(material) != digest
             or type(minute_batch.interval_start_ms) is not int
@@ -114,6 +115,9 @@ class TRegistryModelBatchRuntime:
             or not minute_batch.interval_end_ms <= minute_batch.watermark_ms <= minute_batch.available_at_ms
             or tuple(item.instrument_code for item in outcomes) != minute_batch.universe
             or len(set(minute_batch.universe)) != len(minute_batch.universe)
+            or tuple(code for code, _ in minute_batch.contexts) != minute_batch.universe
+            or any(max(context.market_context_as_of_ms, context.sector_context_as_of_ms)
+              > minute_batch.interval_start_ms for context in contexts.values())
             or any((item.interval_start_ms, item.interval_end_ms) != (minute_batch.interval_start_ms, minute_batch.interval_end_ms) for item in outcomes)
             or any((item.status == "COMPLETE") != (item.feature_bar is not None) for item in outcomes)
             or any(item.status not in {"COMPLETE", "UNAVAILABLE"} for item in outcomes)
@@ -122,6 +126,9 @@ class TRegistryModelBatchRuntime:
               or item.feature_bar.interval_start_ms != minute_batch.interval_start_ms
               or item.feature_bar.interval_end_ms != minute_batch.interval_end_ms
               or item.feature_bar.available_at_ms != minute_batch.available_at_ms
+              or item.feature_bar.capability_manifest_version != contexts[item.instrument_code].capability_manifest_version
+              or item.feature_bar.market_context_as_of_ms != contexts[item.instrument_code].market_context_as_of_ms
+              or item.feature_bar.sector_context_as_of_ms != contexts[item.instrument_code].sector_context_as_of_ms
               or (item.feature_bar.stream_id, item.feature_bar.continuity_generation)
               != (minute_batch.stream_id, minute_batch.continuity_generation)
               or (minute_batch.watermark_stream_id, minute_batch.watermark_continuity_generation)

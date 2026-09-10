@@ -8,6 +8,21 @@ from .model_minute_window import TModelMinuteOutcome, TModelMinuteWindow
 
 
 @dataclass(frozen=True)
+class TModelMinuteContext:
+  capability_manifest_version: str
+  market_context_as_of_ms: int
+  sector_context_as_of_ms: int
+
+  def __post_init__(self):
+    if (
+      not isinstance(self.capability_manifest_version, str) or not self.capability_manifest_version.strip()
+      or any(type(value) is not int or value < 0 for value in (
+        self.market_context_as_of_ms, self.sector_context_as_of_ms))
+    ):
+      raise ValueError("T_MODEL_MINUTE_CONTEXT_INVALID")
+
+
+@dataclass(frozen=True)
 class TModelMinuteBatch:
   interval_start_ms: int
   interval_end_ms: int
@@ -19,6 +34,7 @@ class TModelMinuteBatch:
   watermark_continuity_generation: str
   universe: tuple[str, ...]
   outcomes: tuple[TModelMinuteOutcome, ...]
+  contexts: tuple[tuple[str, TModelMinuteContext], ...]
   manifest_hash: str
 
   @property
@@ -27,20 +43,24 @@ class TModelMinuteBatch:
 
 
 class TModelMinuteBatchRuntime:
-  def __init__(self, *, instrument_codes, **window_config):
-    self._windows = self._create_windows(instrument_codes, window_config)
+  def __init__(self, *, instrument_codes, contexts, **window_config):
+    self._windows = self._create_windows(instrument_codes, contexts, window_config)
+    self._contexts = tuple((code, contexts[code]) for code in self._windows)
     self._config = dict(window_config)
     self.latest = None
 
   @staticmethod
-  def _create_windows(instrument_codes, config):
+  def _create_windows(instrument_codes, contexts, config):
     codes = tuple(instrument_codes)
     if (
       not codes or any(not isinstance(code, str) or not code.strip() or code != code.strip().upper() for code in codes)
       or len(set(codes)) != len(codes)
     ):
       raise ValueError("T_MODEL_MINUTE_UNIVERSE_INVALID")
-    return {code: TModelMinuteWindow(instrument_code=code, **config) for code in sorted(codes)}
+    if set(contexts) != set(codes) or any(type(item) is not TModelMinuteContext for item in contexts.values()):
+      raise ValueError("T_MODEL_MINUTE_CONTEXT_SCOPE_INVALID")
+    return {code: TModelMinuteWindow(instrument_code=code, **config, **asdict(contexts[code]))
+      for code in sorted(codes)}
 
   @property
   def buffered_tick_count(self):
@@ -71,12 +91,13 @@ class TModelMinuteBatchRuntime:
       stream_id=self._config["stream_id"], continuity_generation=self._config["continuity_generation"],
       watermark_ms=watermark_ms, available_at_ms=available_at_ms,
       watermark_stream_id=stream_id, watermark_continuity_generation=continuity_generation,
-      universe=tuple(self._windows), outcomes=outcomes)
-    digest = stable_manifest_hash(identity | {"outcomes": [asdict(item) for item in outcomes]})
+      universe=tuple(self._windows), outcomes=outcomes, contexts=self._contexts)
+    digest = stable_manifest_hash(identity | {"outcomes": [asdict(item) for item in outcomes],
+      "contexts": [(code, asdict(context)) for code, context in self._contexts]})
     self.latest = TModelMinuteBatch(**identity, manifest_hash=digest)
     return self.latest
 
-  def advance(self, *, instrument_codes, **window_config):
+  def advance(self, *, instrument_codes, contexts, **window_config):
     """Rotate only after a sealed contiguous minute. Gaps/reset need a new runtime.
 
     The caller supplies fresh PIT context and explicit Universe for the next
@@ -92,5 +113,6 @@ class TModelMinuteBatchRuntime:
       or window_config.get("continuity_generation") != self.latest.continuity_generation
     ):
       raise ValueError("T_MODEL_MINUTE_RESET_REQUIRED")
-    windows = self._create_windows(instrument_codes, window_config)
+    windows = self._create_windows(instrument_codes, contexts, window_config)
+    self._contexts = tuple((code, contexts[code]) for code in windows)
     self._windows, self._config, self.latest = windows, dict(window_config), None
