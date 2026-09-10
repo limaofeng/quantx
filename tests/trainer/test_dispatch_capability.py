@@ -8,14 +8,14 @@ from quantx_trainer import training_flow as training
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("blocked", [None, "HOST_MEMORY_RESERVE", "stale"])
+@pytest.mark.parametrize("blocked", [None, "HOST_MEMORY_RESERVE", "stale", "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"])
 async def test_dispatch_uses_certificate_without_gpu_probe(monkeypatch, blocked):
   certificate = {"cpu_available": True, "requirement_hash": "a" * 64}
   run = SimpleNamespace(run_id="run", spec_id="spec")
   spec = SimpleNamespace(dataset_version="dataset", requested_backend="CPU")
   repo = SimpleNamespace(
     get_execution_capability=AsyncMock(
-      return_value={} if blocked == "stale" else certificate
+      return_value={} if blocked in {"stale", "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"} else certificate
     ),
     claim_next_queued=AsyncMock(return_value=run),
     get_spec=AsyncMock(return_value=spec),
@@ -39,7 +39,9 @@ async def test_dispatch_uses_certificate_without_gpu_probe(monkeypatch, blocked)
     training, "recover_lost_training_runs", AsyncMock(return_value=[])
   )
   monkeypatch.setattr(training, "_probe_capability", forbidden_probe)
-  monkeypatch.setattr(training, "_host_admission_reason", lambda: blocked)
+  monkeypatch.setattr(
+    training, "_host_admission_reason", lambda: None if blocked == "stale" else blocked
+  )
   monkeypatch.setattr(training, "_run_claimed_job", execute)
   result = await training.stock_selection_training_dispatch_flow.fn(
     config_path="test.toml"

@@ -1009,12 +1009,12 @@ async def stock_selection_training_dispatch_flow(
     timestamp = now or _now()
     repository = StockSelectionTrainingRepository(db)
     lost = await recover_lost_training_runs(repository, now=timestamp)
-    heartbeat_details = await repository.get_execution_capability(now=now or _now())
-    if heartbeat_details.get("cpu_available") is not True:
-      return observation.record({"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"})
     admission_reason = await asyncio.to_thread(_host_admission_reason)
     if admission_reason:
       return observation.record({"status": "QUEUED", "reason": admission_reason})
+    heartbeat_details = await repository.get_execution_capability(now=now or _now())
+    if heartbeat_details.get("cpu_available") is not True:
+      return observation.record({"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"})
     flow_id = (
       prefect_flow_run_id
       or os.environ.get("PREFECT_FLOW_RUN_ID", "")
@@ -1075,6 +1075,9 @@ async def stock_selection_training_capability_flow(config_path: str) -> dict[str
   """Only periodic capability writer; never claims or waits for training."""
   config_digest = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
   async with training_session(config_path) as db:
+    reason = await asyncio.to_thread(_host_admission_reason)
+    if reason:
+      return {"status": "BLOCKED", "reason": reason}
     probe = await asyncio.to_thread(_probe_capability)
     if probe.get("probe_failed") or not isinstance(probe.get("cpu_available"), bool):
       raise RuntimeError("Research 能力探测未返回有效结果；保留上次成功心跳")

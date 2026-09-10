@@ -79,6 +79,7 @@ async def test_capability_snapshot_only_follows_successful_database_write(
   from quantx_infrastructure import training_activity
   from quantx_trainer import training_flow as module
 
+  monkeypatch.setattr(module, "_host_admission_reason", lambda: None)
   monkeypatch.setattr(
     training_activity,
     "read_training_activity",
@@ -174,3 +175,27 @@ def test_activity_free_text_is_redacted_and_progress_not_coerced(tmp_path):
       {"tasks": [row], "truncated": False},
       **options,
     )
+
+
+@pytest.mark.asyncio
+async def test_protected_window_skips_probe_without_fabricating_capability(tmp_path, monkeypatch):
+  from unittest.mock import Mock
+  from quantx_trainer import training_flow as module
+
+  config = tmp_path / "trainer.toml"
+  config.write_text("fixture")
+
+  @asynccontextmanager
+  async def session(path):
+    yield object()
+
+  probe = Mock(side_effect=AssertionError("protected window must not probe GPU"))
+  repository = Mock(side_effect=AssertionError("must not write capability"))
+  monkeypatch.setattr(module, "training_session", session)
+  monkeypatch.setattr(module, "_host_admission_reason", lambda: "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW")
+  monkeypatch.setattr(module, "_probe_capability", probe)
+  monkeypatch.setattr(module, "StockSelectionTrainingRepository", repository)
+  result = await module.stock_selection_training_capability_flow.fn(str(config))
+  assert result == {"status": "BLOCKED", "reason": "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"}
+  probe.assert_not_called()
+  repository.assert_not_called()
