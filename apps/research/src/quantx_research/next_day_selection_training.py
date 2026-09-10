@@ -1035,20 +1035,12 @@ def _redact_config_artifact(value: Any, *, key: str = "") -> Any:
   return value
 
 
-def _load_certified_panel(dataset_directory: str | Path) -> tuple[pd.DataFrame, dict[str, Any]]:
-  from quantx_research.next_day_selection_dataset import load_certified_dataset_manifest
+def _load_certified_panel(
+  dataset_directory: str | Path, config: NextDaySelectionConfig
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+  from quantx_research.next_day_selection_dataset import load_certified_dataset_panel
 
-  manifest = load_certified_dataset_manifest(dataset_directory)
-  root = Path(dataset_directory).resolve(strict=True)
-  panel = pd.read_parquet(root / "training-panel.parquet")
-  required = {"event_date", "stock_code", "label", "month"}
-  if required - set(panel):
-    raise ValueError(f"认证训练面板缺少字段: {sorted(required - set(panel))}")
-  computed = _data_fingerprint(panel)
-  expected = manifest.get("data_fingerprint")
-  if expected is not None and expected != computed:
-    raise ValueError("认证数据集面板内容哈希不匹配")
-  return panel, manifest
+  return load_certified_dataset_panel(dataset_directory, config)
 
 
 def _project_certified_panel(
@@ -1765,7 +1757,7 @@ async def execute_next_day_selection_run(
     source_evidence = _training_source_evidence()
     write_json(run_dir / "source-evidence.json", source_evidence)
     config = _config_from_spec(spec_payload)
-    panel, dataset_manifest = _load_certified_panel(dataset_directory)
+    panel, dataset_manifest = _load_certified_panel(dataset_directory, config)
     panel = _project_certified_panel(panel, dataset_manifest, config)
     requested, backend = _locked_backend(spec_payload, config)
     telemetry_config = config

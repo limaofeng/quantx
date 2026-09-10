@@ -524,7 +524,20 @@ async def certify_next_day_selection_dataset(
 
 
 def load_certified_dataset_manifest(directory: str | Path) -> dict[str, Any]:
-  """Load and strictly verify an immutable dataset directory."""
+  """Verify all files and rows without materializing the full feature matrix."""
+  return _load_certified_dataset(directory)[0]
+
+
+def load_certified_dataset_panel(
+  directory: str | Path, config: NextDaySelectionConfig
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+  """Verify the complete source and retain date/symbol rows from that same read."""
+  manifest, panel = _load_certified_dataset(directory, config=config)
+  return panel, manifest
+
+
+def _load_certified_dataset(directory: str | Path, *, config=None):
+  """Shared immutable file checks and full-row verification."""
 
   root = Path(directory)
   _reject_symlink_components(root)
@@ -542,6 +555,15 @@ def load_certified_dataset_manifest(directory: str | Path) -> dict[str, Any]:
     for path in (manifest_path, panel_path, quality_path)
   ):
     raise ValueError("认证数据集缺少安全 manifest、面板或质量文件")
+  def identities():
+    return [
+      tuple(getattr(value, name) for name in (
+        "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink"
+      ))
+      for value in (path.stat() for path in (manifest_path, panel_path, quality_path))
+    ]
+
+  original_files = identities()
   try:
     manifest = json.loads(
       manifest_path.read_text(encoding="utf-8"),
@@ -656,50 +678,12 @@ def load_certified_dataset_manifest(directory: str | Path) -> dict[str, Any]:
     value = manifest.get(field)
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
       raise ValueError(f"认证 manifest {field} 必须是小写 SHA-256")
-  # Verify immutable date/count evidence against the actual Parquet payload;
-  # a caller cannot widen/narrow a request by editing only the manifest.
+  from quantx_research.certified_panel_reader import read_panel
+
   try:
-    panel = pd.read_parquet(panel_path)
-  except (OSError, ValueError, KeyError, ImportError) as exc:
+    panel = read_panel(panel_path, manifest, config=config)
+  except (OSError, KeyError, ImportError) as exc:
     raise ValueError("认证训练面板 schema 无法读取") from exc
-  if panel.empty:
-    raise ValueError("认证训练面板不能为空")
-  required_panel_fields = {
-    "event_date",
-    "target_date",
-    "stock_code",
-    "label",
-    "next_open_to_close_return",
-    "month",
-    "open_date",
-    "valid_history",
-  }
-  if required_panel_fields - set(panel):
-    raise ValueError("认证训练面板缺少不可变训练字段")
-  actual_dates = pd.to_datetime(panel["event_date"], errors="coerce").dt.normalize()
-  if actual_dates.isna().any():
-    raise ValueError("认证训练面板含非法 event_date")
-  if str(actual_dates.min().date()) != manifest["date_start"] or str(actual_dates.max().date()) != manifest["date_end"]:
-    raise ValueError("认证日期证据与训练面板实际日期不匹配")
-  if int(quality["sample_count"]) != len(panel) or int(quality["stock_count"]) != panel["stock_code"].nunique() or int(quality["trading_day_count"]) != actual_dates.nunique():
-    raise ValueError("认证质量计数与训练面板实际计数不匹配")
-  actual_codes = set(panel["stock_code"].astype(str).str.upper())
-  if any(not _CODE_RE.fullmatch(code) for code in actual_codes):
-    raise ValueError("认证训练面板含非规范股票代码")
-  if universe["kind"] == "ORDINARY_A_SHARE" and any(
-    not _ORDINARY_A_SHARE_RE.fullmatch(code) for code in actual_codes
-  ):
-    raise ValueError("普通 A 股认证训练面板含非普通 A 股代码")
-  if universe["stock_codes"] is not None:
-    if not actual_codes <= set(universe["stock_codes"]):
-      raise ValueError("认证训练面板含 universe_spec 之外的股票")
-  try:
-    if _data_fingerprint(panel) != manifest["data_fingerprint"]:
-      raise ValueError("认证数据集面板内容哈希不匹配")
-  except (KeyError, TypeError, ValueError) as exc:
-    if "内容哈希不匹配" in str(exc):
-      raise
-    raise ValueError("认证训练面板缺少指纹字段") from exc
   # Ensure the manifest's evidence hash is finite and stable.  Remove the
   # self-hash field before recomputing the preimage hash.
   expected_manifest_hash = manifest.get("manifest_sha256")
@@ -709,12 +693,15 @@ def load_certified_dataset_manifest(directory: str | Path) -> dict[str, Any]:
   payload.pop("manifest_sha256", None)
   if expected_manifest_hash != fingerprint(payload):
     raise ValueError("认证 manifest 证据哈希不匹配")
-  return manifest
+  if identities() != original_files:
+    raise ValueError("认证数据集在读取期间发生变化")
+  return manifest, panel
 
 
 __all__ = [
   "certify_next_day_selection_dataset",
   "load_certified_dataset_manifest",
+  "load_certified_dataset_panel",
   "resolve_dataset_directory",
   "safe_dataset_version",
 ]
