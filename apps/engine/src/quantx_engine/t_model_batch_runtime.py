@@ -56,6 +56,8 @@ class TModelBatchRuntime:
       max_age_ms,
       inference_budget_ms,
     )
+    self._bound_config = (mode, policy_hash, max_age_ms, inference_budget_ms)
+    self._bound_artifact, self._bound_authorization = artifact, authorization
     self.revision = 0
     self.latest = TModelBatchResult(0, "", mode == "ACTIVE", "COLD", (), (), ())
     self._cache_key = None
@@ -68,7 +70,7 @@ class TModelBatchRuntime:
     model_as_of_ms: int,
     rule_order: tuple[str, ...],
   ) -> TModelBatchResult:
-    if self.mode == "RULE_ONLY":
+    if self._bound_config[0] == "RULE_ONLY":
       self._cache_key = None
       self._cached_artifact = None
       self.latest = TModelBatchResult(
@@ -76,10 +78,23 @@ class TModelBatchRuntime:
       )
       return self.latest
     started = perf_counter_ns()
+    frozen_config = self._bound_config
     try:
       artifact, auth = self.artifact, self.authorization
       if artifact is None or auth is None:
         raise ValueError("T_MODEL_BINDING_MISSING")
+      def validate_before_publish():
+        # Inference hooks must never publish under a different execution binding.
+        # Registry authority still needs an authoritative external reader.
+        if (
+          self.artifact is not artifact or self.authorization != auth
+          or frozen_config != (self.mode, self.policy_hash, self.max_age_ms, self.budget_ms)
+        ):
+          raise ValueError("T_MODEL_BINDING_CHANGED_DURING_INFERENCE")
+
+      if artifact is not self._bound_artifact or auth != self._bound_authorization:
+        raise ValueError("T_MODEL_FROZEN_BINDING_CHANGED")
+      validate_before_publish()
       allowed_gates = (
         {"SHADOW_ELIGIBLE", "ACTIVE_ELIGIBLE"}
         if self.mode == "SHADOW"
@@ -117,6 +132,7 @@ class TModelBatchRuntime:
       if cache_key == self._cache_key and artifact is self._cached_artifact:
         if (perf_counter_ns() - started) / 1_000_000 > self.budget_ms:
           raise ValueError("T_MODEL_INFERENCE_BUDGET_EXCEEDED")
+        validate_before_publish()
         self.latest = replace(self.latest, execution_rule_order=rule_order)
         return self.latest
       scores = []
@@ -183,6 +199,7 @@ class TModelBatchRuntime:
         tuple(scores) if self.mode == "ACTIVE" else (),
         tuple(scores) if self.mode == "SHADOW" else (),
       )
+      validate_before_publish()
       self.revision, self.latest = revision, result
       self._cache_key, self._cached_artifact = cache_key, artifact
     except Exception:
@@ -191,7 +208,7 @@ class TModelBatchRuntime:
       self.latest = TModelBatchResult(
         self.revision,
         "",
-        self.mode == "ACTIVE",
+        frozen_config[0] == "ACTIVE",
         "MODEL_BATCH_UNAVAILABLE",
         rule_order,
         (),

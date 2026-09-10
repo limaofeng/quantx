@@ -605,6 +605,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   **39 项批量评分/安全制品验证通过**，Ruff/差异检查通过，证据 `p8-model-batch-cache-final.log`。
   此为组件内精确重放，不是跨时点评分复用；尚不证明实际 registry 撤销广播、supervisor
   完整分钟评分接线或 SHADOW/ACTIVE 正式发布通过，未训练或比较正式模型。
+  模型批量 runtime 进一步冻结启动配置、制品对象及授权：评分前、缓存返回前和新结果发布前
+  复核原绑定；推理期间 revision/阶段/制品/模式/策略/预算变化不发布新 revision，清除旧分数，
+  后续调用也不能接受热替换。故障语义使用原冻结模式，ACTIVE 不因模式篡改降级，SHADOW
+  不因模式篡改阻断规则入场。**53 项批量评分与安全制品测试通过**，Ruff/差异检查通过，
+  证据 `p8-model-publish-binding.log`。该校验保护组件绑定，不是持久化 registry 撤销证明；
+  独立 registry、snapshot 与创建 pending/outbox 前的当前授权复核仍待实现。
+
 - P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
   与同事务审计；重试及末尾异常整体回滚已有隔离验证。旧 pending/outbox 不迁移 owner。
   审批事件使用合成夹具，真实 P6 准入审计及人工发布入口仍待接入；内部消息箱接线见后续检查点。

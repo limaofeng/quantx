@@ -134,7 +134,11 @@ def test_active_failure_blocks_only_model_entry_result(tmp_path, monkeypatch, da
   if damage == "stale":
     at += 120001
   if damage == "ood":
-    model.artifact = replace(model.artifact, feature_bounds=((0, 0),) * 6)
+    model = TModelBatchRuntime(
+      mode="ACTIVE", artifact=replace(model.artifact, feature_bounds=((0, 0),) * 6),
+      authorization=model.authorization, policy_hash=model.policy_hash,
+      max_age_ms=model.max_age_ms, inference_budget_ms=model.budget_ms,
+    )
   if damage == "latency":
     times = iter((0, 100_000_000_000))
     monkeypatch.setattr(
@@ -172,3 +176,45 @@ def test_unexpected_scorer_failure_stays_inside_model_boundary(
   )
   assert result.entry_blocked == (mode == "ACTIVE")
   assert not result.active_scores and result.revision == 0
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+@pytest.mark.parametrize("change", ["revision", "revoke", "artifact", "mode", "switch_mode", "policy", "budget"])
+def test_inflight_binding_change_never_publishes_old_batch(tmp_path, monkeypatch, mode, change):
+  model, feature = runtime(tmp_path, mode), bar()
+  at = feature.available_at_ms
+  first = model.evaluate((feature,), model_as_of_ms=at, rule_order=("b", "a"))
+  assert first.revision == 1 and first.reason == "VALID"
+  original = type(model.artifact).score
+
+  def score(artifact, feature, **kwargs):
+    result = original(artifact, feature, **kwargs)
+    if change == "revision":
+      model.authorization = replace(model.authorization, registry_authorization_revision=2)
+    elif change == "revoke":
+      model.authorization = replace(model.authorization, registry_stage="SUSPENDED")
+    elif change == "artifact":
+      model.artifact = replace(artifact, model_version="replaced")
+    elif change == "mode":
+      model.mode = "RULE_ONLY"
+    elif change == "switch_mode":
+      model.mode = "ACTIVE" if mode == "SHADOW" else "SHADOW"
+    elif change == "policy":
+      model.policy_hash = "b" * 64
+    else:
+      model.budget_ms += 1
+    return result
+
+  monkeypatch.setattr(type(model.artifact), "score", score)
+  result = model.evaluate((feature,), model_as_of_ms=at + 1, rule_order=("a", "b"))
+  assert result.revision == 1 and result.reason == "MODEL_BATCH_UNAVAILABLE"
+  assert result.entry_blocked == (mode == "ACTIVE")
+  assert result.execution_rule_order == ("a", "b")
+  assert not result.active_scores and not result.shadow_scores and not result.manifest_hash
+  assert model._cache_key is None and model._cached_artifact is None
+
+  # A following batch cannot silently adopt a new mode, artifact or revision.
+  again = model.evaluate((feature,), model_as_of_ms=at + 2, rule_order=("a", "b"))
+  assert again.reason == "MODEL_BATCH_UNAVAILABLE" and again.revision == 1
+  assert again.entry_blocked == (mode == "ACTIVE")
+  assert not again.active_scores and not again.shadow_scores
