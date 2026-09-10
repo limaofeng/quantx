@@ -2,7 +2,8 @@
 
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as day_time
 from zoneinfo import ZoneInfo
 
 from quantx_contracts.daily_snapshot_read import DailySnapshot, DailySnapshotResult
@@ -42,19 +43,24 @@ def read_latest_daily(connection, request, *, published_versions=None):
       return DailySnapshotResult(request=request, records=[])
     measurement = "kline_1d_versions"
     columns += ", storage_version"
-    versions = {
-      f"version_{i}": version for i, version in enumerate(published_versions.values())
-    }
-    parameters.update(versions)
-    version_filter = (
-      f"AND storage_version IN ({', '.join('$' + name for name in versions)}) "
-    )
+    filters = []
+    for i, ((code, day), version) in enumerate(published_versions.items()):
+      parameters[f"version_{i}"] = version
+      start = datetime.combine(day, day_time(), ZoneInfo("Asia/Shanghai")).astimezone(
+        timezone.utc
+      )
+      end = start + timedelta(days=1)
+      filters.append(
+        f"(stock_code = $code_{request.instruments.index(code)} AND storage_version = $version_{i} "
+        f"AND time >= '{start.isoformat()}' AND time < '{end.isoformat()}')"
+      )
+    version_filter = "AND (" + " OR ".join(filters) + ") "
   sql = (
     f"SELECT {columns} FROM {measurement} WHERE period = '1d' "
     f"AND stock_code IN ({codes}) "
-    f"{version_filter}"
     f"AND time >= '{request.start.astimezone(timezone.utc).isoformat()}' "
     f"AND time <= '{request.end.astimezone(timezone.utc).isoformat()}' "
+    f"{version_filter}"
     f"ORDER BY stock_code ASC, time ASC LIMIT {row_limit + 1}"
   )
   connection = connection or get_timeseries_connection()

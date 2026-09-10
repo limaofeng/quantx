@@ -22,8 +22,6 @@ class NativeBarPublication:
 
 
 async def resolve_native_bar_version(db, request):
-  from .local_history_reader import HistoryReadInvalid
-
   rows = (
     (
       await db.execute(
@@ -62,6 +60,12 @@ async def resolve_native_bar_version(db, request):
     .mappings()
     .all()
   )
+  return _publication_from_rows(rows, request)
+
+
+def _publication_from_rows(rows, request):
+  from .local_history_reader import HistoryReadInvalid
+
   if not rows:
     return None
   if (
@@ -114,3 +118,74 @@ async def resolve_native_bar_version(db, request):
     proof["fields_verified"],
     row["created_at"],
   )
+
+
+async def resolve_native_daily_versions(db, request):
+  from zoneinfo import ZoneInfo
+
+  from quantx_contracts.market_data_service import HistoryRead
+
+  from .local_history_reader import HistoryReadInvalid
+
+  start = request.start.astimezone(ZoneInfo("Asia/Shanghai")).date()
+  end = request.end.astimezone(ZoneInfo("Asia/Shanghai")).date()
+  limit = len(request.instruments) * 62 * 2
+  result = await db.stream(
+    text("""
+    WITH candidates AS (
+      SELECT r.request_id,r.created_at,r.request_payload,
+        r.ingestion_result->>'native_storage_version' AS version,
+        r.ingestion_result->'content_verification' AS content,
+        r.ingestion_result->>'records_verified' AS records,
+        r.ingestion_result->'persistence_verification'->>'records_verified' AS persisted,
+        r.ingestion_result->'persistence_verification'->>'status' AS status,
+        c->>'instrument_code' AS instrument,replace(c->>'trading_date','-','') AS day
+      FROM market_data_request r CROSS JOIN LATERAL jsonb_array_elements(CASE
+        WHEN jsonb_typeof(r.ingestion_result::jsonb->'day_coverage')='array'
+        THEN r.ingestion_result::jsonb->'day_coverage' ELSE '[]'::jsonb END) c
+      WHERE r.status='COMPLETED' AND r.request_payload->>'operation'='bars'
+        AND r.ingestion_result->>'native_storage_version' IS NOT NULL
+        AND c->>'instrument_code'=ANY(:codes) AND c->>'period'='1d'
+        AND c->>'point_count' ~ '^[1-9][0-9]*$'
+        AND replace(c->>'trading_date','-','') BETWEEN :start AND :end
+        AND r.request_payload->>'start_time' ~ '^[0-9]{8}$'
+        AND r.request_payload->>'end_time' ~ '^[0-9]{8}$'
+        AND r.request_payload->>'start_time'<=replace(c->>'trading_date','-','')
+        AND r.request_payload->>'end_time'>=replace(c->>'trading_date','-','')
+        AND (r.request_payload->'periods')::jsonb @> '["1d"]'::jsonb
+        AND (r.request_payload->'stock_list')::jsonb @> jsonb_build_array(c->>'instrument_code')
+    ), ranked AS (
+      SELECT *,row_number() OVER(PARTITION BY instrument,day ORDER BY created_at DESC,request_id DESC) AS ordinal
+      FROM candidates
+    ) SELECT * FROM ranked WHERE ordinal<=2 ORDER BY instrument,day,ordinal LIMIT :limit
+  """),
+    {
+      "codes": request.instruments,
+      "start": start.strftime("%Y%m%d"),
+      "end": end.strftime("%Y%m%d"),
+      "limit": limit + 1,
+    },
+    execution_options={"yield_per": 1, "max_row_buffer": 1},
+  )
+  rows, bytes_seen = [], 0
+  try:
+    async for row in result.mappings():
+      bytes_seen += len(json.dumps(dict(row), default=str).encode())
+      if len(rows) >= limit or bytes_seen > 4 * 1024 * 1024:
+        raise HistoryReadInvalid("NATIVE_VERSION_DIRECTORY_CAPACITY")
+      rows.append(row)
+  finally:
+    await result.close()
+  partitions = {}
+  for row in rows:
+    try:
+      day = datetime.strptime(row["day"], "%Y%m%d").date()
+    except ValueError:
+      raise HistoryReadInvalid("NATIVE_VERSION_PROOF_INVALID") from None
+    partitions.setdefault((row["instrument"], day), []).append(row)
+  return {
+    key: _publication_from_rows(
+      candidates, HistoryRead(instrument=key[0], period="1d", trading_date=key[1])
+    ).storage_version
+    for key, candidates in partitions.items()
+  }

@@ -86,6 +86,20 @@ class LocalHistoryReader:
   async def read_latest_daily(self, request):
     from .local_daily_snapshot_reader import read_latest_daily
 
+    if self.session_factory is not None:
+      from .native_bar_publication import resolve_native_daily_versions
+
+      if self._slot.locked():
+        raise HistoryReadBusy("local history query capacity exhausted")
+      async with self._slot:
+        async with asyncio.timeout(3), self.session_factory() as db:
+          versions = await resolve_native_daily_versions(db, request)
+        return await self._read_thread(
+          lambda value: read_latest_daily(
+            self.connection, value, published_versions=versions
+          ),
+          request,
+        )
     return await self._run_read(
       lambda value: read_latest_daily(self.connection, value), request
     )

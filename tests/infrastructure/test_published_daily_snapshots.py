@@ -63,12 +63,24 @@ def test_empty_publication_does_not_query_unversioned_storage():
 class SnapshotStorage(VersionStorage):
   def query(self, **kwargs):
     sql, params = kwargs["query"], kwargs["query_parameters"]
-    if "storage_version IN" not in sql:
+    if "storage_version = $version_" not in sql:
       return super().query(**kwargs)
     self.queries.append(kwargs)
     assert "FROM kline_1d_versions" in sql
     codes = {value for name, value in params.items() if name.startswith("code_")}
     versions = {value for name, value in params.items() if name.startswith("version_")}
+    selected = [
+      (
+        params[f"code_{code}"],
+        params[f"version_{version}"],
+        datetime.fromisoformat(start),
+        datetime.fromisoformat(end),
+      )
+      for code, version, start, end in re.findall(
+        r"stock_code = \$code_(\d+) AND storage_version = \$version_(\d+) AND time >= '([^']+)' AND time < '([^']+)'",
+        sql,
+      )
+    ]
     start = datetime.fromisoformat(re.search(r"time >= '([^']+)'", sql)[1])
     end = datetime.fromisoformat(re.search(r"time <= '([^']+)'", sql)[1])
     columns = [
@@ -81,6 +93,12 @@ class SnapshotStorage(VersionStorage):
         if table == "kline_1d_versions"
         and row["stock_code"] in codes
         and row["storage_version"] in versions
+        and any(
+          row["stock_code"] == code
+          and row["storage_version"] == version
+          and start <= row["time"] < end
+          for code, version, start, end in selected
+        )
         and start <= row["time"] <= end
       ],
       key=lambda row: (row["stock_code"], row["time"]),
