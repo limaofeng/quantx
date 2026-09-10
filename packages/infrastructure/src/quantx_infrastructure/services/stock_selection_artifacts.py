@@ -1211,8 +1211,8 @@ def load_selection_artifact(
     "coordinate_hash": coordinate_hash,
     "config_hash": config_hash,
   }
-  for field, manifest_hash in hash_values.items():
-    if metrics.get(field) != manifest_hash:
+  for field, expected_hash in hash_values.items():
+    if metrics.get(field) != expected_hash:
       raise SelectionArtifactError(f"模型 {field} 在清单与评估间不一致")
   if metrics.get("gates") != manifest.get("gates"):
     raise SelectionArtifactError("模型门禁在清单与评估间不一致")

@@ -439,6 +439,7 @@ def test_selection_artifact_loader_projects_only_safe_evidence(tmp_path: Path) -
   directory = _valid_artifact(tmp_path / "run")
 
   bundle = load_selection_artifact(directory)
+  assert bundle.manifest_sha256 == file_sha256(directory / "manifest.json")
 
   assert bundle.metrics["validation"] == {
     "fold_count": 12,
