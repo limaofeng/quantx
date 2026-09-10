@@ -256,7 +256,7 @@ class TRegistryModelBatchRuntime:
       if artifact is None or auth is None:
         raise ValueError("T_MODEL_BINDING_MISSING")
       async with self._sessions() as db, db.begin():
-        current = await TModelRegistryRepository(db).authorize(
+        current = await TModelRegistryRepository(db).read_snapshot_authorization(
           model_id=artifact.model_id, model_version=artifact.model_version,
           expected_revision=auth.registry_authorization_revision, mode=mode,
           artifact_sha256=auth.artifact_sha256,

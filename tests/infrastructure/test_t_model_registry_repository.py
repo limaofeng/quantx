@@ -202,3 +202,39 @@ def test_actual_migration_matches_models_and_reverses():
   assert "CREATE UNIQUE INDEX uq_t_model_one_active" in sql
   assert "WHERE registry_stage = 'ACTIVE'" in sql
   assert "REFERENCES t_model_versions (model_id, model_version)" in sql
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+async def test_observation_uses_unlocked_fresh_sql_but_write_authority_keeps_lock(sessions, mode):
+  from sqlalchemy import event
+  from sqlalchemy.dialects import postgresql
+
+  async with sessions() as db, db.begin():
+    repo = TModelRegistryRepository(db)
+    await repo.append_candidate(**registration())
+    await stage(repo, "SHADOW", 1)
+    revision = 2
+    if mode == "ACTIVE":
+      await stage(repo, "ACTIVE", revision)
+      revision += 1
+  async with sessions() as db, db.begin():
+    repo = TModelRegistryRepository(db)
+    identity = dict(model_id="t-model", model_version="v1", expected_revision=revision,
+      mode=mode, artifact_sha256="a" * 64, policy_compatibility_hash="b" * 64)
+    statements = []
+    def capture(state):
+      statements.append(str(state.statement.compile(dialect=postgresql.dialect())))
+    event.listen(db.sync_session, "do_orm_execute", capture)
+    try:
+      await repo.authorize(**identity)
+      assert "FOR UPDATE" in statements[0]
+      statements.clear()
+      await repo.read_snapshot_authorization(**identity)
+      assert statements and all("FOR UPDATE" not in sql for sql in statements)
+      # A fresh SELECT is required even with the identity already in the session.
+      assert "t_model_version" in statements[0]
+      await stage(repo, "SUSPENDED", revision)
+      with pytest.raises(TModelRegistryConflict, match="AUTHORIZATION_REVOKED"):
+        await repo.read_snapshot_authorization(**identity)
+    finally:
+      event.remove(db.sync_session, "do_orm_execute", capture)

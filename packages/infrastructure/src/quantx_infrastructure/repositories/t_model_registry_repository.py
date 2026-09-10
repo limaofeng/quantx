@@ -110,8 +110,23 @@ class TModelRegistryRepository:
 
   async def authorize(self, *, model_id, model_version, expected_revision, mode,
     artifact_sha256, policy_compatibility_hash):
+    """Hold current authorization through the caller's write transaction."""
+    return await self._check_authorization(model_id=model_id, model_version=model_version,
+      expected_revision=expected_revision, mode=mode, artifact_sha256=artifact_sha256,
+      policy_compatibility_hash=policy_compatibility_hash, for_update=True)
+
+  async def read_snapshot_authorization(self, **identity):
+    """Read committed registration for an observation, without taking a row lock.
+
+    This grants no order authority. Pending/outbox writes must use authorize in
+    their own transaction, even if the observation was authorized earlier.
+    """
+    return await self._check_authorization(**identity, for_update=False)
+
+  async def _check_authorization(self, *, model_id, model_version, expected_revision, mode,
+    artifact_sha256, policy_compatibility_hash, for_update):
     record = await self.db.get(TModelVersionRecord, (model_id, model_version),
-      populate_existing=True, with_for_update=True)
+      populate_existing=True, with_for_update=True if for_update else None)
     if (
       mode not in {"SHADOW", "ACTIVE"} or type(expected_revision) is not int
       or record is None or record.registry_stage != mode
@@ -122,8 +137,6 @@ class TModelRegistryRepository:
     ):
       raise TModelRegistryConflict("T_MODEL_AUTHORIZATION_REVOKED")
     self._verify_registration(record)
-    # The row lock lasts through the caller's transaction; a revoke cannot race
-    # creation of a pending intent/outbox in that same transaction.
     # Re-read through SQL rather than returning a cached registry identity.
     active = await self.db.scalars(select(TModelVersionRecord).where(TModelVersionRecord.registry_stage == "ACTIVE"))
     if mode == "ACTIVE" and [(item.model_id, item.model_version) for item in active] != [(model_id, model_version)]:

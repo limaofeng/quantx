@@ -270,7 +270,7 @@ async def test_snapshot_does_not_adopt_batch_published_during_registry_read(sess
   feature = bar()
   first = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=())
   entered, release = asyncio.Event(), asyncio.Event()
-  original = TModelRegistryRepository.authorize
+  original = TModelRegistryRepository.read_snapshot_authorization
 
   async def blocked(repo, **kwargs):
     if asyncio.current_task().get_name() == "snapshot-read":
@@ -278,7 +278,7 @@ async def test_snapshot_does_not_adopt_batch_published_during_registry_read(sess
       await release.wait()
     return await original(repo, **kwargs)
 
-  monkeypatch.setattr(TModelRegistryRepository, "authorize", blocked)
+  monkeypatch.setattr(TModelRegistryRepository, "read_snapshot_authorization", blocked)
   pending = asyncio.create_task(scorer.freeze_for_snapshot(
     as_of_ms=feature.available_at_ms + 10, instrument_codes=(feature.instrument_code,), rule_order=(),
   ), name="snapshot-read")
@@ -572,3 +572,32 @@ async def test_busy_worker_still_records_newer_minute_input_fence(sessions, tmp_
   assert (await scorer.evaluate_minute(older, rule_order=())).reason == "MODEL_BATCH_UNAVAILABLE"
   scorer._clock_ms = lambda: newer.available_at_ms + 1
   assert (await scorer.evaluate_minute(newer, rule_order=())).reason == "VALID"
+
+
+async def test_snapshot_reads_previous_batch_while_cpu_is_running(sessions, tmp_path, monkeypatch):
+  import threading
+
+  model, scorer = await registered(sessions, tmp_path, "SHADOW")
+  feature = bar()
+  first = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=())
+  entered = asyncio.Event()
+  release = threading.Event()
+  loop = asyncio.get_running_loop()
+  original = type(model.artifact).score
+  def slow(artifact, value, **kwargs):
+    loop.call_soon_threadsafe(entered.set)
+    assert release.wait(5)
+    return original(artifact, value, **kwargs)
+  monkeypatch.setattr(type(model.artifact), "score", slow)
+  pending = asyncio.create_task(scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms + 1, rule_order=()))
+  try:
+    await asyncio.wait_for(entered.wait(), 2)
+    frozen = await asyncio.wait_for(scorer.snapshot_view(as_of_ms=feature.available_at_ms + 10,
+      instrument_codes=(feature.instrument_code,), rule_order=()), 2)
+    assert frozen.status == "VALID" and frozen.revision == first.revision
+    assert not pending.done() and not release.is_set()
+  finally:
+    release.set()
+    await pending
+  assert scorer.latest.revision == first.revision + 1
+  assert frozen.revision == first.revision

@@ -775,6 +775,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   迟到结果隔离和忙期间新分钟防回退。Ruff/差异检查通过，证据
   `p8-cpu-task-isolation.log`、`p8-cpu-task-fence-final.log`。该验证不是生产吞吐或
   调度验收；实际分钟调度/PIT 来源仍待接入，模型发布与 LIVE 开关保持原限制。
+  模型观察快照改用 read_snapshot_authorization：共享原登记身份/阶段/revision/
+  制品/策略/证据校验，但使用 populate_existing 的无行锁查询，避免排队等待 CPU 推理
+  事务持有的登记行锁。authorize 仍加 FOR UPDATE，观察结果不授予 pending/outbox 写权。
+  **80 项登记/评分/加载/PAPER 预加载回归通过**，含 CPU 阻塞时仍读取上一完整批次、
+  查询期间新批次发布不污染旧视图、撤权后观察拒绝，以及实际 ORM 查询的 PostgreSQL
+  编译结果确认读观察无 FOR UPDATE、写授权有锁；Ruff/差异检查通过。证据
+  `p8-snapshot-unlocked-authority.log`。未执行实际 PostgreSQL 锁竞争或生产延迟验收。
 
 
 
