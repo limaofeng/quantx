@@ -624,6 +624,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   该 repository 是内部事务存储，不是 FINAL 证据复核或人工审批入口；合成 evidence 仅供
   单测。尚未应用业务库迁移/正式登记模型，未证明 PG 并发；登记服务、完整 binding 自检，
   以及 Engine 评分/snapshot/pending/outbox 的实际授权接线仍待实现，TTA-P8-02 未勾选。
+  Engine 新增 TRegistryModelBatchRuntime，将真实 registry authorize 与 CPU 批量 runtime
+  接通：每批（含精确缓存重放）读取并锁定当前注册行，核对冻结 revision/模式/制品/策略/gate；
+  私有副本推理，事务退出成功后才原子发布。提交失败/取消不推进 revision 并清除旧分数，
+  离线 scorer 的预存分数不能作为初始授权；单实例异步锁串行化批次，RULE_ONLY 不访问 DB。
+  **61 项 registry/CPU batch/授权评分验证通过**，Ruff/差异检查通过，证据
+  `p8-registry-scoring-final.log`；包含实际 SQLite 注册/撤权、CPU 推理、精确重放复核、
+  无行情追加下的提交屏障/取消、已有缓存失败清理及并发批次 revision。SQLite 不证明 PG 行锁。
+  该连接尚未由完整分钟 supervisor 调用，snapshot 与 pending/outbox 使用点仍需再次复核
+  当前授权；实际 PAPER/LIVE 下单仍限定 RULE_ONLY，未放开模型模式或完成 P8 正式验收。
+
 
 
 - P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
