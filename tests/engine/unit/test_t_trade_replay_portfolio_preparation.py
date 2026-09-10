@@ -98,9 +98,17 @@ async def test_manual_portfolio_is_marked_to_d1_close_before_broker_start(
   )
   closes = {"600887.SH": 25.0, "000001.SZ": 11.0}
 
-  class MarketDataService:
-    async def get_kline_data(self, stock_code, **_kwargs):
-      return [SimpleNamespace(close=closes[stock_code])]
+  queries = []
+  closed = AsyncMock()
+
+  class MarketDataClient:
+    close = closed
+
+    async def read_history(self, request):
+      queries.append(request)
+      return SimpleNamespace(
+        records=[{"close": closes[request.instrument]}], next_after=None
+      )
 
   run_repo = SimpleNamespace(update_run=AsyncMock())
   backtest = SimpleNamespace(parameters={})
@@ -111,8 +119,8 @@ async def test_manual_portfolio_is_marked_to_d1_close_before_broker_start(
     yield db
 
   monkeypatch.setattr(
-    "quantx_engine.strategy_manager.HistoricalMarketDataService",
-    MarketDataService,
+    "quantx_engine.strategy_manager.LocalMarketDataClient",
+    MarketDataClient,
   )
   monkeypatch.setattr(
     "quantx_engine.strategy_manager.get_async_db",
@@ -129,6 +137,12 @@ async def test_manual_portfolio_is_marked_to_d1_close_before_broker_start(
 
   await manager._finalize_t_trade_replay_initial_portfolio(runtime)
 
+  closed.assert_awaited_once()
+  assert {q.instrument for q in queries} == set(closes)
+  assert all(
+    q.period == "1d" and q.trading_date == date(2026, 7, 31) and q.page_size == 2
+    for q in queries
+  )
   expected_total = 20_000.0 + 400 * 25.0 + 100 * 11.0
   assert runtime.context.initial_capital == expected_total
   assert runtime.metrics.initial_capital == expected_total
@@ -144,4 +158,54 @@ async def test_manual_portfolio_is_marked_to_d1_close_before_broker_start(
   )
   assert backtest.parameters is parameters
   db.commit.assert_awaited_once()
+  StrategyManager._instance = None
+
+
+@pytest.mark.parametrize(
+  "kind", ["missing", "duplicate", "more", "invalid", "unavailable", "cancel"]
+)
+async def test_initial_valuation_failure_does_not_publish_partial_portfolio(
+  monkeypatch, kind
+):
+  import asyncio
+  import copy
+
+  StrategyManager._instance = None
+  manager = StrategyManager()
+  params = {
+    "t_trade_replay": True,
+    "initial_portfolio": {
+      "source": "MANUAL",
+      "as_of": "2026-07-31T15:00:00",
+      "positions": [{"stock_code": "600887.SH", "volume": 100}],
+    },
+  }
+  runtime = SimpleNamespace(context=SimpleNamespace(parameters=params))
+  original = copy.deepcopy(params)
+  closed = AsyncMock()
+
+  class Client:
+    close = closed
+
+    async def read_history(self, request):
+      if kind == "unavailable":
+        raise RuntimeError("service unavailable")
+      if kind == "cancel":
+        raise asyncio.CancelledError()
+      rows = (
+        []
+        if kind == "missing"
+        else [{"close": float("nan") if kind == "invalid" else 10.0}]
+      )
+      if kind == "duplicate":
+        rows *= 2
+      return SimpleNamespace(
+        records=rows, next_after=datetime(2026, 7, 31) if kind == "more" else None
+      )
+
+  monkeypatch.setattr("quantx_engine.strategy_manager.LocalMarketDataClient", Client)
+  with pytest.raises(asyncio.CancelledError if kind == "cancel" else RuntimeError):
+    await manager._finalize_t_trade_replay_initial_portfolio(runtime)
+  closed.assert_awaited_once()
+  assert params == original
   StrategyManager._instance = None

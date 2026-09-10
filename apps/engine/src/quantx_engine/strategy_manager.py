@@ -27,6 +27,7 @@ from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Type
 
 import httpx
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+from quantx_contracts.market_data_service import HistoryRead
 from quantx_domain.strategies.base import (
   BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   StrategyBase,
@@ -83,6 +84,9 @@ from quantx_infrastructure.services.limit_up_board_replay_projection_service imp
 )
 from quantx_infrastructure.services.local_historical_tick_reader import (
   LocalHistoricalTickReader,
+)
+from quantx_infrastructure.services.local_market_data_client import (
+  LocalMarketDataClient,
 )
 from quantx_infrastructure.services.market_data_request_service import (
   build_sync_lock_key,
@@ -2091,32 +2095,32 @@ class StrategyManager:
     if str(portfolio.get("source") or "").upper() != "MANUAL":
       return
     as_of = datetime.fromisoformat(str(portfolio.get("as_of") or ""))
-    start = datetime.combine(as_of.date(), time.min)
-    end = datetime.combine(as_of.date(), time.max)
-    service = HistoricalMarketDataService()
     finalized_positions: List[Dict[str, Any]] = []
     market_value = 0.0
-    for raw in list(portfolio.get("positions") or []):
-      position = dict(raw or {})
-      code = str(position.get("stock_code") or "").strip().upper()
-      klines = await service.get_kline_data(
-        code,
-        period="1d",
-        start_time=start,
-        end_time=end,
-        order="desc",
-        limit=1,
-      )
-      close = float(getattr(klines[0], "close", 0.0) or 0.0) if klines else 0.0
-      if close <= 0:
-        raise RuntimeError(f"INITIAL_VALUATION_MISSING: {code} 缺少 D-1 收盘价")
-      volume = int(position.get("volume", 0) or 0)
-      position["available_volume"] = volume
-      position["frozen_volume"] = 0
-      position["last_price"] = close
-      position["market_value"] = close * volume
-      market_value += position["market_value"]
-      finalized_positions.append(position)
+    client = LocalMarketDataClient()
+    try:
+      for raw in list(portfolio.get("positions") or []):
+        position = dict(raw or {})
+        code = str(position.get("stock_code") or "").strip().upper()
+        page = await client.read_history(
+          HistoryRead(
+            instrument=code, period="1d", trading_date=as_of.date(), page_size=2
+          )
+        )
+        if len(page.records) != 1 or page.next_after is not None:
+          raise RuntimeError(f"INITIAL_VALUATION_MISSING: {code} 缺少唯一 D-1 收盘价")
+        close = float(page.records[0].get("close") or 0.0)
+        if not math.isfinite(close) or close <= 0:
+          raise RuntimeError(f"INITIAL_VALUATION_MISSING: {code} 缺少 D-1 收盘价")
+        volume = int(position.get("volume", 0) or 0)
+        position["available_volume"] = volume
+        position["frozen_volume"] = 0
+        position["last_price"] = close
+        position["market_value"] = close * volume
+        market_value += position["market_value"]
+        finalized_positions.append(position)
+    finally:
+      await client.close()
 
     cash = float(portfolio.get("cash_available", 0.0) or 0.0)
     total_asset = cash + market_value
