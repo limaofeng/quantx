@@ -6,6 +6,7 @@ struct TTradeControlView: View {
   let assistantSnapshot: TTradeAssistantSnapshot
 
   @State private var importsReleaseRequest = false
+  @State private var showsLegacyMaintenance = false
   @State private var releaseImportError: String?
   @State private var killReason = ""
   @State private var pauseReason = "移动端主动暂停新入场"
@@ -27,6 +28,8 @@ struct TTradeControlView: View {
           status: .attention
         )
       }
+      Button("旧版做 T 维护") { showsLegacyMaintenance = true }
+        .disabled(store.operationInProgress)
       Button("导入发布请求") { importsReleaseRequest = true }
         .disabled(store.operationInProgress)
       if let releaseImportError {
@@ -50,6 +53,12 @@ struct TTradeControlView: View {
       if store.releaseReference != nil { releaseOperationCard }
       accountControlActions
       stateContent
+    }
+    .sheet(isPresented: $showsLegacyMaintenance) {
+      NavigationStack {
+        TAssistantLegacyMaintenanceView(store: store)
+          .toolbar { Button("关闭") { showsLegacyMaintenance = false }.disabled(store.operationInProgress) }
+      }
     }
     .sheet(item: Binding(get: { store.accountControlTicket }, set: { value in
       if value == nil { store.dismissAccountControl() }

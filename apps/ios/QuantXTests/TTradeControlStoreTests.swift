@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import SwiftUI
 
 @testable import QuantX
 
@@ -447,6 +448,44 @@ final class TTradeControlStoreTests: XCTestCase {
     XCTAssertNoThrow(try harness.store.discardLegacyReview())
   }
 
+  func testLegacyMaintenanceViewUsesServerSourceAndDistinguishesPreparedFromDrained() async throws {
+    let legacy = LegacyMaintenanceSpy()
+    let harness = await makeHarness(legacyRepository: legacy)
+    try await harness.store.loadLegacySource()
+    XCTAssertEqual(harness.store.legacySource?.scope, legacy.scope)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    try await harness.store.refreshLegacyStatus()
+    XCTAssertEqual(LegacyMaintenanceReview.status(harness.store), "清单已生成，等待复核。")
+    for (name, scheme, contrast) in [("light", ColorScheme.light, ColorSchemeContrast.standard), ("dark", .dark, .standard), ("contrast", .dark, .increased)] {
+      let controller = UIHostingController(rootView: NavigationStack {
+        TAssistantLegacyMaintenanceView(store: harness.store)
+      }.preferredColorScheme(scheme))
+      controller.traitOverrides.accessibilityContrast = contrast == .increased ? .high : .normal
+      controller.traitOverrides.userInterfaceStyle = scheme == .dark ? .dark : .light
+      let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+      window.rootViewController = controller
+      window.isHidden = false
+      controller.view.frame = window.bounds
+      controller.view.layoutIfNeeded()
+      await Task.yield()
+      try await Task.sleep(for: .milliseconds(100))
+      controller.view.layoutIfNeeded()
+      let image = UIGraphicsImageRenderer(bounds: controller.view.bounds).image { context in
+        controller.view.layer.render(in: context.cgContext)
+      }
+      let attachment = XCTAttachment(image: image)
+      attachment.name = "legacy-maintenance-\(name)"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+      window.isHidden = true
+    }
+    try await harness.store.previewLegacyDrain(windowStart: legacy.now.addingTimeInterval(-1), windowEnd: legacy.now.addingTimeInterval(120))
+    harness.store.discardLegacyPreview()
+    XCTAssertNil(harness.store.legacyTicket)
+    XCTAssertNotNil(harness.store.legacyInventory)
+    XCTAssertTrue(legacy.confirmations.isEmpty)
+  }
+
   private func makeHarness(
     repository: TTradeControlRepositorySpy? = nil,
     releaseRepository: TAssistantReleaseSpy? = nil,
@@ -795,6 +834,9 @@ private final class AccountControlSpy: AccountExecutionControlLoading {
 
 @MainActor
 private final class LegacyMaintenanceSpy: TAssistantLegacyMaintenanceLoading {
+  func source(context: TTradeControlRepositoryContext) async throws -> TAssistantLegacyMaintenanceSource? {
+    .init(scope: scope, draining: false)
+  }
   let now = Date()
   let scope = TAssistantLegacyScope(accountID: "ACCOUNT-1", configID: "head", runID: "legacy", headVersion: 1)
   let commandID = UUID().uuidString.lowercased()
@@ -821,6 +863,8 @@ private final class LegacyMaintenanceSpy: TAssistantLegacyMaintenanceLoading {
     for key in ["intents", "pending", "correlations", "commands", "runtime_events", "batches", "exit_plans", "retained_client_order_ids", "unsubmitted_intent_ids_for_review"] {
       manifest[key] = .array([])
     }
+    manifest["pending"] = .array([.init(object: ["client_order_id": .string("order-1"), "instrument_code": .string("600519.SH"), "side": .string("BUY"), "volume": .integer(200), "status": .string("PARTIALLY_FILLED")])])
+    manifest["exit_plans"] = .array([.init(object: ["plan_id": .string("exit-1"), "instrument_code": .string("600519.SH"), "protected_volume": .integer(100), "remaining_volume": .integer(100), "status": .string("ACTIVE")])])
     var evidence: GraphQLJSON = .init(object: ["manifest": .init(object: manifest),
       "manifest_hash": .string(String(repeating: "a", count: 64)), "inventory_operation_id": .string("legacy-inventory:\(identity)")])
     if identity == commandID {

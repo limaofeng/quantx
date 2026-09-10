@@ -30,6 +30,8 @@ final class TTradeControlStore: ObservableObject {
 
   @Published private(set) var accountControlTicket: NativeAccountControlTicket?
   @Published private(set) var legacyScope: TAssistantLegacyScope?
+  @Published private(set) var legacySource: TAssistantLegacyMaintenanceSource?
+  @Published private(set) var legacySourceLoaded = false
   @Published private(set) var legacyPreparationID: UUID?
   @Published private(set) var legacyInventory: TAssistantLegacyInventory?
   @Published private(set) var legacyTicket: TAssistantLegacyDrainTicket?
@@ -614,6 +616,8 @@ final class TTradeControlStore: ObservableObject {
     stateRequestID = UUID()
     legacyOperationGeneration = UUID()
     legacyScope = nil
+    legacySource = nil
+    legacySourceLoaded = false
     legacyPreparationID = nil
     legacyChallengeID = nil
     legacyInventory = nil
@@ -992,5 +996,37 @@ extension TTradeControlStore {
         legacyStatus = nil
       }
     } catch { throw fail(error) }
+  }
+}
+
+extension TTradeControlStore {
+  func loadLegacySource() async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard let repository = binding?.legacyRepository else { throw fail(TTradeControlError.contextChanged) }
+    let generation = legacyOperationGeneration
+    operationInProgress = true
+    clearMessages()
+    legacySourceLoaded = false
+    legacySource = nil
+    defer { if generation == legacyOperationGeneration { operationInProgress = false } }
+    do {
+      let current = try legacyCurrentContext()
+      let source = try await repository.source(context: current)
+      guard current == (try legacyCurrentContext()) else { throw TTradeControlError.contextChanged }
+      if let source { try source.scope.validate(current) }
+      if !legacyConfirmationAttempted, let scope = legacyScope, source?.scope != scope { legacyTicket = nil }
+      legacySource = source
+      legacySourceLoaded = true
+      errorMessage = nil
+    } catch { throw fail(error) }
+  }
+}
+
+extension TTradeControlStore {
+  func discardLegacyPreview() {
+    guard !operationInProgress, !legacyConfirmationAttempted else { return }
+    legacyTicket = nil
+    legacyChallengeID = nil
+    clearMessages()
   }
 }

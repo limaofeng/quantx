@@ -97,6 +97,8 @@ struct TAssistantLegacyOperation: Equatable, Sendable {
 
 @MainActor
 protocol TAssistantLegacyMaintenanceLoading {
+  func source(context: TTradeControlRepositoryContext) async throws
+    -> TAssistantLegacyMaintenanceSource?
   func recover(
     challengeID: String, inventory: TAssistantLegacyInventory,
     context: TTradeControlRepositoryContext
@@ -278,5 +280,33 @@ extension TAssistantLegacyMaintenanceRepository {
       }
     }
     return .init(phase: phase, commandID: result.engineCommandId)
+  }
+}
+
+struct TAssistantLegacyMaintenanceSource: Equatable, Sendable {
+  let scope: TAssistantLegacyScope
+  let draining: Bool
+}
+
+extension TAssistantLegacyMaintenanceRepository {
+  func source(context: TTradeControlRepositoryContext) async throws
+    -> TAssistantLegacyMaintenanceSource?
+  {
+    guard !context.userID.isEmpty, !context.deviceSessionID.isEmpty,
+      !context.activeAccountID.isEmpty,
+      context.authorizedAccountIDs == [context.activeAccountID]
+    else { throw TTradeControlError.contextChanged }
+    let response = try await client.fetch(
+      query: QuantXAPI.IOSTAssistantLegacyMaintenanceSourceQuery(
+        accountId: context.activeAccountID), cachePolicy: .networkOnly,
+      requestConfiguration: noCache)
+    try ApolloReadOnlyResponseValidator.validate(response.errors)
+    guard let data = response.data else { throw TTradeControlError.invalidResponse }
+    guard let source = data.tAssistantLegacyMaintenanceSource else { return nil }
+    let scope = TAssistantLegacyScope(
+      accountID: source.accountId, configID: source.configId, runID: source.runId,
+      headVersion: Int(source.headVersion))
+    try scope.validate(context)
+    return .init(scope: scope, draining: source.draining)
   }
 }

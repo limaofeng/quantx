@@ -85,6 +85,7 @@ extension QuantXAPI {
       "TAssistantLegacyDrainPreview": QuantXAPI.Objects.TAssistantLegacyDrainPreview,
       "TAssistantLegacyMaintenanceOperation": QuantXAPI.Objects.TAssistantLegacyMaintenanceOperation,
       "TAssistantLegacyMaintenanceResult": QuantXAPI.Objects.TAssistantLegacyMaintenanceResult,
+      "TAssistantLegacyMaintenanceSource": QuantXAPI.Objects.TAssistantLegacyMaintenanceSource,
       "TAssistantReleaseOperation": QuantXAPI.Objects.TAssistantReleaseOperation,
       "TAssistantReleasePreview": QuantXAPI.Objects.TAssistantReleasePreview,
       "TAssistantReleaseResult": QuantXAPI.Objects.TAssistantReleaseResult,

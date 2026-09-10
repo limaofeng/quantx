@@ -60,3 +60,13 @@ query IOSTAssistantLegacyConfirmationStatus($challengeId: String!) {
     request
   }
 }
+
+query IOSTAssistantLegacyMaintenanceSource($accountId: String!) {
+  tAssistantLegacyMaintenanceSource(accountId: $accountId) {
+    accountId
+    configId
+    runId
+    headVersion
+    draining
+  }
+}
