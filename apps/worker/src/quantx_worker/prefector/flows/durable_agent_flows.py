@@ -168,15 +168,34 @@ async def _request_and_wait(
       request_remote_history,
     )
 
-    remote = await request_remote_history(payload, timeout_seconds=timeout_seconds)
-    if on_created and remote.get("request_id"):
-      await on_created(remote["request_id"])
-    return {
-      **remote,
-      "status": "completed"
-      if remote.get("status") == "success"
-      else remote.get("status"),
-    }
+    remote_identity = None
+
+    async def remote_progress(event):
+      nonlocal remote_identity
+      remote_identity = event["request_id"]
+      report_request(
+        remote_identity,
+        "准备开发行情日历" if event["phase"] == "REFERENCE" else "等待开发行情交付",
+        f"已核验分区 {event['verified_partitions']}/{event['expected_partitions']}",
+      )
+
+    try:
+      remote = await request_remote_history(
+        payload, timeout_seconds=timeout_seconds, on_progress=remote_progress
+      )
+      if on_created and remote.get("request_id"):
+        await on_created(remote["request_id"])
+      return {
+        **remote,
+        "status": "completed"
+        if remote.get("status") == "success"
+        else remote.get("status"),
+      }
+    finally:
+      observer = observation.get()
+      if observer and remote_identity:
+        observer.requests.pop(remote_identity, None)
+
   store = LocalMarketDataClient()
   request_id = ""
   try:

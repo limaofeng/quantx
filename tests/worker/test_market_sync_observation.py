@@ -175,3 +175,21 @@ def test_development_long_range_partitions_fit_delivery_capacity_without_gaps():
     iter_market_partitions(codes, days, "20260101", "20260331", ["1d"], {})
   )
   assert len(production) == 1 and production[0].codes == codes
+
+
+async def test_remote_wait_progress_reaches_heartbeat_and_is_removed(monkeypatch):
+  from quantx_infrastructure.config.settings import settings
+  from quantx_infrastructure.services import development_history_import as importer
+  from quantx_worker.prefector.flows import durable_agent_flows as durable
+
+  monkeypatch.setattr(settings, "environment", "development")
+  async def remote(payload, *, timeout_seconds, on_progress):
+    await on_progress({"request_id": "remote-summary", "phase": "DELIVERY", "expected_partitions": 10, "verified_partitions": 3})
+    assert progress.observation.get().requests["remote-summary"]["detail"] == "已核验分区 3/10"
+    return {"request_id": "remote-summary", "status": "timeout"}
+
+  monkeypatch.setattr(importer, "request_remote_history", remote)
+  async with progress.observe_market_sync(Mock()) as observer:
+    result = await durable._request_and_wait({"operation": "bars"})
+    assert result["status"] == "timeout"
+    assert observer.requests == {}

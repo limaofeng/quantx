@@ -13,8 +13,13 @@ async def test_range_submits_later_partitions_and_reports_failures(
   monkeypatch, first_status
 ):
   calls = []
+  events = []
+
+  async def progress(event):
+    events.append(event)
 
   async def holidays(*args, **kwargs):
+    assert events[0]["phase"] == "REFERENCE"
     return [
       SimpleNamespace(
         state="VERIFIED",
@@ -43,7 +48,11 @@ async def test_range_submits_later_partitions_and_reports_failures(
       "end_time": "20260810",
     },
     timeout_seconds=0,
+    on_progress=progress,
   )
+  assert events[-1]["expected_partitions"] == 2
+  assert events[-1]["verified_partitions"] == 1
+  assert all("partitions" not in event for event in events)
   assert len(calls) == 2
   assert result["expected_partitions"] == 2
   assert result["verified_partitions"] == 1

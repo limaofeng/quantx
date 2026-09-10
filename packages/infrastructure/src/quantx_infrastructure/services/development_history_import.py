@@ -455,7 +455,7 @@ def _reference_wait_result(statuses):
 
 
 async def request_remote_history(
-  payload: dict, *, timeout_seconds: float = 600
+  payload: dict, *, timeout_seconds: float = 600, on_progress=None
 ) -> dict:
   """Adapt existing historical callers while keeping QMT requests off the Mac."""
   from datetime import datetime
@@ -515,6 +515,19 @@ async def request_remote_history(
       hex=hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:32]
     )
   )
+
+  async def report(phase, expected=0, verified=0):
+    if on_progress is not None:
+      await on_progress(
+        {
+          "request_id": identity,
+          "phase": phase,
+          "expected_partitions": expected,
+          "verified_partitions": verified,
+        }
+      )
+
+  await report("REFERENCE")
   deadline = asyncio.get_running_loop().time() + timeout_seconds
   calendars = await _wait_reference_requests(
     [CalendarRequest(year=year) for year in range(start.year, end.year + 1)],
@@ -535,8 +548,10 @@ async def request_remote_history(
     day += timedelta(days=1)
   results = {}
   partition_status = {}
+  await report("DELIVERY", len(partitions))
   while True:
     pending = False
+    observed = 0
     for request in partitions:
       key = (request.period, request.instrument, request.trading_date)
       if key in results:
@@ -554,6 +569,10 @@ async def request_remote_history(
         results[key] = result["delivery_result"]
       elif result.get("status") not in {"INCOMPLETE", "BLOCKED"}:
         pending = True
+      observed += 1
+      if observed % 50 == 0:
+        await report("DELIVERY", len(partitions), len(results))
+    await report("DELIVERY", len(partitions), len(results))
     # Finish submitting this bounded range even when one source partition failed.
     # Report every gap; never silently truncate the requested universe.
     progress = {
