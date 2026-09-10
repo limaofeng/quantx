@@ -36,8 +36,12 @@ async def registered(sessions, tmp_path, mode):
         expected_revision=revision, stage=target, actor_id="reviewer", reason="fixture", now=NOW)
       revision += 1
   # A new frozen execution binding, not a hot replacement on an existing runtime.
+  material = model.authorization.runtime_binding.to_dict()
+  material.pop("binding_hash")
+  material["registry_authorization_revision"] = revision
+  frozen = type(model.authorization.runtime_binding).create(**material)
   model = type(model)(mode=mode, artifact=artifact,
-    authorization=replace(model.authorization, registry_authorization_revision=revision),
+    authorization=replace(model.authorization, registry_authorization_revision=revision, runtime_binding=frozen),
     policy_hash=model.policy_hash, max_age_ms=model.max_age_ms, inference_budget_ms=model.budget_ms)
   return model, TRegistryModelBatchRuntime(model=model, session_factory=sessions, clock_ms=lambda: bar().available_at_ms + 10)
 

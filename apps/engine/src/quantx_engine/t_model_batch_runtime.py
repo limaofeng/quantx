@@ -7,10 +7,16 @@ cannot register a model, change execution mode, or touch orders and ExitPlans.
 from dataclasses import asdict, dataclass, replace
 from time import perf_counter_ns
 
-from quantx_application.t_trade_v3.model_features import TModelFeatureBar
+from quantx_application.t_trade_v3.model_features import (
+  FEATURE_SCHEMA_VERSION,
+  TModelFeatureBar,
+)
 from quantx_application.t_trade_v3.model_minute_window import TModelMinuteOutcome
 from quantx_application.t_trade_v3.model_score import TModelScore
-from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+from quantx_domain.trading.t_assistant_execution import (
+  TModelRuntimeBinding,
+  stable_manifest_hash,
+)
 from quantx_infrastructure.services.t_model_cpu_artifact import TCpuArtifact
 
 
@@ -21,6 +27,7 @@ class TModelAuthorization:
   registry_stage: str
   registry_authorization_revision: int
   gate_conclusion: str
+  runtime_binding: TModelRuntimeBinding
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,18 @@ class TModelBatchRuntime:
       if artifact is not self._bound_artifact or auth != self._bound_authorization:
         raise ValueError("T_MODEL_FROZEN_BINDING_CHANGED")
       validate_before_publish()
+      binding = TModelRuntimeBinding.from_mapping(auth.runtime_binding.to_dict())
+      if (
+        binding.model_id != artifact.model_id or binding.model_version != artifact.model_version
+        or binding.artifact_manifest_sha256 != auth.artifact_sha256
+        or binding.portfolio_policy_compatibility_hash != auth.policy_compatibility_hash
+        or binding.registry_stage != auth.registry_stage
+        or binding.registry_authorization_revision != auth.registry_authorization_revision
+        or binding.feature_schema_version != FEATURE_SCHEMA_VERSION
+        or binding.label_spec_version != artifact.label_spec_version
+        or binding.calibration_version != artifact.calibration_version
+      ):
+        raise ValueError("T_MODEL_FULL_BINDING_MISMATCH")
       allowed_gates = (
         {"SHADOW_ELIGIBLE", "ACTIVE_ELIGIBLE"}
         if self.mode == "SHADOW"
@@ -151,7 +170,7 @@ class TModelBatchRuntime:
         return self.latest
       scores = []
       revision = self.revision + 1
-      binding_hash = stable_manifest_hash(asdict(auth))
+      binding_hash = binding.binding_hash
       for bar in ordered_bars:
         if model_as_of_ms - bar.interval_end_ms > self.max_age_ms:
           raise ValueError("T_MODEL_SCORE_STALE")

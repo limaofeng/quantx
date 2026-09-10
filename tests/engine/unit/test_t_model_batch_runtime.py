@@ -12,7 +12,12 @@ from tests.research.test_t_model_cpu_artifact import payload
 
 def runtime(tmp_path, mode):
   artifact = publish_immutable_cpu_artifact(tmp_path / "model.json", payload())
-  auth = TModelAuthorization(artifact.sha256, "a" * 64, mode, 1, f"{mode}_ELIGIBLE")
+  from tests.domain.test_t_model_runtime_binding import binding
+
+  frozen = binding(mode, model_id=artifact.model_id, model_version=artifact.model_version,
+    artifact_manifest_sha256=artifact.sha256, portfolio_policy_compatibility_hash="a" * 64,
+    label_spec_version=artifact.label_spec_version, calibration_version=artifact.calibration_version)
+  auth = TModelAuthorization(artifact.sha256, "a" * 64, mode, 1, f"{mode}_ELIGIBLE", frozen)
   return TModelBatchRuntime(
     mode=mode,
     artifact=artifact,

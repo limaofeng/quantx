@@ -704,6 +704,17 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   期望值不符、改 hash 后仍错误、未知容差、路径越界及大输入在制品 IO 前拒绝；Ruff/差异
   检查通过，证据 `p8-runtime-self-test-final.log`。该数值一致性自检不等于 OOS/发布准入，
   未正式登记或加载业务模型；scorer 完整 binding 与 supervisor 的实际加载接线仍待实现。
+  scorer 已原子切换完整 binding：TModelAuthorization 必须携带 TModelRuntimeBinding，
+  推理前核对其模型/版本、制品/策略、阶段/revision、特征/标签/校准身份，分数绑定 hash
+  直接使用配置契约中的 binding_hash，不再以五字段授权摘要冒充完整模型绑定。
+  TRegistryModelBatchRuntime.load 接通 registry→安全制品/固定样本自检→registry 复核→
+  COLD runtime；自检在线程中运行，前后都要求同一授权且登记证据明确引用相同自检 hash/
+  容差策略。未登记或证据不符在制品 IO 前拒绝，加载期间撤权不返回 runtime；首批仍再授权。
+  **102 项完整加载/评分/自检测试通过**，包含 SHADOW/ACTIVE 真实 SQLite 登记、非均匀
+  CPU 输出、分数与冻结视图同一 binding hash、自检失败及加载期间撤权；Ruff/差异检查通过，
+  证据 `p8-full-binding-load-final.log`。登记使用合成证据，不是业务审批；真实 supervisor
+  加载/完整分钟调度及模型 snapshot 与下单使用点接线仍待实现，模型下单门保持关闭。
+
 
 
 

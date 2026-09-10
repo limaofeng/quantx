@@ -9,12 +9,22 @@ import asyncio
 import copy
 from dataclasses import asdict, replace
 
-from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+from quantx_domain.trading.t_assistant_execution import (
+  TModelRuntimeBinding,
+  stable_manifest_hash,
+)
 from quantx_infrastructure.repositories.t_model_registry_repository import (
   TModelRegistryRepository,
 )
+from quantx_infrastructure.services.t_model_runtime_self_test import (
+  load_self_tested_cpu_artifact,
+)
 
-from .t_model_batch_runtime import TModelBatchResult, TModelBatchRuntime
+from .t_model_batch_runtime import (
+  TModelAuthorization,
+  TModelBatchResult,
+  TModelBatchRuntime,
+)
 
 
 class TRegistryModelBatchRuntime:
@@ -31,6 +41,43 @@ class TRegistryModelBatchRuntime:
     self._lock = asyncio.Lock()
     self._last_visibility_ms = None
     self._minute_input_fence = None
+
+  @classmethod
+  async def load(cls, *, root, entry, binding: TModelRuntimeBinding, self_test_manifest,
+    session_factory, clock_ms, max_age_ms, inference_budget_ms):
+    """Preload only a self-tested, currently authorized frozen binding."""
+    binding = TModelRuntimeBinding.from_mapping(binding.to_dict())
+    entry, self_test_manifest = copy.deepcopy(entry), copy.deepcopy(self_test_manifest)
+
+    async def authorized_gate():
+      async with session_factory() as db, db.begin():
+        record = await TModelRegistryRepository(db).authorize(
+          model_id=binding.model_id, model_version=binding.model_version,
+          expected_revision=binding.registry_authorization_revision, mode=binding.registry_stage,
+          artifact_sha256=binding.artifact_manifest_sha256,
+          policy_compatibility_hash=binding.portfolio_policy_compatibility_hash,
+        )
+        if (
+          record.evidence.get("runtime_self_test_manifest_hash") != binding.runtime_self_test_manifest_hash
+          or record.evidence.get("self_test_tolerance_policy_version") != binding.self_test_tolerance_policy_version
+        ):
+          raise ValueError("T_MODEL_SELF_TEST_REGISTRY_EVIDENCE_MISMATCH")
+        return record.gate_conclusion
+
+    gate = await authorized_gate()
+    artifact = await asyncio.to_thread(load_self_tested_cpu_artifact,
+      root=root, entry=entry, binding=binding, self_test_manifest=self_test_manifest)
+    if await authorized_gate() != gate:
+      raise ValueError("T_MODEL_AUTHORIZATION_CHANGED_DURING_LOAD")
+    model = TModelBatchRuntime(
+      mode=binding.registry_stage, artifact=artifact,
+      authorization=TModelAuthorization(binding.artifact_manifest_sha256,
+        binding.portfolio_policy_compatibility_hash, binding.registry_stage,
+        binding.registry_authorization_revision, gate, binding),
+      policy_hash=binding.portfolio_policy_compatibility_hash, max_age_ms=max_age_ms,
+      inference_budget_ms=inference_budget_ms,
+    )
+    return cls(model=model, session_factory=session_factory, clock_ms=clock_ms)
 
   @property
   def latest(self):
