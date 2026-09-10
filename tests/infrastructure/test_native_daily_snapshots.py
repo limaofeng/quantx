@@ -137,3 +137,29 @@ async def test_missing_native_publication_does_not_query_canonical_storage(daily
   reply = await snapshot(case)
   assert reply.status_code == 200 and reply.json()["records"] == []
   assert not case.storage.queries
+
+
+async def test_third_tied_version_is_not_hidden_by_two_identical_candidates(daily_case):
+  case = daily_case
+  await source(case)
+  await source(case, newer=True, tied=True)
+  # Give the two identical versions the highest IDs, so a two-row lookup
+  # would miss the conflicting older bundle at the same source timestamp.
+  async with case.engine.begin() as db:
+    await db.execute(
+      text("""
+      UPDATE market_data_request SET request_id=CASE
+        WHEN request_payload->>'start_time'='20231116' THEN 'z-first'
+        ELSE 'a-conflict' END
+    """)
+    )
+    await db.execute(
+      text("""
+      INSERT INTO market_data_request(request_id,status,request_payload,ingestion_result,created_at)
+      SELECT 'z-second',status,request_payload,ingestion_result,created_at
+      FROM market_data_request WHERE request_id='z-first'
+    """)
+    )
+  before = len(case.storage.queries)
+  assert (await snapshot(case)).status_code == 503
+  assert len(case.storage.queries) == before

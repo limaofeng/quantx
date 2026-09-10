@@ -271,7 +271,7 @@ async def test_default_reader_never_uses_unpublished_canonical_rows(reader_case)
   assert not case.storage.history_queries
 
 
-@pytest.mark.parametrize("same_time", [True, False])
+@pytest.mark.parametrize("same_time", [True, False, "third_conflict"])
 async def test_native_publication_uses_source_order_not_finish_order(
   reader_case, same_time
 ):
@@ -283,6 +283,8 @@ async def test_native_publication_uses_source_order_not_finish_order(
     created_at=created + (timedelta() if same_time else timedelta(minutes=1)),
   )
   await publish_native(case, [original(case, close=9.4)], created_at=created)
+  if same_time == "third_conflict":
+    await publish_native(case, [original(case, close=9.4)], created_at=created)
   if same_time:
     with pytest.raises(httpx.HTTPStatusError) as error:
       await history(case)

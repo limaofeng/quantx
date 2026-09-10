@@ -26,6 +26,7 @@ async def resolve_native_bar_version(db, request):
     (
       await db.execute(
         text("""
+    WITH candidates AS (
     SELECT request_id,created_at,request_payload,
       ingestion_result->>'native_storage_version' AS version,
       ingestion_result->'content_verification' AS content,
@@ -46,7 +47,11 @@ async def resolve_native_bar_version(db, request):
         WHERE coverage->>'instrument_code'=:instrument AND coverage->>'period'=:period
           AND REPLACE(coverage->>'trading_date','-','')=:day
           AND coverage->>'point_count' ~ '^[1-9][0-9]*$')
-    ORDER BY created_at DESC,request_id DESC LIMIT 2
+    ), newest AS (
+      SELECT * FROM candidates WHERE created_at=(SELECT MAX(created_at) FROM candidates)
+    )
+    SELECT *, (SELECT COUNT(DISTINCT version)>1 FROM newest) AS ambiguous
+    FROM newest ORDER BY request_id DESC LIMIT 1
   """),
         {
           "codes": json.dumps([request.instrument]),
@@ -74,11 +79,7 @@ def _publication_from_rows(rows, request):
     raise HistoryReadInvalid("NATIVE_VERSION_DIRECTORY_CAPACITY")
   row = rows[0]
   proof, count, source_hash = _validated_native_row(row)
-  if (
-    len(rows) == 2
-    and rows[1]["created_at"] == row["created_at"]
-    and rows[1]["version"] != row["version"]
-  ):
+  if row["ambiguous"]:
     raise HistoryReadInvalid("NATIVE_VERSION_ORDER_AMBIGUOUS")
   cutoff = (request.bounds()[0] + timedelta(hours=15, minutes=1)).replace(tzinfo=None)
   return NativeBarPublication(
@@ -101,7 +102,7 @@ async def resolve_native_daily_versions(db, request):
 
   start = request.start.astimezone(ZoneInfo("Asia/Shanghai")).date()
   end = request.end.astimezone(ZoneInfo("Asia/Shanghai")).date()
-  limit = len(request.instruments) * 62 * 2
+  limit = len(request.instruments) * 62
   result = await db.stream(
     text("""
     WITH candidates AS (
@@ -129,7 +130,12 @@ async def resolve_native_daily_versions(db, request):
     ), ranked AS (
       SELECT *,row_number() OVER(PARTITION BY instrument,day ORDER BY created_at DESC,request_id DESC) AS ordinal
       FROM candidates
-    ) SELECT * FROM ranked WHERE ordinal<=2 ORDER BY instrument,day,ordinal LIMIT :limit
+    ) SELECT chosen.*, EXISTS(
+      SELECT 1 FROM candidates peer
+      WHERE peer.instrument=chosen.instrument AND peer.day=chosen.day
+        AND peer.created_at=chosen.created_at AND peer.version<>chosen.version
+    ) AS ambiguous
+    FROM ranked chosen WHERE ordinal=1 ORDER BY instrument,day LIMIT :limit
   """),
     {
       "codes": request.instruments,
