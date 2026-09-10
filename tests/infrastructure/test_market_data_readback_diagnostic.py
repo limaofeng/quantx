@@ -197,3 +197,35 @@ async def test_diagnostic_page_cursor_retains_group_and_advances():
   assert pages[0]["group_sha256"] == pages[1]["group_sha256"]
   assert pages[0]["query_sha256"] != pages[1]["query_sha256"]
   assert any(operator == ">" for operator, _ in pages[1]["time_predicates"])
+
+
+def test_cli_snapshot_uses_explicit_config_root_and_its_own_code(monkeypatch, tmp_path):
+  import sys
+  from types import SimpleNamespace
+
+  path = Path(__file__).resolve().parents[2] / "ops/diagnose_market_data_readback.py"
+  spec = importlib.util.spec_from_file_location("readback_cli", path)
+  cli = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(cli)
+  prefix = tmp_path / "quantx"
+  (prefix / "conda-meta").mkdir(parents=True)
+  deployment = tmp_path / "deployment"
+  calls = []
+
+  def load(root, environment):
+    calls.append((root, environment))
+    return {"QUANTX_ROOT": str(root), "ENABLE_REAL_TRADING": "true"}
+
+  monkeypatch.setitem(
+    sys.modules, "runtime_config", SimpleNamespace(load_environment=load)
+  )
+  monkeypatch.setattr(cli.sys, "prefix", str(prefix))
+  monkeypatch.setattr(cli.sys, "path", list(sys.path))
+  monkeypatch.setattr(cli.os, "environ", {})
+  cli.configure("development", deployment)
+  assert calls == [(deployment.resolve(), "development")]
+  assert cli.os.environ["QUANTX_ROOT"] == str(deployment)
+  assert cli.os.environ["ENABLE_REAL_TRADING"] == "false"
+  assert cli.os.environ["DATABASE_PROCESS_ROLE"] == "tooling"
+  assert str(cli.ROOT / "packages/infrastructure/src") in cli.sys.path
+  assert str(deployment / "packages/infrastructure/src") not in cli.sys.path

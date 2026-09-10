@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def configure(environment: str) -> None:
+def configure(environment: str, config_root: Path | None = None) -> None:
   if environment == "production" and sys.platform != "win32":
     raise ValueError("PRODUCTION_REQUIRES_WINDOWS")
   if (
@@ -23,7 +23,7 @@ def configure(environment: str) -> None:
     raise ValueError("QUANTX_CONDA_REQUIRED")
   from runtime_config import load_environment
 
-  values = load_environment(ROOT, environment)
+  values = load_environment((config_root or ROOT).resolve(), environment)
   values.update(
     ENABLE_REAL_TRADING="false",
     QMT_REAL_TRADING_ENABLED="false",
@@ -83,11 +83,16 @@ def main() -> int:
     "--request-id", required=True, type=lambda value: str(uuid.UUID(value))
   )
   parser.add_argument("--output", required=True, type=Path)
+  parser.add_argument(
+    "--config-root",
+    type=Path,
+    help="Host-local deployment configuration root; code remains in this diagnostic snapshot",
+  )
   args = parser.parse_args()
   # Existing libraries may log provider errors. Evidence contains only explicit safe fields.
   logging.disable(logging.CRITICAL)
   try:
-    configure(args.environment)
+    configure(args.environment, args.config_root)
     with args.output.open("x", encoding="utf-8") as evidence:
 
       def emit(event):

@@ -1,0 +1,66 @@
+{
+  "scope": "Original uploaded manifests; Windows host-local read-only replay, canonical persisted keys only",
+  "snapshot_sha256": "cca34048847c9a076617d93a3828cb5e87092e607e454b1fab5ffca2d2fdbdd1",
+  "snapshot_path": ".runtime/diagnostics/snapshot-abf61288",
+  "production_head_observed": "52783763e",
+  "python": "quantx Conda Python 3.13.9",
+  "requests": [
+    {
+      "evidence_path": ".runtime/diagnostics/readback-98632b5b-abf61288.jsonl",
+      "evidence_sha256": "8f9be99123af635dc80aefca7f28cb637f443d7f437ba5b43ad3263560c5f6a6",
+      "manifest": {
+        "chunks": 15,
+        "event": "manifest",
+        "manifest_sha256": "98b41379de0e813e77e69dd6ca205ea8c46235bd6e4ac2d90455342852a79d1f",
+        "request_id": "98632b5b-24b0-4bcc-a178-792f2694dcab",
+        "source_status": "UPLOADED"
+      },
+      "validation": {
+        "end_exclusive_ms": 1788969600000,
+        "event": "validated",
+        "expected_keys": 72056,
+        "start_ms": 1788883200000
+      },
+      "result": {
+        "event": "result",
+        "groups_verified": 300,
+        "records_verified": 72056,
+        "status": "verified"
+      },
+      "query_count": 45,
+      "query_or_reader_errors": 0,
+      "scan_groups": 15
+    },
+    {
+      "evidence_path": ".runtime/diagnostics/readback-d1cc696b-abf61288.jsonl",
+      "evidence_sha256": "4df366a1a6dfdb3a32056f4f141f6da5e8b6ed325d4ffab4cac58c59e1b45a3a",
+      "manifest": {
+        "chunks": 15,
+        "event": "manifest",
+        "manifest_sha256": "ea9aba2914a8664208acde711330f86eaa53c821e264c44535473d071f403c60",
+        "request_id": "d1cc696b-3e7d-446b-9842-39755db92268",
+        "source_status": "UPLOADED"
+      },
+      "validation": {
+        "end_exclusive_ms": 1788969600000,
+        "event": "validated",
+        "expected_keys": 72178,
+        "start_ms": 1788883200000
+      },
+      "result": {
+        "event": "result",
+        "groups_verified": 300,
+        "records_verified": 72178,
+        "status": "verified"
+      },
+      "query_count": 45,
+      "query_or_reader_errors": 0,
+      "scan_groups": 15
+    }
+  ],
+  "limitations": [
+    "No task state transition, native version migration, or development delivery was performed",
+    "The historical 432-file failure and its original SQL were not reproduced",
+    "groups_verified is the verifier count of code summaries; scan_groups is the actual query group count"
+  ]
+}
