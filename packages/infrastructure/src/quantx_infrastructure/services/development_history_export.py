@@ -33,6 +33,7 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
 )
 
 from .development_delivery_execution import run_delivery_execution
+from .local_history_reader import HistoryReadInvalid
 from .market_data_staging_cleanup import _joined_thread
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 class ExportCleanupDeferred(RuntimeError):
   """Unresolved evidence prevents retirement, without preventing publication."""
+
+
+class SourceReuseConflict(ValueError):
+  pass
 
 
 def partition_records(chunks, request: HistoryPartitionRequest) -> list[dict]:
@@ -159,24 +164,34 @@ def publish(records: list[dict]) -> list[dict]:
 
 
 _REUSABLE_SOURCE_REQUEST_SQL = """
-  SELECT request_id FROM market_data_request
+  WITH candidates AS (
+  SELECT request_id,created_at,ingestion_result->>'native_storage_version' AS version
+  FROM market_data_request
   WHERE status='COMPLETED' AND request_payload->>'operation'='bars'
     AND (request_payload->'stock_list')::jsonb @> CAST(:codes AS jsonb)
     AND (request_payload->'periods')::jsonb @> CAST(:periods AS jsonb)
     AND request_payload->>'start_time' <= :day
     AND request_payload->>'end_time' >= :day
+    AND request_payload->>'start_time' ~ '^[0-9]{8}$'
+    AND request_payload->>'end_time' ~ '^[0-9]{8}$'
     AND ingestion_result->'persistence_verification'->>'status'='verified'
     AND EXISTS (
       SELECT 1
-      FROM json_array_elements(
-        COALESCE(ingestion_result->'day_coverage', '[]'::json)
-      ) AS day_coverage(value)
+      FROM jsonb_array_elements(CASE
+        WHEN jsonb_typeof(ingestion_result::jsonb->'day_coverage')='array'
+        THEN ingestion_result::jsonb->'day_coverage' ELSE '[]'::jsonb END) AS day_coverage(value)
       WHERE day_coverage.value->>'instrument_code' = :instrument
         AND LOWER(COALESCE(day_coverage.value->>'period', '')) = :period
         AND REPLACE(day_coverage.value->>'trading_date', '-', '') = :day
         AND day_coverage.value->>'point_count' ~ '^[1-9][0-9]*$'
     )
-  ORDER BY completed_at DESC LIMIT 1
+  ), newest AS (
+    SELECT * FROM candidates WHERE created_at=(SELECT MAX(created_at) FROM candidates)
+  )
+  SELECT MAX(request_id) AS request_id,
+    COUNT(DISTINCT COALESCE(version,'')) > 1
+      OR (COUNT(*) > 1 AND BOOL_OR(COALESCE(version,'')='')) AS ambiguous
+  FROM newest HAVING COUNT(*) > 0
 """
 
 
@@ -185,16 +200,27 @@ async def find_reusable_source_request(
 ) -> str | None:
   """Find a completed source that proves positive coverage for this partition."""
 
-  return await connection.scalar(
-    text(_REUSABLE_SOURCE_REQUEST_SQL),
-    {
-      "codes": json.dumps([request.instrument]),
-      "periods": json.dumps([request.period]),
-      "day": payload["start_time"],
-      "instrument": request.instrument,
-      "period": request.period.lower(),
-    },
+  rows = (
+    (
+      await connection.execute(
+        text(_REUSABLE_SOURCE_REQUEST_SQL),
+        {
+          "codes": json.dumps([request.instrument]),
+          "periods": json.dumps([request.period]),
+          "day": payload["start_time"],
+          "instrument": request.instrument,
+          "period": request.period.lower(),
+        },
+      )
+    )
+    .mappings()
+    .all()
   )
+  if not rows:
+    return None
+  if rows[0]["ambiguous"]:
+    raise SourceReuseConflict("SOURCE_VERSION_ORDER_AMBIGUOUS")
+  return rows[0]["request_id"]
 
 
 def _has_positive_source_coverage(
@@ -300,7 +326,17 @@ async def _dispatch_owned(store, owner) -> dict:
     payload = request.agent_payload()
     source_id = row["source_request_id"]
     if not source_id:
-      source_id = await find_reusable_source_request(connection, request, payload)
+      try:
+        source_id = await find_reusable_source_request(connection, request, payload)
+      except SourceReuseConflict:
+        await connection.execute(
+          text("""
+          UPDATE development_data_export SET state='INCOMPLETE',error='SOURCE_VERSION_ORDER_AMBIGUOUS',updated_at=clock_timestamp()
+          WHERE id=:id
+        """),
+          {"id": row["id"]},
+        )
+        return {"status": "incomplete", "partitions": 1}
     if not source_id:
       if not await history_window_open():
         return {"status": "waiting", "partitions": 1}
@@ -392,7 +428,7 @@ async def _dispatch_owned(store, owner) -> dict:
       )
       if result.rowcount != 1:
         raise RuntimeError("EXPORT_PUBLICATION_CONFLICT")
-  except (ValueError, OSError, MarketDataValidationError) as exc:
+  except (ValueError, OSError, MarketDataValidationError, HistoryReadInvalid) as exc:
     await set_failed(store, owner, row["id"], safe_export_error(exc))
     return {"status": "incomplete", "partitions": 1}
   return {"status": "processed", "partitions": 1}

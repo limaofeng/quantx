@@ -100,10 +100,16 @@ async def test_reusable_source_requires_positive_target_day_coverage():
       self.statement = ""
       self.parameters = {}
 
-    async def scalar(self, statement, parameters):
+    async def execute(self, statement, parameters):
       self.statement = str(statement)
       self.parameters = parameters
-      return None
+      return self
+
+    def mappings(self):
+      return self
+
+    def all(self):
+      return []
 
   connection = Connection()
   assert (
@@ -112,7 +118,8 @@ async def test_reusable_source_requires_positive_target_day_coverage():
   )
 
   sql = " ".join(connection.statement.split())
-  assert "json_array_elements" in sql
+  assert "jsonb_array_elements" in sql
+  assert "COUNT(DISTINCT COALESCE(version,'')) > 1" in sql
   assert "day_coverage.value->>'instrument_code' = :instrument" in sql
   assert "REPLACE(day_coverage.value->>'trading_date', '-', '') = :day" in sql
   assert "day_coverage.value->>'point_count' ~ '^[1-9][0-9]*$'" in sql

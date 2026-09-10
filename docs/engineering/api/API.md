@@ -260,6 +260,10 @@ Engine 默认生命周期已接范围登记和有界归档发送，已移除实�
 不早于代次登记分钟、不晚于当前时间；恢复不授予旧源新增修订权限。已登记身份
 仍精确幂等重放。其他历史调用方及完整运行验收尚未完成。
 
+未绑定源的导出按源请求创建时间复用；同一最新创建时间的全部候选若版本冲突，
+返回 INCOMPLETE / SOURCE_VERSION_ORDER_AMBIGUOUS，不创建替代源。已绑定源不会重新选择。
+损坏原生证明记为 INCOMPLETE / NATIVE_VERSION_PROOF_INVALID，并保留原关联。
+
 原生摄取 day_coverage 保存每分区 content_sha256。开发导出重建要求原源请求的
 固定版本、正覆盖和该摘要同时匹配，校验逐字段内容后才发布文件。Tick 保留原
 source_time_ms/tick_ordinal 并还原五档展开列，日线保留已提供的上下限价。缺少

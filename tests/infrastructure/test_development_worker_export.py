@@ -123,8 +123,9 @@ async def row(case):
     )
 
 
+@pytest.mark.parametrize("corrupt", [False, True])
 async def test_default_dispatch_rebuilds_missing_files_from_original_fixed_version(
-  export_case, monkeypatch
+  export_case, monkeypatch, corrupt
 ):
   from quantx_infrastructure.services import local_history_reader, native_bar_ingestion
   from quantx_infrastructure.services.market_data_transfer_ingestion import (
@@ -159,12 +160,22 @@ async def test_default_dispatch_rebuilds_missing_files_from_original_fixed_versi
   )
   await ingest_uploaded_bar_request(newer, newer.identity)
   case.source.update(request_payload=payload, ingestion_result=audit)
+  if corrupt:
+    audit["content_verification"]["persisted_sha256"] = "0" * 64
   monkeypatch.setattr(
     exporter,
     "load_uploaded_request_manifest",
     AsyncMock(side_effect=FileNotFoundError()),
   )
-  assert (await exporter.dispatch_once(case.first))["status"] == "processed"
+  result = await exporter.dispatch_once(case.first)
+  if corrupt:
+    assert result["status"] == "incomplete"
+    failed = await row(case)
+    assert failed["state"] == "INCOMPLETE"
+    assert failed["error"] == "NATIVE_VERSION_PROOF_INVALID"
+    assert failed["source_request_id"] == "original" and failed["manifest"] is None
+    return
+  assert result["status"] == "processed"
   published = await row(case)
   assert published["state"] == "READY" and published["source_request_id"] == "original"
   files = [
@@ -173,6 +184,32 @@ async def test_default_dispatch_rebuilds_missing_files_from_original_fixed_versi
   ]
   records = next(_iter_transfer_chunks(files))
   assert records[0]["close"] == original["close"]
+
+
+async def test_ambiguous_reuse_does_not_create_or_bind_replacement_source(
+  export_case, monkeypatch
+):
+  case = export_case
+  async with case.first.engine.begin() as db:
+    await db.execute(
+      text(
+        "UPDATE development_data_export SET source_request_id=NULL WHERE id='export'"
+      )
+    )
+  create = AsyncMock()
+  monkeypatch.setattr(case.first, "create_market_data_request", create)
+  monkeypatch.setattr(
+    exporter,
+    "find_reusable_source_request",
+    AsyncMock(
+      side_effect=exporter.SourceReuseConflict("SOURCE_VERSION_ORDER_AMBIGUOUS")
+    ),
+  )
+  assert (await exporter.dispatch_once(case.first))["status"] == "incomplete"
+  failed = await row(case)
+  assert failed["state"] == "INCOMPLETE" and failed["source_request_id"] is None
+  assert failed["error"] == "SOURCE_VERSION_ORDER_AMBIGUOUS"
+  create.assert_not_awaited()
 
 
 async def test_default_dispatch_publishes_once_with_original_source(
