@@ -71,5 +71,25 @@ async def test_paged_audit_survives_flow_exit_and_joins_later_ingestion():
       )
       assert sum(row["count"] for row in await audit.counts()) == 2
       assert (await audit.page(offset=0, limit=1))[0]["coverage_status"] == "VERIFIED"
+      await audit.record(
+        3,
+        {"periods": ["1d"]},
+        "remote-summary",
+        "PENDING",
+        {
+          "request_status": "REMOTE_WAITING",
+          "phase": "DELIVERY",
+          "expected_partitions": 10,
+          "verified_partitions": 3,
+        },
+      )
+      remote = (await audit.page(offset=2, limit=1))[0]
+      assert remote["request_status"] == "REMOTE_WAITING"
+      assert remote["request_phase"] == "DELIVERY"
+      assert remote["updated_at"].utcoffset().total_seconds() == 0
+      assert remote["summary"]["verified_partitions"] == 3
+      assert any(
+        row["request_status"] == "REMOTE_WAITING" for row in await audit.counts()
+      )
   finally:
     await engine.dispose()

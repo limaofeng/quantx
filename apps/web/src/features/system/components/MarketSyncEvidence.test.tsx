@@ -33,6 +33,7 @@ const evidence = (status: string, count = 1) => ({
         end_time: '20260803',
       },
       summary: {},
+      updated_at: '2026-09-10T04:00:00Z',
     },
   ],
 });
@@ -196,5 +197,26 @@ describe('MarketSyncEvidence', () => {
     expect(
       fetchMock.mock.calls.filter(call => call[1]?.method === 'POST')
     ).toHaveLength(1);
+  });
+  it('shows remote delivery counts as snapshots without native recovery', async () => {
+    const result = evidence('REMOTE_WAITING');
+    const items = result.items.map(item => ({
+      ...item,
+      summary: { expected_partitions: 10, verified_partitions: 3 },
+    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ ...result, items }),
+      })
+    );
+    await act(async () => {
+      render(<MarketSyncEvidence runId="remote" live={false} />);
+    });
+    expect(screen.getByText('开发交付等待中')).toBeInTheDocument();
+    expect(screen.getByText('3/10 分区已核验')).toBeInTheDocument();
+    expect(screen.getByText(/最后观察：/)).toBeInTheDocument();
+    expect(screen.queryByText('恢复请求')).not.toBeInTheDocument();
   });
 });

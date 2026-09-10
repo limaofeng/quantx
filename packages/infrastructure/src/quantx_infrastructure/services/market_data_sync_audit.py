@@ -50,8 +50,8 @@ class MarketDataSyncAudit:
           await connection.execute(
             text("""
         SELECT p.batch_index, p.scope, p.request_id, p.coverage_status, p.summary,
-               p.updated_at, r.status AS request_status, r.completed_at,
-               r.ingestion_progress->>'phase' AS request_phase,
+               p.updated_at AT TIME ZONE 'UTC' AS updated_at, COALESCE(r.status,p.summary->>'request_status') AS request_status, r.completed_at,
+               COALESCE(r.ingestion_progress->>'phase',p.summary->>'phase') AS request_phase,
                r.ingestion_progress->>'reason_code' AS request_reason,
                COALESCE(p.summary ->> 'records_saved',
                         CASE WHEN r.status='COMPLETED'
@@ -91,11 +91,11 @@ class MarketDataSyncAudit:
         (
           await connection.execute(
             text("""
-        SELECT p.coverage_status, r.status AS request_status, count(*) AS count,
+        SELECT p.coverage_status, COALESCE(r.status,p.summary->>'request_status') AS request_status, count(*) AS count,
                max(COALESCE(r.completed_at,p.updated_at)) AS updated_at
         FROM market_data_sync_partition p
         LEFT JOIN market_data_request r ON r.request_id=p.request_id
-        WHERE p.run_id=:run_id GROUP BY p.coverage_status,r.status
+        WHERE p.run_id=:run_id GROUP BY p.coverage_status,COALESCE(r.status,p.summary->>'request_status')
       """),
             {"run_id": self.run_id},
           )

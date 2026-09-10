@@ -28,7 +28,12 @@ const evidenceSchema = z.object({
         start_time: z.string(),
         end_time: z.string(),
       }),
-      summary: z.object({ reason: z.string().optional() }),
+      updated_at: z.string(),
+      summary: z.object({
+        reason: z.string().optional(),
+        expected_partitions: z.number().int().nonnegative().optional(),
+        verified_partitions: z.number().int().nonnegative().optional(),
+      }),
     })
   ),
 });
@@ -41,8 +46,13 @@ const requestLabels: Record<string, string> = {
   COMPLETED: '已处理',
   FAILED: '失败',
   BLOCKED: '已阻塞',
+  REMOTE_WAITING: '开发交付等待中',
+  REMOTE_FAILED: '开发交付不完整',
+  REMOTE_VERIFIED: '开发交付已核验',
 };
 const phaseLabels: Record<string, string> = {
+  REFERENCE: '准备参考日历',
+  DELIVERY: '等待开发交付',
   VALIDATE: '校验文件',
   WRITE: '写入行情',
   READBACK: '回读核验',
@@ -148,7 +158,14 @@ export function MarketSyncEvidence({
         poll ||= result.counts.some(
           item =>
             item.request_status !== null &&
-            !['COMPLETED', 'FAILED', 'BLOCKED'].includes(item.request_status)
+            ![
+              'COMPLETED',
+              'FAILED',
+              'BLOCKED',
+              'REMOTE_WAITING',
+              'REMOTE_FAILED',
+              'REMOTE_VERIFIED',
+            ].includes(item.request_status)
         );
         if (!stopped) {
           setData(result);
@@ -177,7 +194,14 @@ export function MarketSyncEvidence({
       .filter(
         item =>
           item.request_status !== null &&
-          !['COMPLETED', 'FAILED', 'BLOCKED'].includes(item.request_status)
+          ![
+            'COMPLETED',
+            'FAILED',
+            'BLOCKED',
+            'REMOTE_WAITING',
+            'REMOTE_FAILED',
+            'REMOTE_VERIFIED',
+          ].includes(item.request_status)
       )
       .reduce((sum, item) => sum + item.count, 0) ?? 0;
   const verified =
@@ -196,7 +220,7 @@ export function MarketSyncEvidence({
         </p>
       )}
       <p className="my-2 text-ui-caption text-slate-500">
-        后台请求会在任务结束后继续收敛；请求处理完成与覆盖合格分别展示。
+        后台请求会在任务结束后继续收敛；请求处理完成与覆盖合格分别展示。开发分区数为等待进程最后观察的快照。
       </p>
       <div className="max-h-64 overflow-auto">
         <table className="w-full text-left text-ui-caption">
@@ -207,7 +231,7 @@ export function MarketSyncEvidence({
               <th>请求状态</th>
               <th>摄取阶段</th>
               <th>覆盖状态</th>
-              <th>记录数</th>
+              <th>记录数 / 开发分区</th>
               <th>原因</th>
               <th>操作</th>
             </tr>
@@ -243,7 +267,21 @@ export function MarketSyncEvidence({
                         ? '不完整'
                         : '待校验'}
                   </td>
-                  <td>{item.records_saved ?? '--'}</td>
+                  <td>
+                    {item.summary.expected_partitions !== undefined ? (
+                      <>
+                        <span>
+                          {item.summary.verified_partitions ?? 0}/
+                          {item.summary.expected_partitions} 分区已核验
+                        </span>
+                        <div>
+                          最后观察：{new Date(item.updated_at).toLocaleString()}
+                        </div>
+                      </>
+                    ) : (
+                      (item.records_saved ?? '--')
+                    )}
+                  </td>
                   <td>
                     {reasonLabel(item.request_reason ?? item.summary.reason)}
                   </td>

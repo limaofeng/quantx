@@ -160,6 +160,7 @@ async def _request_and_wait(
   required_capabilities: Optional[list[str]] = None,
   idempotency_scope: str = "",
   on_created: Callable[[str], Awaitable[None]] | None = None,
+  on_progress: Callable[[dict], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
   from quantx_infrastructure.config.settings import settings
 
@@ -172,7 +173,12 @@ async def _request_and_wait(
 
     async def remote_progress(event):
       nonlocal remote_identity
+      first = remote_identity is None
       remote_identity = event["request_id"]
+      if first and on_created:
+        await on_created(remote_identity)
+      if on_progress:
+        await on_progress(event)
       report_request(
         remote_identity,
         "准备开发行情日历" if event["phase"] == "REFERENCE" else "等待开发行情交付",
@@ -183,7 +189,7 @@ async def _request_and_wait(
       remote = await request_remote_history(
         payload, timeout_seconds=timeout_seconds, on_progress=remote_progress
       )
-      if on_created and remote.get("request_id"):
+      if on_created and remote_identity is None and remote.get("request_id"):
         await on_created(remote["request_id"])
       return {
         **remote,

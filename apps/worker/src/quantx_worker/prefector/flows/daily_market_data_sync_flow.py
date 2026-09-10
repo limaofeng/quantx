@@ -152,6 +152,7 @@ async def _request_market_data_batch(
   observer = observation.get()
   audit = getattr(observer, "audit", None)
   current_request = ""
+  remote_summary = {}
 
   async def on_created(request_id):
     nonlocal current_request
@@ -159,6 +160,23 @@ async def _request_market_data_batch(
     if audit:
       await audit.record(batch_index, request_payload, request_id, "PENDING", {})
 
+  async def on_progress(event):
+    nonlocal remote_summary
+    summary = {
+      "request_status": "REMOTE_WAITING",
+      "phase": event["phase"],
+      "expected_partitions": event["expected_partitions"],
+      "verified_partitions": event["verified_partitions"],
+    }
+    if summary == remote_summary:
+      return
+    remote_summary = summary
+    if audit:
+      await audit.record(
+        batch_index, request_payload, current_request, "PENDING", summary
+      )
+
+  request_kwargs["on_progress"] = on_progress
   request_kwargs["on_created"] = on_created
   try:
     transfer = await _request_and_wait(request_payload, **request_kwargs)
@@ -200,6 +218,11 @@ async def _request_market_data_batch(
         current_request,
         "VERIFIED",
         {
+          **(
+            {**remote_summary, "request_status": "REMOTE_VERIFIED"}
+            if remote_summary
+            else {}
+          ),
           "records_received": int(transfer["records_received"]),
           "records_saved": int(transfer["records_saved"]),
         },
@@ -216,7 +239,15 @@ async def _request_market_data_batch(
         request_payload,
         current_request,
         "INCOMPLETE",
-        {"reason": str(exc)[:2000], **exc.counts},
+        {
+          **(
+            {**remote_summary, "request_status": "REMOTE_FAILED"}
+            if remote_summary
+            else {}
+          ),
+          "reason": str(exc)[:2000],
+          **exc.counts,
+        },
       )
     raise
   except BaseException:

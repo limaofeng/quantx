@@ -193,3 +193,29 @@ async def test_remote_wait_progress_reaches_heartbeat_and_is_removed(monkeypatch
     result = await durable._request_and_wait({"operation": "bars"})
     assert result["status"] == "timeout"
     assert observer.requests == {}
+
+
+async def test_remote_progress_is_persisted_before_wait_completes(monkeypatch):
+  async def request(payload, *, on_created, on_progress, **kwargs):
+    await on_created("remote-summary")
+    event = {"request_id": "remote-summary", "phase": "DELIVERY", "expected_partitions": 10, "verified_partitions": 3}
+    await on_progress(event)
+    await on_progress(event)
+    assert audit.record.await_count == 2
+    assert audit.record.await_args.args[-1]["verified_partitions"] == 3
+    return {"request_id": "remote-summary", "status": "failed", "reason": "DATA_UNAVAILABLE"}
+
+  audit = Mock(record=AsyncMock())
+  monkeypatch.setattr(flow, "_request_and_wait", request)
+  async with progress.observe_market_sync(Mock()) as observer:
+    observer.audit = audit
+    try:
+      await flow._request_market_data_batch(code_batch=["000001.SZ"], batch_index=1, total_batches=1,
+        periods=["1d"], start_time="20260803", end_time="20260803", agent_device_id="",
+        idempotency_scope="remote", trading_days=trading_days("20260803", "20260803"), lifetimes={})
+    except flow.MarketDataPartitionFailure:
+      pass
+    else:
+      raise AssertionError("incomplete delivery must fail")
+  assert audit.record.await_args.args[-1]["request_status"] == "REMOTE_FAILED"
+  assert audit.record.await_args.args[-1]["verified_partitions"] == 3
