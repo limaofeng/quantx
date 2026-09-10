@@ -10,6 +10,10 @@
     {
       "remote_path": "F:/Workspace/quantx/.runtime/diagnostics/incomplete-files-causes-450c1af8.json",
       "sha256": "df29f85def640784df42a59c3e13570dcc39b0d80e439f70d11fe0f4d697a236"
+    },
+    {
+      "remote_path": "F:/Workspace/quantx/.runtime/diagnostics/incomplete-coverage-b72079a7.json",
+      "sha256": "f41114100fb39e62e94e0524d01ad7b5c2e485ed2440a21dbd5d144125b7e49e"
     }
   ],
   "code_snapshot": "abf61288",
@@ -21,17 +25,19 @@
     "zero_saved_and_verified": 11,
     "missing_ingestion_progress": 11,
     "missing_native_version": 11,
-    "missing_original_request_directory": 11
+    "missing_original_request_directory": 11,
+    "source_reports_xt_data_no_rows": 11
   },
   "limitations": [
     "Current missing files do not establish the cause of the historical ValueError.",
     "Zero saved/verified counts alone do not establish an authoritative no-data outcome.",
-    "No Influx scan, source collection, migration, budget reset or task-state write was performed."
+    "No Influx scan, source collection, migration, budget reset or task-state write was performed.",
+    "XT_DATA_NO_ROWS establishes an empty provider response, not a trusted suspension/holiday or complete-market-data proof; classify unavailable rather than successful empty delivery."
   ],
   "next_required_evidence": [
     "Recover original source files from retained backups and validate the original manifest checksums before attempting file-based migration.",
-    "Inspect original day-coverage semantics and collection outcomes before deciding whether a zero-row source can prove no data.",
-    "Keep original delivery and source IDs and exhausted or unknown budgets; do not manufacture success by replacing sources or initializing budgets to zero."
+    "Keep original delivery and source IDs and exhausted or unknown budgets; do not manufacture success by replacing sources or initializing budgets to zero.",
+    "Prepare and rehearse explicit terminal-reason migration to DATA_UNAVAILABLE while archiving original errors and preserving source IDs, budgets and INCOMPLETE state; no automatic retry."
   ],
   "entries": [
     {
@@ -81,6 +87,25 @@
             "line": 971
           }
         ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "000001.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-03",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "000001.SZ",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
+          }
+        ]
       }
     },
     {
@@ -128,6 +153,25 @@
             "file": "market_data_transfer_ingestion.py",
             "function": "load_uploaded_request_manifest",
             "line": 971
+          }
+        ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "000001.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-05",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "000001.SZ",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
           }
         ]
       }
@@ -190,6 +234,25 @@
             "line": 832
           }
         ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "000543.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-24",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "000543.SZ",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
+          }
+        ]
       }
     },
     {
@@ -237,6 +300,25 @@
             "file": "market_data_transfer_ingestion.py",
             "function": "load_uploaded_request_manifest",
             "line": 971
+          }
+        ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "000001.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-06",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "000001.SZ",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
           }
         ]
       }
@@ -288,6 +370,25 @@
             "line": 971
           }
         ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "600036.SH",
+            "period": "tick",
+            "trading_date": "2026-08-05",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "600036.SH",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
+          }
+        ]
       }
     },
     {
@@ -335,6 +436,25 @@
             "file": "market_data_transfer_ingestion.py",
             "function": "load_uploaded_request_manifest",
             "line": 971
+          }
+        ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "000001.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-07",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "000001.SZ",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
           }
         ]
       }
@@ -386,6 +506,25 @@
             "line": 971
           }
         ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "600036.SH",
+            "period": "tick",
+            "trading_date": "2026-08-04",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "600036.SH",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
+          }
+        ]
       }
     },
     {
@@ -433,6 +572,25 @@
             "file": "market_data_transfer_ingestion.py",
             "function": "load_uploaded_request_manifest",
             "line": 971
+          }
+        ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "600036.SH",
+            "period": "tick",
+            "trading_date": "2026-08-06",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "600036.SH",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
           }
         ]
       }
@@ -484,6 +642,25 @@
             "line": 971
           }
         ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "600036.SH",
+            "period": "tick",
+            "trading_date": "2026-08-07",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "600036.SH",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
+          }
+        ]
       }
     },
     {
@@ -533,6 +710,25 @@
             "line": 971
           }
         ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "000001.SZ",
+            "period": "tick",
+            "trading_date": "2026-08-04",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "000001.SZ",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
+          }
+        ]
       }
     },
     {
@@ -580,6 +776,25 @@
             "file": "market_data_transfer_ingestion.py",
             "function": "load_uploaded_request_manifest",
             "line": 971
+          }
+        ]
+      },
+      "coverage_observation": {
+        "observed_at": "2026-09-10T04:39:18.295029+00:00",
+        "matching_coverage": [
+          {
+            "instrument_code": "600036.SH",
+            "period": "tick",
+            "trading_date": "2026-08-03",
+            "point_count": 0
+          }
+        ],
+        "matching_summaries": [
+          {
+            "code": "600036.SH",
+            "period": "tick",
+            "row_count": 0,
+            "no_data_reason": "XT_DATA_NO_ROWS"
           }
         ]
       }

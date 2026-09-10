@@ -5,7 +5,7 @@ import asyncio
 import threading
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from quantx_contracts.data_exchange import HistoryPartitionRequest
@@ -279,7 +279,7 @@ async def test_unverified_link_and_malformed_request_do_not_block_next_partition
   case = export_case
   case.source["ingestion_result"]["day_coverage"] = []
   assert (await exporter.dispatch_once(case.first))["status"] == "incomplete"
-  assert (await row(case))["error"] == "SOURCE_COVERAGE_UNVERIFIED"
+  assert (await row(case))["error"] == "DATA_UNAVAILABLE"
   assert (await row(case))["source_request_id"] == "original"
   async with case.first.engine.begin() as db:
     await db.execute(
@@ -503,3 +503,35 @@ async def test_changed_catalog_state_cannot_be_reported_as_published(
     await exporter.dispatch_once(case.first)
   pending = await row(case)
   assert pending["state"] == "BLOCKED" and pending["manifest"] is None
+
+
+@pytest.mark.parametrize("development_only", [False, True, None])
+@pytest.mark.parametrize("coverage", ["zero", "missing", "malformed"])
+async def test_completed_source_without_coverage_is_terminal_unavailable(
+  export_case, monkeypatch, development_only, coverage
+):
+  case = export_case
+  case.source["development_only"] = development_only
+  audit = case.source["ingestion_result"]
+  if coverage == "zero":
+    audit["day_coverage"][0]["point_count"] = 0
+  elif coverage == "missing":
+    audit.pop("day_coverage")
+  else:
+    audit["day_coverage"] = 7
+  create = AsyncMock()
+  monkeypatch.setattr(case.first, "create_market_data_request", create)
+  read_files = exporter.load_uploaded_request_manifest
+  proof = Mock(side_effect=AssertionError("unavailable source must not build proof"))
+  monkeypatch.setattr(exporter, "source_proof", proof)
+  assert (await exporter.dispatch_once(case.first))["status"] == "incomplete"
+  failed = await row(case)
+  assert failed["state"] == "INCOMPLETE"
+  assert failed["error"] == "DATA_UNAVAILABLE"
+  assert failed["source_request_id"] == "original"
+  assert failed["manifest"] is None
+  read_files.assert_not_awaited()
+  create.assert_not_awaited()
+  proof.assert_not_called()
+  assert (await exporter.dispatch_once(case.first))["status"] == "idle"
+  assert await row(case) == failed

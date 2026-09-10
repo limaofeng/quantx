@@ -237,7 +237,10 @@ def _has_positive_source_coverage(
   if not isinstance(ingestion, dict):
     return False
   target_day = request.trading_date.strftime("%Y%m%d")
-  for item in ingestion.get("day_coverage") or []:
+  coverage = ingestion.get("day_coverage")
+  if not isinstance(coverage, list):
+    return False
+  for item in coverage:
     if not isinstance(item, dict):
       continue
     if (
@@ -362,12 +365,10 @@ async def _dispatch_owned(store, owner) -> dict:
   if source is None:
     await set_failed(store, owner, row["id"], "SOURCE_REQUEST_MISSING")
     return {"status": "incomplete", "partitions": 1}
-  if (
-    source["status"] == "COMPLETED"
-    and source.get("development_only") is False
-    and not _has_positive_source_coverage(source, request)
+  if source["status"] == "COMPLETED" and not _has_positive_source_coverage(
+    source, request
   ):
-    await set_failed(store, owner, row["id"], "SOURCE_COVERAGE_UNVERIFIED")
+    await set_failed(store, owner, row["id"], "DATA_UNAVAILABLE")
     return {"status": "incomplete", "partitions": 1}
   if source["status"] != "COMPLETED":
     if source["status"] == "FAILED":
