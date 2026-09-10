@@ -714,6 +714,18 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   CPU 输出、分数与冻结视图同一 binding hash、自检失败及加载期间撤权；Ruff/差异检查通过，
   证据 `p8-full-binding-load-final.log`。登记使用合成证据，不是业务审批；真实 supervisor
   加载/完整分钟调度及模型 snapshot 与下单使用点接线仍待实现，模型下单门保持关闭。
+  实际 PAPER supervisor reconcile 已接入模型预加载：非 RULE_ONLY 必须配置本机绝对
+  `T_MODEL_ARTIFACT_ROOT`，并在冻结 settings.model_runtime_policy 中明确正整数
+  `score_max_age_ms` / `inference_budget_ms`；缺省根目录不加载，RULE_ONLY 不访问模型。
+  当前注册证据提供 cpu_artifact_entry 与 runtime_self_test_manifest 及其 hash/容差版本；
+  首次经完整 load 链创建 COLD scorer，未变更 reconcile 复用已自检对象但重新读取授权。
+  根目录/预算/登记/自检/文件校验失败、撤权或取消预加载时解除账户内存绑定，保留持久化义务。
+  **50 项 PAPER 配置/supervisor 回归通过**，取消边界补验 **6 项通过**；实际 SQLite
+  配置切换/登记及本地制品自检覆盖首次加载、刷新不重复 IO、后续撤权和失败旧源清理，
+  Ruff/差异检查通过。证据 `p8-supervisor-preload-final.log`、`p8-supervisor-preload-cancel.log`。
+  未配置业务根目录或登记模型；当前只接预加载，完整分钟输入调度/模型视图进入 snapshot
+  仍待实现，PAPER/LIVE 的模型下单限制未放开，不代表 SHADOW 观察验收已完成。
+
 
 
 

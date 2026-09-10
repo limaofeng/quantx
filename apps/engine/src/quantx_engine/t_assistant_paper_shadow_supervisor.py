@@ -8,6 +8,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from quantx_application.t_trade_v3.execution_use_cases import (
@@ -27,6 +28,7 @@ from quantx_domain.trading.t_assistant_execution import (
   TAssistantExecutionStatus,
   TAssistantRolloutStage,
   TAssistantScorerMode,
+  TModelRuntimeBinding,
 )
 from quantx_domain.trading.t_assistant_market_state import (
   T_MARKET_GENERATION_CHANGED,
@@ -39,6 +41,7 @@ from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityReferenceProfile,
   OpportunitySample,
 )
+from quantx_infrastructure.config.settings import settings as runtime_settings
 from quantx_infrastructure.core.data.whole_quote_hub import (
   QuoteConsumerStatus,
   QuoteDeliveryMode,
@@ -70,6 +73,9 @@ from quantx_infrastructure.repositories.t_assistant_execution_repository import 
 from quantx_infrastructure.repositories.t_assistant_symbol_state_repository import (
   TAssistantSymbolStateRepository,
 )
+from quantx_infrastructure.repositories.t_model_registry_repository import (
+  TModelRegistryRepository,
+)
 from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
   TTradeInstrumentProfileRepository,
 )
@@ -94,6 +100,7 @@ from .t_assistant_paper_entry_runtime import (
   TAssistantPaperEntryRuntime,
 )
 from .t_assistant_paper_seed import paper_policy_blockers, prepare_paper_seed
+from .t_registry_model_batch_runtime import TRegistryModelBatchRuntime
 from .t_trade_decision_snapshot import (
   TDecisionSnapshotBuilder,
   TDecisionSnapshotBuildError,
@@ -125,6 +132,7 @@ class _PaperShadowBinding:
   accepted_sequences: dict[str, int]
   continuity_generations: dict[str, str]
   market_books: dict[str, tuple[AcceptedTMarketTick, int, MarketDataSnapshot]] = field(default_factory=dict)
+  model_runtime: TRegistryModelBatchRuntime | None = None
 
 
 class TAssistantPaperShadowSupervisor:
@@ -137,11 +145,14 @@ class TAssistantPaperShadowSupervisor:
     session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
     clock: Callable[[], datetime] = time_utils.now_aware,
     runtime: Optional[TAssistantPaperShadowRuntime] = None,
+    model_artifact_root: Path | None = None,
     legacy_compare_attempts: int = 3,
     legacy_compare_retry_seconds: float = 0.025,
   ) -> None:
     if legacy_compare_attempts < 1 or legacy_compare_retry_seconds < 0:
       raise ValueError("legacy comparison retry policy is invalid")
+    configured_root = model_artifact_root if model_artifact_root is not None else runtime_settings.t_model_artifact_root
+    self._model_artifact_root = Path(configured_root) if configured_root else None
     self._quote_hub = quote_hub
     self._session_factory = session_factory
     self._clock = clock
@@ -369,6 +380,11 @@ class TAssistantPaperShadowSupervisor:
             reference_profiles[code] = OpportunityReferenceProfile.from_dict(profile)
         parameters = self._strategy_parameters(head)
 
+    try:
+      model_runtime = await self._prepare_model_runtime(execution, version)
+    except BaseException:
+      self._unbind_account(config.account_id)
+      raise
     self._remove_account_bindings(
       config.account_id,
       keep_execution_id=execution.execution_id,
@@ -455,6 +471,7 @@ class TAssistantPaperShadowSupervisor:
         )
         for code in universe.instruments
       },
+      model_runtime=model_runtime,
       market_books={
         code: value for code, value in (previous.market_books.items() if previous else ())
         if code in universe.instruments and code not in changed_codes
@@ -482,6 +499,43 @@ class TAssistantPaperShadowSupervisor:
         self._schedule_allocation_trigger(key)
     self._account_execution_ids[config.account_id] = execution.execution_id
     return execution.execution_id
+
+  async def _prepare_model_runtime(self, execution, version):
+    if execution.scorer_mode is TAssistantScorerMode.RULE_ONLY:
+      return None
+    if self._model_artifact_root is None or not self._model_artifact_root.is_absolute():
+      raise ValueError("T_MODEL_ARTIFACT_ROOT_REQUIRED")
+    binding = TModelRuntimeBinding.from_mapping(execution.model_runtime_binding)
+    policy = version.canonical_payload.get("legacy_settings_snapshot", {}).get("model_runtime_policy")
+    if (
+      not isinstance(policy, dict) or set(policy) != {"score_max_age_ms", "inference_budget_ms"}
+      or any(type(value) is not int or value <= 0 for value in policy.values())
+    ):
+      raise ValueError("T_MODEL_RUNTIME_POLICY_REQUIRED")
+    async with self._session_factory() as db, db.begin():
+      record = await TModelRegistryRepository(db).authorize(
+        model_id=binding.model_id, model_version=binding.model_version,
+        expected_revision=binding.registry_authorization_revision, mode=binding.registry_stage,
+        artifact_sha256=binding.artifact_manifest_sha256,
+        policy_compatibility_hash=binding.portfolio_policy_compatibility_hash,
+      )
+      evidence = copy.deepcopy(record.evidence)
+    if (
+      evidence.get("runtime_self_test_manifest_hash") != binding.runtime_self_test_manifest_hash
+      or evidence.get("self_test_tolerance_policy_version") != binding.self_test_tolerance_policy_version
+    ):
+      raise ValueError("T_MODEL_SELF_TEST_REGISTRY_EVIDENCE_MISMATCH")
+    previous = self._bindings.get(execution.execution_id)
+    if (previous is not None and previous.model_runtime is not None
+      and previous.execution.config_snapshot_hash == execution.config_snapshot_hash
+      and previous.execution.model_runtime_binding == execution.model_runtime_binding):
+      return previous.model_runtime
+    return await TRegistryModelBatchRuntime.load(
+      root=self._model_artifact_root, entry=evidence.get("cpu_artifact_entry"), binding=binding,
+      self_test_manifest=evidence.get("runtime_self_test_manifest"), session_factory=self._session_factory,
+      clock_ms=lambda: int(self._now().timestamp() * 1000),
+      max_age_ms=policy["score_max_age_ms"], inference_budget_ms=policy["inference_budget_ms"],
+    )
 
   async def _on_quote_batch(self, data: dict[str, dict[str, Any]]) -> None:
     async with self._lifecycle_lock:

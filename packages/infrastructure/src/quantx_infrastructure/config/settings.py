@@ -30,6 +30,10 @@ if OVERRIDE_ENV_FILE:
 class Settings(BaseSettings):
   """应用配置类"""
 
+  t_model_artifact_root: Optional[str] = Field(
+    default=None, description="做 T 已登记模型制品的显式本机绝对根目录；未配置时禁止模型预加载",
+  )
+
   # 服务器配置
   host: str = Field(default="127.0.0.1", description="服务器监听地址")
   port: int = Field(default=18081, description="服务器端口")
