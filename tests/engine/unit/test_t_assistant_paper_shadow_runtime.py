@@ -1358,3 +1358,136 @@ async def test_real_candidate_uses_standard_allocation_pending_intake(sessions) 
     ):
       del model
       assert await db.scalar(select(func.count(column))) == 0
+
+
+@pytest.mark.parametrize("flush", ["timer", "material", "reconcile"])
+async def test_paper_pending_trigger_keeps_every_real_cycle(sessions, monkeypatch, flush):
+  from unittest.mock import AsyncMock
+
+  import quantx_engine.t_assistant_paper_shadow_supervisor as module
+
+  monkeypatch.setattr(module, "ALLOCATION_TRIGGER_DELAY_SECONDS", 10.0)
+  config, hub, supervisor, universe, key = await _reconcile_cursor_probe(sessions)
+  supervisor._clear_allocation_trigger(key)
+  dispatch = AsyncMock()
+  monkeypatch.setattr(supervisor, "_dispatch_entries", dispatch)
+  try:
+    binding = supervisor._bindings[key]
+    await supervisor._request_allocation_trigger(binding, supervisor._capture(NOW), material=False)
+    assert dispatch.await_count == 1
+    for sequence in (5, 6, 7):
+      await hub.emit(sequence)
+    assert dispatch.await_count == 1
+    assert supervisor._runtime.symbol_states(key)["600000.SH"].cursor.accepted_sequence == 7
+    async with sessions() as db:
+      assert await db.scalar(select(func.count()).select_from(TAssistantDecisionCycleRecord)) == 7
+    pending = supervisor._allocation_triggers[key]
+    assert (pending.first_fence, pending.capture.fence_sequence, pending.count) == (5, 7, 3)
+    timer = supervisor._allocation_timers[key]
+    if flush == "material":
+      await supervisor._request_allocation_trigger(binding, supervisor._capture(NOW), material=True)
+    else:
+      if flush == "reconcile":
+        await supervisor.reconcile(config=config, universe=universe)
+        assert supervisor._allocation_triggers[key] == pending
+        assert supervisor._allocation_timers[key] is not timer
+        binding = supervisor._bindings[key]
+      timer = supervisor._allocation_timers.pop(key)
+      timer.cancel()
+      await asyncio.gather(timer, return_exceptions=True)
+      supervisor._last_allocation_at[key] -= 10.0
+      supervisor._schedule_allocation_trigger(key)
+      await asyncio.wait_for(supervisor._allocation_timers[key], timeout=1)
+    assert dispatch.await_count == 2
+    assert key not in supervisor._allocation_triggers
+    async with sessions() as db:
+      event = await db.scalar(select(TAssistantExecutionEventRecord).where(
+        TAssistantExecutionEventRecord.event_type == "ALLOCATION_TRIGGERS_COALESCED",
+      ))
+      assert event.payload["first_fence"] == 5
+      assert event.payload["last_fence"] == 7
+      assert event.payload["trigger_count"] == (4 if flush == "material" else 3)
+  finally:
+    await supervisor.stop()
+
+
+@pytest.mark.parametrize("boundary", ["stop", "unbind", "market_loss", "dispatch_failure", "audit_failure"])
+async def test_paper_pending_trigger_failure_and_shutdown(sessions, monkeypatch, boundary):
+  from unittest.mock import AsyncMock
+
+  import quantx_engine.t_assistant_paper_shadow_supervisor as module
+
+  monkeypatch.setattr(module, "ALLOCATION_TRIGGER_DELAY_SECONDS", 10.0)
+  _, hub, supervisor, _, key = await _reconcile_cursor_probe(sessions)
+  supervisor._clear_allocation_trigger(key)
+  dispatch = AsyncMock()
+  monkeypatch.setattr(supervisor, "_dispatch_entries", dispatch)
+  binding = supervisor._bindings[key]
+  supervisor._last_allocation_at[key] = asyncio.get_running_loop().time()
+  await supervisor._request_allocation_trigger(binding, supervisor._capture(NOW), material=False)
+  await supervisor._request_allocation_trigger(binding, supervisor._capture(NOW), material=False)
+  timer = supervisor._allocation_timers[key]
+  try:
+    if boundary == "stop":
+      await supervisor.stop()
+    elif boundary == "unbind":
+      supervisor._unbind_account(binding.execution.account_id)
+      await asyncio.gather(timer, return_exceptions=True)
+    else:
+      timer.cancel()
+      await asyncio.gather(timer, return_exceptions=True)
+      if boundary == "market_loss":
+        hub.is_ready = False
+      elif boundary == "dispatch_failure":
+        dispatch.side_effect = RuntimeError("dispatch unavailable")
+      else:
+        monkeypatch.setattr(TAssistantExecutionRepository, "append_event", AsyncMock(side_effect=RuntimeError("audit unavailable")))
+      await supervisor._flush_allocation_trigger(key, binding, 0)
+    assert key not in supervisor._bindings
+    assert key not in supervisor._allocation_timers
+    assert key not in supervisor._allocation_triggers
+    assert dispatch.await_count == (1 if boundary == "dispatch_failure" else 0)
+  finally:
+    await supervisor.stop()
+
+
+@pytest.mark.parametrize("boundary", ["cycle_failure", "uncommitted", "generation", "universe"])
+async def test_paper_pending_trigger_cannot_survive_invalidated_input(sessions, monkeypatch, boundary):
+  from unittest.mock import AsyncMock
+
+  import quantx_engine.t_assistant_paper_shadow_supervisor as module
+
+  monkeypatch.setattr(module, "ALLOCATION_TRIGGER_DELAY_SECONDS", 10.0)
+  config, hub, supervisor, universe, key = await _reconcile_cursor_probe(sessions)
+  supervisor._clear_allocation_trigger(key)
+  dispatch = AsyncMock()
+  monkeypatch.setattr(supervisor, "_dispatch_entries", dispatch)
+  binding = supervisor._bindings[key]
+  supervisor._last_allocation_at[key] = asyncio.get_running_loop().time()
+  await supervisor._request_allocation_trigger(binding, supervisor._capture(NOW), material=False)
+  timer = supervisor._allocation_timers[key]
+  try:
+    if boundary == "cycle_failure":
+      monkeypatch.setattr(supervisor._runtime, "run_cycle", AsyncMock(side_effect=RuntimeError("cycle failed")))
+      with pytest.raises(RuntimeError, match="cycle failed"):
+        await hub.emit(5)
+      assert key not in supervisor._bindings
+    elif boundary == "uncommitted":
+      previous = supervisor.last_result(key)
+      monkeypatch.setattr(supervisor._runtime, "run_cycle", AsyncMock(return_value=replace(previous, committed=False)))
+      await hub.emit(5)
+    elif boundary == "universe":
+      changed = InstrumentUniverseSnapshot.create(
+        mode="ACCOUNT_HOLDINGS", instruments=("600000.SH",),
+        metadata={"600000.SH": {"eligible": False, "reason": "disabled"}},
+      )
+      await supervisor.reconcile(config=config, universe=changed)
+    else:
+      hub.generation += 1
+      await supervisor._request_allocation_trigger(binding, supervisor._capture(NOW), material=False)
+    await asyncio.gather(timer, return_exceptions=True)
+    assert key not in supervisor._allocation_triggers
+    assert key not in supervisor._allocation_timers
+    assert dispatch.await_count == (1 if boundary == "generation" else 0)
+  finally:
+    await supervisor.stop()

@@ -81,6 +81,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .instrument_universe_provider import InstrumentUniverseSnapshot
 from .paper_market_runtime import PaperMarketRuntime, accepted_paper_market
+from .t_allocation_trigger import ALLOCATION_TRIGGER_DELAY_SECONDS, AllocationTrigger
 from .t_assistant_candidate_controls import read_candidate_controls
 from .t_assistant_decision_runtime import (
   TAssistantPaperShadowRuntime,
@@ -156,6 +157,9 @@ class TAssistantPaperShadowSupervisor:
     self._account_execution_ids: dict[str, str] = {}
     self._last_results: dict[str, TAssistantShadowCycleResult] = {}
     self._lifecycle_lock = asyncio.Lock()
+    self._allocation_triggers = {}
+    self._allocation_timers = {}
+    self._last_allocation_at = {}
     self._legacy_compare_attempts = int(legacy_compare_attempts)
     self._legacy_compare_retry_seconds = float(legacy_compare_retry_seconds)
 
@@ -199,8 +203,14 @@ class TAssistantPaperShadowSupervisor:
     self._subscription_handle = None
     if handle is not None:
       await self._quote_hub.unsubscribe(handle)
-    self._bindings.clear()
-    self._account_execution_ids.clear()
+    async with self._lifecycle_lock:
+      timers = tuple(self._allocation_timers.values())
+      for key in tuple(self._bindings):
+        self._clear_allocation_trigger(key)
+      self._bindings.clear()
+      self._account_execution_ids.clear()
+      if timers:
+        await asyncio.gather(*timers, return_exceptions=True)
     logger.info("T-assistant PAPER shadow consumer stopped")
 
   async def _recover_entries(self):
@@ -216,7 +226,8 @@ class TAssistantPaperShadowSupervisor:
   async def _recover_entries_once(self):
     async with self._lifecycle_lock:
       for binding in tuple(self._bindings.values()):
-        await self._dispatch_entries(binding)
+        if binding.execution.execution_id not in self._allocation_triggers:
+          await self._dispatch_entries(binding)
 
   async def reconcile(
     self,
@@ -363,6 +374,7 @@ class TAssistantPaperShadowSupervisor:
       keep_execution_id=execution.execution_id,
     )
     for predecessor_id in predecessor_ids:
+      self._clear_allocation_trigger(predecessor_id)
       self._bindings.pop(predecessor_id, None)
     entries = tuple(
       TSymbolUniverseEntry(
@@ -448,12 +460,38 @@ class TAssistantPaperShadowSupervisor:
         if code in universe.instruments and code not in changed_codes
       },
     )
+    key = execution.execution_id
+    pending = self._allocation_triggers.get(key)
+    last_at = self._last_allocation_at.get(key)
+    self._clear_allocation_trigger(key)
+    if (
+      previous is not None and not changed_codes and previous.universe == entries
+      and previous.parameters == parameters
+      and all(getattr(previous.execution, field) == getattr(execution, field) for field in (
+        "config_version_id", "config_snapshot_hash", "frozen_config_version", "status",
+        "entry_authorization", "rollout_stage", "scorer_mode", "model_runtime_binding",
+        "policy_version", "feature_schema_version", "universe_revision",
+      ))
+      and previous.execution.readiness.readiness == execution.readiness.readiness
+      and previous.execution.readiness.reasons == execution.readiness.reasons
+    ):
+      if last_at is not None:
+        self._last_allocation_at[key] = last_at
+      if pending is not None:
+        self._allocation_triggers[key] = pending
+        self._schedule_allocation_trigger(key)
     self._account_execution_ids[config.account_id] = execution.execution_id
     return execution.execution_id
 
   async def _on_quote_batch(self, data: dict[str, dict[str, Any]]) -> None:
     async with self._lifecycle_lock:
-      await self._on_quote_batch_locked(data)
+      try:
+        await self._on_quote_batch_locked(data)
+      except Exception:
+        # No deferred dispatch may outlive a failed CRITICAL market callback.
+        for account_id in tuple(self._account_execution_ids):
+          self._unbind_account(account_id)
+        raise
 
   async def _on_quote_batch_locked(self, data: dict[str, dict[str, Any]]) -> None:
     if not data:
@@ -556,24 +594,109 @@ class TAssistantPaperShadowSupervisor:
           },
         )
       except TDecisionSnapshotBuildError as exc:
+        self._clear_allocation_trigger(binding.execution.execution_id)
         logger.info(
           "T-assistant PAPER snapshot blocked: execution=%s reason=%s",
           binding.execution.execution_id,
           exc.reason_code,
         )
         continue
-      result = await self._runtime.run_cycle(
-        execution=binding.execution,
-        snapshot=snapshot,
-        legacy_results=await self._load_legacy_results(binding, snapshot),
-      )
-      self._last_results[binding.execution.execution_id] = result
-      await self._activate_if_warm(
-        binding,
-        capture=capture,
-        gate_context=gate_context,
-      )
-      await self._dispatch_entries(binding)
+      try:
+        result = await self._runtime.run_cycle(
+          execution=binding.execution,
+          snapshot=snapshot,
+          legacy_results=await self._load_legacy_results(binding, snapshot),
+        )
+        self._last_results[binding.execution.execution_id] = result
+        await self._activate_if_warm(
+          binding,
+          capture=capture,
+          gate_context=gate_context,
+        )
+        if result.committed:
+          output = result.output
+          await self._request_allocation_trigger(
+            binding, capture,
+            material=bool(output.trade_intents or any(patch.material for patch in output.symbol_state_patches)),
+          )
+        else:
+          self._clear_allocation_trigger(binding.execution.execution_id)
+      except Exception:
+        self._unbind_account(binding.execution.account_id)
+        raise
+
+  def _clear_allocation_trigger(self, key):
+    self._allocation_triggers.pop(key, None)
+    self._last_allocation_at.pop(key, None)
+    timer = self._allocation_timers.pop(key, None)
+    if timer is not None and timer is not asyncio.current_task():
+      timer.cancel()
+
+  def _schedule_allocation_trigger(self, key):
+    elapsed = asyncio.get_running_loop().time() - self._last_allocation_at.get(key, float("-inf"))
+    self._allocation_timers[key] = asyncio.create_task(
+      self._flush_allocation_trigger(key, self._bindings[key], max(0, ALLOCATION_TRIGGER_DELAY_SECONDS - elapsed)),
+      name=f"paper-allocation-trigger:{key}",
+    )
+
+  async def _request_allocation_trigger(self, binding, capture, *, material):
+    key = binding.execution.execution_id
+    pending = self._allocation_triggers.get(key)
+    # A reset invalidates the earlier trigger; the new material cycle owns recovery.
+    if pending is not None and (
+      pending.capture.stream_id != capture.stream_id
+      or pending.capture.continuity_generation != capture.continuity_generation
+    ):
+      self._clear_allocation_trigger(key)
+      pending = None
+    trigger = pending.merge(capture) if pending else AllocationTrigger(capture, capture.fence_sequence)
+    elapsed = asyncio.get_running_loop().time() - self._last_allocation_at.get(key, float("-inf"))
+    if material or elapsed >= ALLOCATION_TRIGGER_DELAY_SECONDS:
+      self._allocation_triggers.pop(key, None)
+      timer = self._allocation_timers.pop(key, None)
+      if timer is not None:
+        timer.cancel()
+      await self._dispatch_allocation_trigger(binding, trigger)
+    else:
+      self._allocation_triggers[key] = trigger
+      if key not in self._allocation_timers:
+        self._schedule_allocation_trigger(key)
+
+  async def _flush_allocation_trigger(self, key, binding, delay):
+    try:
+      await asyncio.sleep(delay)
+      async with self._lifecycle_lock:
+        if self._bindings.get(key) is not binding:
+          return
+        trigger = self._allocation_triggers.pop(key, None)
+        self._allocation_timers.pop(key, None)
+        if trigger is not None:
+          try:
+            await self._dispatch_allocation_trigger(binding, trigger)
+          except Exception:
+            self._unbind_account(binding.execution.account_id)
+            logger.warning("Deferred PAPER T allocation failed; source unbound")
+    except asyncio.CancelledError:
+      raise
+
+  async def _dispatch_allocation_trigger(self, binding, trigger):
+    key = binding.execution.execution_id
+    capture = trigger.capture
+    if (
+      not self._quote_hub.is_ready
+      or self._quote_hub.stream_id != capture.stream_id
+      or str(self._quote_hub.generation) != capture.continuity_generation
+      or not 0 <= (self._now() - capture.captured_at).total_seconds() < 90
+    ):
+      raise ValueError("PAPER_ALLOCATION_MARKET_CHANGED")
+    if trigger.count > 1:
+      async with self._session_factory() as db, db.begin():
+        await TAssistantExecutionRepository(db).append_event(TAssistantExecutionEvent(
+          key, f"paper-allocation-trigger:{key}:{capture.stream_id}:{capture.continuity_generation}:{trigger.first_fence}:{capture.fence_sequence}",
+          "ALLOCATION_TRIGGERS_COALESCED", self._now(), trigger.evidence(),
+        ))
+    await self._dispatch_entries(binding)
+    self._last_allocation_at[key] = asyncio.get_running_loop().time()
 
   async def _dispatch_entries(self, binding):
     async def witness(code):
@@ -827,6 +950,7 @@ class TAssistantPaperShadowSupervisor:
       if (
         binding.execution.account_id == normalized and execution_id != keep_execution_id
       ):
+        self._clear_allocation_trigger(execution_id)
         self._bindings.pop(execution_id, None)
     if keep_execution_id is None:
       self._account_execution_ids.pop(normalized, None)

@@ -999,7 +999,7 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   并发；每个 accepted batch 仍执行完整周期。
   LIVE 分配/ENTRY dispatch 触发现接入固定 100ms 合并窗口：首次立即执行，普通触发只覆盖
   最新完整 capture/fence、不延长窗口，静默后由单个 timer 执行；material patch/提案立即
-  结束合并。reducer/step/周期提交不合并，scorer 与 PAPER 路径尚未接入此机制。
+  结束合并。reducer/step/周期提交不合并；PAPER 后续接入见下项，scorer 尚未接入此机制。
   多触发合并在分配前写 ALLOCATION_TRIGGERS_COALESCED（stream/generation、首末 fence、
   数量及窗口）；写入失败不分配。停止/解除绑定取消 timer；未变更 reconcile 保留原触发及
   原截止时间；延迟任务复核行情，失效或执行错误解除绑定并阻断后续 ENTRY。
@@ -1007,6 +1007,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   立即执行、静默触发、刷新保留、停止、行情失效、分配和审计故障。Ruff/差异检查通过；
   证据 `p7-allocation-trigger.log`、`p7-allocation-trigger-final.log`。分配/下单端口为 spy，
   未发送订单；100ms 是合并调度窗口，不是阻塞事件循环下的执行耗时保证，P7 完整门仍未完成。
+  PAPER 分配/入场 dispatch 已接入同一固定 100ms 调度窗口：撮合、accepted Tick、step 与
+  周期提交保持逐批执行，只有普通已提交周期的 dispatch 合并；material patch/提案立即执行。
+  静默行情由独立 timer 执行；恢复扫描不抢占待触发任务，未变更 reconcile 保留原截止时间。
+  合并前持久化首末 fence/数量；行情失效、审计/dispatch/关键行情回调失败解除内存绑定，
+  换代、标的/配置变化、未提交周期及停止均清除旧触发，不删除持久化订单或分配义务。
+  **68 项 PAPER supervisor/配置/入场审查与 LIVE 触发回归通过**，Ruff/差异检查通过，证据
+  `p7-paper-trigger-final.log`。新增场景使用真实 reducer/周期提交/SQLite 与 dispatch spy，
+  证明 7 Tick 仍提交 7 周期、末 3 普通触发合并，并覆盖实际 timer 静默执行及故障边界；
+  未连接实盘，未测完整 Engine 性能，不据此通过 P7 正式门。
   legacy 当前仅由 global monitor 调用 entry authority 失效并阻断新源，尚未接通持久化 DRAINING，
   不能据此清除 head.strategy_run_id 或判定切换完成。
 - legacy 义务清单冻结组件已完成：按配置头/旧 run/版本锁定读取原 owner 的 intent、pending、
