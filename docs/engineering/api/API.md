@@ -500,3 +500,18 @@ ApiMarketDataReadService 的历史 KLine/Tick 与 MCP KLine 通过 LocalHistoric
 使用 CalendarRequest/CalendarSnapshot，按 SH 市场读取年度休市日，最多 366 行，
 单槽和 3 秒查询期限；忙返回 429，缺失/无效日历返回 503。范围查询先取得年度日历，
 跳过周末和明确休市日期；不把行情 503 当作休市。该接口只读，不启动采集或补数。
+
+### Research 日线批读与持久化截止日
+
+内部令牌保护的 `POST /market-data/internal/v1/history/daily-bars` 接收
+DailySnapshotRead（最多 32 标的、60 天），返回 DailyBarsResult 的全部有序日线，
+每标的每上海日期最多一行。suspend_flag 缺失保持 null。沿用固定版本目录，
+单次目录查询 3 秒，存储查询 10 秒、2 MiB；与历史查询共享容量槽。
+`GET /market-data/internal/v1/history/latest-daily-date?instrument=000300.SH`
+返回 LatestDailyDateResult：从发布目录选最新日期，再校验其固定版本实际恰好一行；
+目录无记录返回 trading_date=null，版本缺失/损坏返回 503，忙返回 429。
+不以当前时间替代最新持久化日期，也不回退 canonical 表。
+
+Research InfrastructureResearchDataSource 使用以上接口拆分无重叠窗口并合并日线，
+任何批次失败均不返回部分结果。年度多窗口读取尚未提供整次冻结的版本快照；
+此接口不证明完整覆盖。证券资料、因子及其关系库证明读取另行迁移。

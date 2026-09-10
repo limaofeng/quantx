@@ -120,6 +120,70 @@ class LocalHistoryReader:
         request,
       )
 
+  async def read_daily_bars(self, request):
+    from .development_bar_publication import resolve_published_daily_versions
+    from .local_daily_snapshot_reader import read_latest_daily
+    from .native_bar_publication import resolve_native_daily_versions
+
+    if self.session_factory is None:
+      raise HistoryReadInvalid("daily bar directory unavailable")
+    if self._slot.locked():
+      raise HistoryReadBusy("local history query capacity exhausted")
+    async with self._slot:
+      async with asyncio.timeout(3), self.session_factory() as db:
+        resolver = (
+          resolve_published_daily_versions
+          if isinstance(self, PublishedHistoryReader)
+          else resolve_native_daily_versions
+        )
+        versions = await resolver(db, request)
+      return await self._read_thread(
+        lambda value: read_latest_daily(
+          self.connection, value, published_versions=versions, all_rows=True
+        ),
+        request,
+      )
+
+  async def latest_daily_date(self, request):
+    from quantx_contracts.data_exchange import HistoryPartitionRequest
+
+    from .development_bar_publication import resolve_published_bar_version
+    from .local_daily_catalog import latest_daily_date
+    from .native_bar_publication import resolve_native_bar_version
+
+    if self.session_factory is None:
+      raise HistoryReadInvalid("daily bar directory unavailable")
+    if self._slot.locked():
+      raise HistoryReadBusy("local history query capacity exhausted")
+    async with self._slot:
+      async with asyncio.timeout(3), self.session_factory() as db:
+        development = isinstance(self, PublishedHistoryReader)
+        day = await latest_daily_date(db, request.instrument, development=development)
+        if day is None:
+          return None
+        query = HistoryRead(
+          instrument=request.instrument, period="1d", trading_date=day, page_size=2
+        )
+        if development:
+          publication = await resolve_published_bar_version(
+            db,
+            HistoryPartitionRequest(
+              instrument=request.instrument, period="1d", trading_date=day
+            ),
+          )
+          version = publication["storage_version"] if publication else None
+        else:
+          publication = await resolve_native_bar_version(db, query)
+          version = publication.storage_version if publication else None
+        if version is None:
+          raise HistoryReadInvalid("latest daily version disappeared")
+      page = await self._read_thread(
+        lambda value: self._read(value, storage_version=version), query
+      )
+      if len(page.records) != 1:
+        raise HistoryReadInvalid("latest daily partition is missing or duplicated")
+      return day
+
   async def _run_read(self, read, request):
     if self._slot.locked():
       raise HistoryReadBusy("local history query capacity exhausted")

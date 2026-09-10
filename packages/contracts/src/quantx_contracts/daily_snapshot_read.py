@@ -1,6 +1,6 @@
 """Bounded latest daily snapshots within an explicit local storage window."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -56,3 +56,47 @@ class DailySnapshotResult(BaseModel):
         raise ValueError("daily snapshots contain duplicate or out-of-scope rows")
       seen.add(row.stock_code)
     return self
+
+
+class DailyBar(DailySnapshot):
+  suspend_flag: int | None = None
+
+
+class DailyBarsResult(BaseModel):
+  """Available fixed daily partitions; missing rows are not coverage evidence."""
+
+  model_config = ConfigDict(extra="forbid")
+  request: DailySnapshotRead
+  records: list[DailyBar] = Field(max_length=32 * 62)
+
+  @model_validator(mode="after")
+  def exact_scope(self):
+    from zoneinfo import ZoneInfo
+
+    seen = set()
+    previous = None
+    for row in self.records:
+      key = (row.stock_code, row.time)
+      day = (row.stock_code, row.time.astimezone(ZoneInfo("Asia/Shanghai")).date())
+      if (
+        row.stock_code not in self.request.instruments
+        or not self.request.start <= row.time <= self.request.end
+        or day in seen
+        or previous is not None
+        and key <= previous
+      ):
+        raise ValueError("daily bars contain duplicate, unordered or out-of-scope rows")
+      seen.add(day)
+      previous = key
+    return self
+
+
+class LatestDailyDateRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  instrument: InstrumentCode
+
+
+class LatestDailyDateResult(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  request: LatestDailyDateRequest
+  trading_date: date | None

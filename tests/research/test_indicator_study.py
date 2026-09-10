@@ -1135,16 +1135,16 @@ def test_daily_lift_is_not_pooled_stock_day_difference(tmp_path: Path) -> None:
 async def test_persisted_latest_date_uses_shanghai_calendar_and_rejects_no_data() -> (
   None
 ):
-  repository = SimpleNamespace(
-    find_latest_by_stock_code_and_period=lambda *args: [
-      SimpleNamespace(time=pd.Timestamp("2025-06-29T16:00:00Z")),
-    ]
+  from unittest.mock import AsyncMock
+
+  client = SimpleNamespace(
+    latest_daily_date=AsyncMock(return_value=pd.Timestamp("2025-06-30").date())
   )
-  source = InfrastructureResearchDataSource(kline_repository=repository)
+  source = InfrastructureResearchDataSource(market_data_client=client)
   assert (
     await source.latest_daily_date("000300.SH") == pd.Timestamp("2025-06-30").date()
   )
-  repository.find_latest_by_stock_code_and_period = lambda *args: []
+  client.latest_daily_date.return_value = None
   with pytest.raises(ValueError, match="已持久化"):
     await source.latest_daily_date("000300.SH")
 

@@ -3,7 +3,6 @@ from decimal import Decimal
 from itertools import pairwise
 from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 from quantx_infrastructure.repositories.divid_factor_repository import (
   divid_factor_codes_sha256,
@@ -149,32 +148,34 @@ class FakeBulkFactorRepository(FakeFactorRepository):
     ]
 
 
-class FakeKLineRepository:
-  def __init__(self) -> None:
-    self.calls: list[tuple[tuple[str, ...], bool]] = []
-    self.windows: list[tuple[datetime, datetime]] = []
+class FakeMarketDataClient:
+  def __init__(self):
+    self.calls = []
+    self.windows = []
 
-  def find_daily_batch(self, stock_codes, start, end, *, use_cache):
-    self.calls.append((tuple(stock_codes), use_cache))
-    self.windows.append((start, end))
-    return {
-      code: pd.DataFrame(
-        [
-          {
-            "stock_code": code,
-            "time": "2024-01-02T00:00:00Z",
-            "open": 10,
-            "high": 11,
-            "low": 9,
-            "close": 10.5,
-            "volume": 100,
-            "amount": 1_000,
-            "suspend_flag": 0,
-          }
-        ]
-      )
-      for code in stock_codes
-    }
+  async def read_daily_bars(self, request):
+    from quantx_contracts.daily_snapshot_read import DailyBar
+
+    self.calls.append((tuple(request.instruments), request.start, request.end))
+    self.windows.append((request.start, request.end))
+    return SimpleNamespace(
+      records=[
+        DailyBar(
+          stock_code=code,
+          period="1d",
+          time=request.start,
+          open=10,
+          high=11,
+          low=9,
+          close=10.5,
+          pre_close=10,
+          volume=100,
+          amount=1000,
+          suspend_flag=0,
+        )
+        for code in request.instruments
+      ]
+    )
 
 
 @pytest.mark.asyncio
@@ -184,7 +185,7 @@ async def test_owned_postgres_session_is_read_only_and_rolled_back() -> None:
     session_factory=lambda: session,
     instrument_repository=FakeInstrumentRepository(),
     dividend_factor_repository=FakeFactorRepository(),
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
   )
 
   async with source:
@@ -203,7 +204,7 @@ async def test_owned_session_is_closed_when_read_only_initialization_fails() -> 
   session = FailingTimeoutSession()
   source = InfrastructureResearchDataSource(
     session_factory=lambda: session,
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
   )
 
   with pytest.raises(RuntimeError, match="timeout setting failed"):
@@ -217,7 +218,7 @@ async def test_owned_session_is_closed_when_read_only_initialization_fails() -> 
 async def test_non_postgres_relational_session_fails_closed() -> None:
   source = InfrastructureResearchDataSource(
     session_factory=lambda: FakeSession("sqlite"),
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
   )
 
   with pytest.raises(RuntimeError, match="只允许 PostgreSQL"):
@@ -225,12 +226,12 @@ async def test_non_postgres_relational_session_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_daily_reads_are_batched_and_influx_cache_is_disabled() -> None:
-  kline_repository = FakeKLineRepository()
+async def test_daily_reads_are_batched_through_market_data_client() -> None:
+  market_data_client = FakeMarketDataClient()
   source = InfrastructureResearchDataSource(
     instrument_repository=FakeInstrumentRepository(),
     dividend_factor_repository=FakeFactorRepository(),
-    kline_repository=kline_repository,
+    market_data_client=market_data_client,
     enforce_postgres_read_only=False,
   )
   codes = [f"{value:06d}.SZ" for value in range(5)]
@@ -243,17 +244,16 @@ async def test_daily_reads_are_batched_and_influx_cache_is_disabled() -> None:
   )
 
   assert len(bars) == 5
-  assert [len(call[0]) for call in kline_repository.calls] == [2, 2, 1]
-  assert all(use_cache is False for _, use_cache in kline_repository.calls)
+  assert [len(call[0]) for call in market_data_client.calls] == [2, 2, 1]
 
 
 @pytest.mark.asyncio
 async def test_long_daily_reads_are_split_into_non_overlapping_time_windows() -> None:
-  kline_repository = FakeKLineRepository()
+  market_data_client = FakeMarketDataClient()
   source = InfrastructureResearchDataSource(
     instrument_repository=FakeInstrumentRepository(),
     dividend_factor_repository=FakeFactorRepository(),
-    kline_repository=kline_repository,
+    market_data_client=market_data_client,
     enforce_postgres_read_only=False,
   )
 
@@ -263,10 +263,10 @@ async def test_long_daily_reads_are_split_into_non_overlapping_time_windows() ->
     datetime(2024, 1, 1),
   )
 
-  assert len(kline_repository.windows) == 3
+  assert len(market_data_client.windows) == 7
   assert all(
     current_end < next_start
-    for (_, current_end), (next_start, _) in pairwise(kline_repository.windows)
+    for (_, current_end), (next_start, _) in pairwise(market_data_client.windows)
   )
 
 
@@ -276,7 +276,7 @@ async def test_instrument_and_factor_repository_results_are_normalized() -> None
   source = InfrastructureResearchDataSource(
     instrument_repository=FakeInstrumentRepository(),
     dividend_factor_repository=factors,
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
     enforce_postgres_read_only=False,
   )
 
@@ -299,7 +299,7 @@ async def test_instrument_type_name_resolves_real_strawberry_enum() -> None:
   source = InfrastructureResearchDataSource(
     instrument_repository=instruments,
     dividend_factor_repository=FakeFactorRepository(),
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
     enforce_postgres_read_only=False,
   )
 
@@ -315,7 +315,7 @@ async def test_large_factor_universe_uses_one_bulk_read() -> None:
   source = InfrastructureResearchDataSource(
     instrument_repository=FakeInstrumentRepository(),
     dividend_factor_repository=factors,
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
     enforce_postgres_read_only=False,
   )
   codes = [f"{value:06d}.SZ" for value in range(50)]
@@ -404,7 +404,7 @@ async def test_factor_coverage_reads_completed_durable_database_requests() -> No
   )
   source = InfrastructureResearchDataSource(
     session=session,
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
     enforce_postgres_read_only=False,
   )
 
@@ -472,7 +472,7 @@ async def test_factor_coverage_rejects_legacy_audit_before_reading_factor_rows()
   )
   source = InfrastructureResearchDataSource(
     session=session,
-    kline_repository=FakeKLineRepository(),
+    market_data_client=FakeMarketDataClient(),
   )
 
   result = await source.load_dividend_factor_coverage(
@@ -491,3 +491,29 @@ async def test_factor_coverage_rejects_legacy_audit_before_reading_factor_rows()
   )
   assert "pg_advisory_xact_lock_shared" in session.statements[2]
   assert "market_data_request" in session.statements[3]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+async def test_owned_http_client_closes_and_relational_session_always_rolls_back(
+  monkeypatch, failure
+):
+  from unittest.mock import AsyncMock
+
+  session = FakeSession()
+  client = SimpleNamespace(
+    close=AsyncMock(side_effect=RuntimeError("close failure") if failure else None)
+  )
+  monkeypatch.setattr(
+    "quantx_infrastructure.services.local_market_data_client.LocalMarketDataClient",
+    lambda: client,
+  )
+  source = InfrastructureResearchDataSource(session_factory=lambda: session)
+  await source.__aenter__()
+  assert source._get_market_data_client() is client
+  if failure:
+    with pytest.raises(RuntimeError, match="close failure"):
+      await source.close()
+  else:
+    await source.close()
+  client.close.assert_awaited_once()
+  assert session.rolled_back and session.closed

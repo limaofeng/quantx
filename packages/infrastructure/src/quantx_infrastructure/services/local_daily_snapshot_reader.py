@@ -6,13 +6,20 @@ from datetime import datetime, timedelta, timezone
 from datetime import time as day_time
 from zoneinfo import ZoneInfo
 
-from quantx_contracts.daily_snapshot_read import DailySnapshot, DailySnapshotResult
+from quantx_contracts.daily_snapshot_read import (
+  DailyBar,
+  DailyBarsResult,
+  DailySnapshot,
+  DailySnapshotResult,
+)
 
 from quantx_infrastructure.database.timeseries import get_timeseries_connection
 from quantx_infrastructure.services.local_history_reader import HistoryReadInvalid
 
 
-def read_latest_daily(connection, request, *, published_versions=None):
+def read_latest_daily(connection, request, *, published_versions=None, all_rows=False):
+  model = DailyBar if all_rows else DailySnapshot
+  result_model = DailyBarsResult if all_rows else DailySnapshotResult
   deadline = time.monotonic() + 10
 
   def remaining():
@@ -23,7 +30,7 @@ def read_latest_daily(connection, request, *, published_versions=None):
 
   parameters = {f"code_{i}": code for i, code in enumerate(request.instruments)}
   codes = ", ".join(f"${name}" for name in parameters)
-  columns = ", ".join(DailySnapshot.model_fields)
+  columns = ", ".join(model.model_fields)
   # A 60-day inclusive window intersects at most 62 Shanghai calendar dates
   # even across different endpoint offsets. An extra row detects overflow.
   row_limit = len(request.instruments) * 62
@@ -40,7 +47,7 @@ def read_latest_daily(connection, request, *, published_versions=None):
     ):
       raise HistoryReadInvalid("invalid published daily version scope")
     if not published_versions:
-      return DailySnapshotResult(request=request, records=[])
+      return result_model(request=request, records=[])
     measurement = "kline_1d_versions"
     columns += ", storage_version"
     filters = []
@@ -66,6 +73,7 @@ def read_latest_daily(connection, request, *, published_versions=None):
   connection = connection or get_timeseries_connection()
   seen = set()
   latest = {}
+  selected = []
   previous = None
   rows_seen = bytes_seen = 0
   with connection.get_client(timeout=remaining()) as client:
@@ -104,7 +112,7 @@ def read_latest_daily(connection, request, *, published_versions=None):
               or raw.pop("storage_version", None) != published_versions[key]
             ):
               raise HistoryReadInvalid("daily snapshot returned an unpublished version")
-          row = DailySnapshot.model_validate(raw)
+          row = model.model_validate(raw)
           key = (row.stock_code, row.time)
           day_key = (
             row.stock_code,
@@ -123,10 +131,14 @@ def read_latest_daily(connection, request, *, published_versions=None):
           seen.add(day_key)
           previous = key
           latest[row.stock_code] = row
+          if all_rows:
+            selected.append(row)
     finally:
       reader.close()
   remaining()
-  return DailySnapshotResult(
+  return result_model(
     request=request,
-    records=[latest[code] for code in request.instruments if code in latest],
+    records=selected
+    if all_rows
+    else [latest[code] for code in request.instruments if code in latest],
   )

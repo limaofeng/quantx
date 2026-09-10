@@ -5,7 +5,13 @@ import os
 from datetime import datetime
 
 import httpx
-from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
+from quantx_contracts.daily_snapshot_read import (
+  DailyBarsResult,
+  DailySnapshotRead,
+  DailySnapshotResult,
+  LatestDailyDateRequest,
+  LatestDailyDateResult,
+)
 from quantx_contracts.development_reference import (
   REFERENCE_REQUEST,
   CalendarRequest,
@@ -231,6 +237,30 @@ class LocalMarketDataClient:
     if window.request != request:
       raise ValueError("local factor response scope mismatch")
     return window
+
+  async def read_daily_bars(self, request: DailySnapshotRead) -> DailyBarsResult:
+    result = DailyBarsResult.model_validate(
+      await self._json(
+        "POST",
+        "/market-data/internal/v1/history/daily-bars",
+        json=request.model_dump(mode="json"),
+      )
+    )
+    if result.request != request:
+      raise ValueError("local daily bars response scope mismatch")
+    return result
+
+  async def latest_daily_date(self, request: LatestDailyDateRequest):
+    result = LatestDailyDateResult.model_validate(
+      await self._json(
+        "GET",
+        "/market-data/internal/v1/history/latest-daily-date",
+        params=request.model_dump(mode="json"),
+      )
+    )
+    if result.request != request:
+      raise ValueError("local latest daily date scope mismatch")
+    return result.trading_date
 
   async def read_latest_daily(self, request: DailySnapshotRead) -> DailySnapshotResult:
     value = await self._json(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime, timedelta
@@ -18,7 +17,7 @@ from .normalization import (
   normalize_instruments,
 )
 
-_INFLUX_TIME_CHUNK_DAYS = 180
+_DAILY_HTTP_WINDOW_DAYS = 60
 _FACTOR_BULK_THRESHOLD = 50
 _MAX_FACTOR_EVIDENCE_REQUESTS = 4_096
 _RESEARCH_IDLE_TRANSACTION_TIMEOUT = "15min"
@@ -65,8 +64,7 @@ class InfrastructureResearchDataSource:
   """复用 QuantX 仓储的只读数据源。
 
   PostgreSQL 会话在首个查询前进入只读 ``REPEATABLE READ``，关闭时一律
-  回滚。InfluxDB 适配器只暴露 KLineRepository 的查询方法且禁用缓存，不向
-  研究应用暴露写入或删除接口。
+  回滚。行情日线通过有界本机 Data API 批读，不构造 InfluxDB 仓库。
   """
 
   def __init__(
@@ -76,14 +74,15 @@ class InfrastructureResearchDataSource:
     session_factory: Callable[[], Any] | None = None,
     instrument_repository: Any | None = None,
     dividend_factor_repository: Any | None = None,
-    kline_repository: Any | None = None,
+    market_data_client: Any | None = None,
     enforce_postgres_read_only: bool = True,
   ) -> None:
     self._session = session
     self._session_factory = session_factory
     self._instrument_repository = instrument_repository
     self._dividend_factor_repository = dividend_factor_repository
-    self._kline_repository = kline_repository
+    self._market_data_client = market_data_client
+    self._owns_market_data_client = market_data_client is None
     self._owns_session = session is None
     self._read_only_initialized = False
     self._enforce_postgres_read_only = enforce_postgres_read_only
@@ -91,7 +90,6 @@ class InfrastructureResearchDataSource:
   async def __aenter__(self) -> "InfrastructureResearchDataSource":
     try:
       await self._ensure_relational_ready()
-      self._get_kline_repository()
       return self
     except BaseException:
       await self.close()
@@ -101,6 +99,14 @@ class InfrastructureResearchDataSource:
     await self.close()
 
   async def close(self) -> None:
+    client, self._market_data_client = self._market_data_client, None
+    try:
+      if client is not None and self._owns_market_data_client:
+        await client.close()
+    finally:
+      await self._close_relational()
+
+  async def _close_relational(self) -> None:
     """回滚并关闭本适配器拥有的关系型数据库会话。"""
     if self._session is None:
       return
@@ -159,47 +165,36 @@ class InfrastructureResearchDataSource:
     if end_at < start_at:
       raise ValueError("日线查询结束时间不能早于开始时间")
 
-    from quantx_infrastructure.config.settings import settings
+    from quantx_contracts.daily_snapshot_read import DailySnapshotRead
+    from quantx_infrastructure.core.utils import time_utils
 
-    repository = self._get_kline_repository()
-    chunk_days = 2 if settings.environment == "development" else _INFLUX_TIME_CHUNK_DAYS
-    parts: dict[str, list[pd.DataFrame]] = {}
+    client = self._get_market_data_client()
+    parts = []
     for window_start, window_end in _time_windows(
-      start_at,
-      end_at,
-      days=chunk_days,
+      start_at, end_at, days=_DAILY_HTTP_WINDOW_DAYS
     ):
-      for batch in _batches(codes, batch_size):
-        result = await asyncio.to_thread(
-          repository.find_daily_batch,
-          list(batch),
-          window_start,
-          window_end,
-          use_cache=False,
+      for batch in _batches(codes, min(batch_size, 32)):
+        result = await client.read_daily_bars(
+          DailySnapshotRead(
+            instruments=list(batch),
+            start=time_utils.to_shanghai(window_start, keep_tz=True),
+            end=time_utils.to_shanghai(window_end, keep_tz=True),
+          )
         )
-        for code, frame in (result or {}).items():
-          parts.setdefault(str(code).upper(), []).append(frame)
-    frames = {
-      code: pd.concat(code_parts, ignore_index=True, sort=False)
-      for code, code_parts in parts.items()
-    }
-    return normalize_daily_bars(frames)
+        if result.records:
+          parts.append(pd.DataFrame([row.model_dump() for row in result.records]))
+    return normalize_daily_bars(pd.concat(parts, ignore_index=True) if parts else None)
 
   async def latest_daily_date(self, benchmark_code: str) -> date:
-    """Resolve latest from persisted benchmark bars, never from wall-clock time."""
-    repository = self._get_kline_repository()
-    rows = await asyncio.to_thread(
-      repository.find_latest_by_stock_code_and_period,
-      benchmark_code,
-      "1d",
-      1,
+    """Resolve the published benchmark date, never substitute wall-clock time."""
+    from quantx_contracts.daily_snapshot_read import LatestDailyDateRequest
+
+    day = await self._get_market_data_client().latest_daily_date(
+      LatestDailyDateRequest(instrument=benchmark_code)
     )
-    if not rows:
+    if day is None:
       raise ValueError("缺少已持久化基准日线，无法解析 latest 研究截止日")
-    timestamp = pd.Timestamp(rows[0].time)
-    if timestamp.tzinfo is not None:
-      timestamp = timestamp.tz_convert("Asia/Shanghai")
-    return timestamp.date()
+    return day
 
   async def load_dividend_factors(
     self,
@@ -525,14 +520,15 @@ class InfrastructureResearchDataSource:
       self._dividend_factor_repository = DividFactorRepository(session)
     return self._dividend_factor_repository
 
-  def _get_kline_repository(self) -> Any:
-    if self._kline_repository is None:
-      from quantx_infrastructure.repositories.kline_repository import (
-        KLineRepository,
+  def _get_market_data_client(self):
+    if self._market_data_client is None:
+      from quantx_infrastructure.services.local_market_data_client import (
+        LocalMarketDataClient,
       )
 
-      self._kline_repository = KLineRepository()
-    return self._kline_repository
+      self._market_data_client = LocalMarketDataClient()
+      self._owns_market_data_client = True
+    return self._market_data_client
 
 
 def _instrument_type_enum() -> type[Any]:
@@ -580,7 +576,7 @@ def _time_windows(
   *,
   days: int,
 ) -> Iterable[tuple[datetime, datetime]]:
-  """生成无重叠的闭区间，规避 InfluxDB Core 单查询文件扫描上限。"""
+  """生成无重叠的闭区间，满足 Data API 单次查询的时间范围上限。"""
   cursor = start
   window = timedelta(days=days)
   while cursor <= end:

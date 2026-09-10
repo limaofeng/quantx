@@ -143,6 +143,17 @@ async def test_api_uses_same_published_version_for_daily_and_history(prepared):
       base_url="http://local",
       headers={"Authorization": "Bearer internal"},
     ) as client:
+      batch = await client.post(
+        "/market-data/internal/v1/history/daily-bars",
+        json=query.model_dump(mode="json"),
+      )
+      latest_date = await client.get(
+        "/market-data/internal/v1/history/latest-daily-date",
+        params={"instrument": "600000.SH"},
+      )
+      assert batch.status_code == latest_date.status_code == 200
+      assert batch.json()["records"][0]["close"] == 10.1
+      assert latest_date.json()["trading_date"] == "2026-09-07"
       daily = await client.post(
         "/market-data/internal/v1/history/latest-daily",
         json=query.model_dump(mode="json"),

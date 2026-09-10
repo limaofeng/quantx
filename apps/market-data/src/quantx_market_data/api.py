@@ -11,7 +11,13 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import Response
-from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
+from quantx_contracts.daily_snapshot_read import (
+  DailyBarsResult,
+  DailySnapshotRead,
+  DailySnapshotResult,
+  LatestDailyDateRequest,
+  LatestDailyDateResult,
+)
 from quantx_contracts.development_reference import (
   CalendarRequest,
   CalendarSnapshot,
@@ -45,6 +51,7 @@ from quantx_infrastructure.services.local_divid_factor_reader import (
 )
 from quantx_infrastructure.services.local_history_reader import (
   HistoryReadBusy,
+  HistoryReadInvalid,
   LocalHistoryReader,
   PublishedHistoryReader,
 )
@@ -178,6 +185,33 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     if epoch is None:
       raise HTTPException(503, "MARKET_DATA_WORKER_UNAVAILABLE")
     return {"status": "ready", "capability": "worker-lease", "epoch": epoch}
+
+  @app.post(
+    "/market-data/internal/v1/history/daily-bars",
+    response_model=DailyBarsResult,
+    dependencies=[Depends(authorize)],
+  )
+  async def daily_bars(request: DailySnapshotRead):
+    try:
+      return await app.state.reader.read_daily_bars(request)
+    except HistoryReadBusy:
+      raise HTTPException(429, "HISTORY_READ_CAPACITY") from None
+    except (ValueError, TimeoutError, SQLAlchemyError, HistoryReadInvalid):
+      raise HTTPException(503, "HISTORY_READ_UNAVAILABLE") from None
+
+  @app.get(
+    "/market-data/internal/v1/history/latest-daily-date",
+    response_model=LatestDailyDateResult,
+    dependencies=[Depends(authorize)],
+  )
+  async def latest_daily_date(request: Annotated[LatestDailyDateRequest, Query()]):
+    try:
+      day = await app.state.reader.latest_daily_date(request)
+      return LatestDailyDateResult(request=request, trading_date=day)
+    except HistoryReadBusy:
+      raise HTTPException(429, "HISTORY_READ_CAPACITY") from None
+    except (ValueError, TimeoutError, SQLAlchemyError, HistoryReadInvalid):
+      raise HTTPException(503, "HISTORY_READ_UNAVAILABLE") from None
 
   @app.get(
     "/market-data/internal/v1/reference/calendar",
