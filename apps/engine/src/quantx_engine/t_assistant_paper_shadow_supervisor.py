@@ -265,7 +265,13 @@ class TAssistantPaperShadowSupervisor:
           or str(head.mode or "").lower() != str(config.mode or "").lower()
         ):
           raise RuntimeError("T_ASSISTANT_CONFIG_HEAD_STALE")
-        version = self._config_version(head)
+        try:
+          version = self._config_version(head)
+        except ValueError:
+          # Invalid requested configuration cannot leave the old scorer bound.
+          # Durable orders and ExitPlans remain under their original owners.
+          self._unbind_account(head.account_id)
+          raise
         await config_repository.append_version(version)
         if head.active_config_version_id != version.config_version_id:
           head = await config_repository.activate_version(
@@ -987,16 +993,18 @@ class TAssistantPaperShadowSupervisor:
       rollout_stage = TAssistantRolloutStage.CANARY
     try:
       scorer_mode = TAssistantScorerMode(
-        str(settings.get("scorer_mode") or "RULE_ONLY").upper()
+        str(settings.get("scorer_mode", "RULE_ONLY")).upper()
       )
-    except ValueError:
-      scorer_mode = TAssistantScorerMode.RULE_ONLY
+    except ValueError as exc:
+      raise ValueError("T_MODEL_CONFIG_MODE_INVALID") from exc
     binding = settings.get("model_runtime_binding")
-    if scorer_mode is TAssistantScorerMode.RULE_ONLY or not isinstance(
-      binding, Mapping
+    if (
+      scorer_mode is TAssistantScorerMode.RULE_ONLY and binding is not None
+    ) or (
+      scorer_mode is not TAssistantScorerMode.RULE_ONLY
+      and (not isinstance(binding, Mapping) or not binding)
     ):
-      scorer_mode = TAssistantScorerMode.RULE_ONLY
-      binding = None
+      raise ValueError("T_MODEL_CONFIG_BINDING_INVALID")
     payload = {
       "config_schema_version": "t_assistant_config_v1",
       "universe_policy": {

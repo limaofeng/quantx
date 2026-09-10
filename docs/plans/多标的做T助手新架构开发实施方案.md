@@ -590,6 +590,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   概率一致性、路径/哈希/大小/树拓扑检查；完整 TModelScore 与批量原子缓存。
   RULE_ONLY 无模型调用，SHADOW 保持规则顺序，ACTIVE 缺失/过期/OOD/超时/异常阻断 ENTRY。
   微型合成拟合仅为数值一致性单测，不是冻结草案中的正式实验；尚无研究结果或发布资格。
+  PAPER 配置冻结已去除显式 ACTIVE/SHADOW 缺少模型绑定或未知模式时静默改写 RULE_ONLY
+  的行为；缺失/空/错误类型绑定、RULE_ONLY 携带绑定和非法显式模式均明确拒绝。省略模式
+  仍默认 RULE_ONLY，合法模式和绑定保留。冻结失败同步解除该账户旧内存绑定，避免旧规则
+  源继续接收 Tick；不改订单和退出计划归属。13 项反例先复现，修复后配置/PAPER runtime/
+  模型批量运行共 **42 项通过**，含真实 SQLite 刷新失败后不再新增周期；Ruff/差异检查通过。
+  证据 `p8-model-config-before.log`、`p8-model-config-final.log`。配置形状校验不替代 registry
+  授权、安全制品加载或人工发布门，未运行正式模型比较。
 - P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
   与同事务审计；重试及末尾异常整体回滚已有隔离验证。旧 pending/outbox 不迁移 owner。
   审批事件使用合成夹具，真实 P6 准入审计及人工发布入口仍待接入；内部消息箱接线见后续检查点。
