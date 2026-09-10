@@ -684,6 +684,18 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   失败、连续旧请求、同分钟补数据及裸 Bar 绕过；Ruff/差异检查通过，证据
   `p8-minute-monotonic-before.log`、`p8-minute-monotonic-final.log`。此为内存实例内边界，
   重启后的最新分钟重建仍需 supervisor 接线；未替代正式模型或实盘门。
+  完整 TModelRuntimeBinding 纯域契约已落地并接入 ConfigVersion/Execution 构造校验：要求
+  架构规定的全部模型/版本/阶段/revision/制品/特征/标签/校准/策略/自检引用字段，拒绝缺失、
+  多余、非法类型与 hash 不匹配；binding hash 只覆盖其余字段。模型阶段与 scorer_mode、
+  特征版本与执行 schema 必须一致，输入 dict 独立复制。仅 binding_hash 的占位配置已拒绝。
+  TDecisionSnapshotBuilder 复验完整 binding 并读取其权威 binding_hash，不再对含 hash 的
+  对象另算一层摘要；RULE_ONLY 仍不绑定模型。该契约只验证身份，不把自检引用视为真实自检。
+  初始 66 项通过；随后 **48 项 binding/LIVE 生命周期**、**45 项 PAPER 配置/快照**和最终
+  **16 项 binding 字段测试**通过，Ruff/差异检查通过；证据 `p8-binding-contract.log`、
+  `p8-binding-lifecycle.log`、`p8-binding-snapshot.log`、`p8-binding-fields-final.log`。
+  未改变 GraphQL SDL、未迁移或启用模型执行；加载器真实固定样本自检、完整 binding 到
+  scorer identity 的原子切换、分钟 supervisor 与完整模型 snapshot 接线仍待实现。
+
 
 
 

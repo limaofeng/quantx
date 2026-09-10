@@ -45,7 +45,9 @@ def test_rule_only_cannot_hide_a_model_binding():
 
 @pytest.mark.parametrize("mode", ["ACTIVE", "SHADOW"])
 def test_scored_configuration_preserves_mode_and_binding(mode):
-  binding = {"binding_hash": "a" * 64}
+  from tests.domain.test_t_model_runtime_binding import binding as complete_binding
+
+  binding = complete_binding(mode).to_dict()
   result = freeze({"scorer_mode": mode, "model_runtime_binding": binding})
   assert result.scorer_mode.value == mode and result.model_runtime_binding == binding
 

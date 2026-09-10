@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping, Optional
@@ -148,6 +148,73 @@ def stable_manifest_hash(value: Mapping[str, Any]) -> str:
   return hashlib.sha256(canonical_json_payload(value).encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class TModelRuntimeBinding:
+  """Complete immutable online identity; evidence hashes do not grant approval."""
+
+  model_id: str
+  model_version: str
+  registry_stage: str
+  registry_authorization_revision: int
+  artifact_manifest_sha256: str
+  feature_schema_version: int
+  label_spec_version: str
+  calibration_version: str
+  portfolio_policy_compatibility_hash: str
+  runtime_self_test_manifest_hash: str
+  self_test_tolerance_policy_version: str
+  binding_hash: str
+
+  def __post_init__(self):
+    if (
+      not isinstance(self.registry_stage, str) or self.registry_stage not in {"SHADOW", "ACTIVE"}
+      or any(type(value) is not int or value < 1 for value in (
+        self.registry_authorization_revision, self.feature_schema_version,
+      ))
+      or any(not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > limit
+        for value, limit in ((self.model_id, 80), (self.model_version, 80),
+          (self.label_spec_version, 128), (self.calibration_version, 128),
+          (self.self_test_tolerance_policy_version, 128)))
+      or any(not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
+        for value in (self.artifact_manifest_sha256, self.portfolio_policy_compatibility_hash,
+          self.runtime_self_test_manifest_hash, self.binding_hash))
+    ):
+      raise ValueError("T_MODEL_BINDING_INVALID")
+    material = asdict(self)
+    material.pop("binding_hash")
+    if stable_manifest_hash(material) != self.binding_hash:
+      raise ValueError("T_MODEL_BINDING_HASH_MISMATCH")
+
+  @classmethod
+  def create(cls, **material):
+    if set(material) != {item.name for item in fields(cls)} - {"binding_hash"}:
+      raise ValueError("T_MODEL_BINDING_FIELDS_INVALID")
+    return cls(**material, binding_hash=stable_manifest_hash(material))
+
+  @classmethod
+  def from_mapping(cls, value):
+    if not isinstance(value, Mapping) or set(value) != {item.name for item in fields(cls)}:
+      raise ValueError("T_MODEL_BINDING_FIELDS_INVALID")
+    return cls(**dict(value))
+
+  def to_dict(self):
+    return asdict(self)
+
+
+def _validated_model_binding(mode, feature_schema_version, binding):
+  if mode is TAssistantScorerMode.RULE_ONLY:
+    if binding is not None:
+      raise ValueError("RULE_ONLY T-assistant config cannot bind a model")
+    return None
+  if binding is None:
+    raise ValueError("SHADOW/ACTIVE T-assistant config requires a model binding")
+  parsed = TModelRuntimeBinding.from_mapping(binding)
+  if (type(feature_schema_version) is not int or parsed.registry_stage != mode.value
+    or parsed.feature_schema_version != feature_schema_version):
+    raise ValueError("T_MODEL_BINDING_EXECUTION_MISMATCH")
+  return parsed.to_dict()
+
+
 def t_assistant_config_snapshot_material(
   *,
   config_schema_version: str,
@@ -207,14 +274,9 @@ class TAssistantConfigVersion:
     canonical = canonical_json_payload(self.canonical_payload)
     payload = json.loads(canonical)
     object.__setattr__(self, "canonical_payload", payload)
-    binding = self.model_runtime_binding
-    if self.scorer_mode is TAssistantScorerMode.RULE_ONLY and binding is not None:
-      raise ValueError("RULE_ONLY T-assistant config cannot bind a model")
-    if self.scorer_mode is not TAssistantScorerMode.RULE_ONLY and binding is None:
-      raise ValueError("SHADOW/ACTIVE T-assistant config requires a model binding")
-    if binding is not None:
-      binding_canonical = canonical_json_payload(binding)
-      object.__setattr__(self, "model_runtime_binding", json.loads(binding_canonical))
+    object.__setattr__(self, "model_runtime_binding", _validated_model_binding(
+      self.scorer_mode, self.feature_schema_version, self.model_runtime_binding,
+    ))
     expected_hash = stable_manifest_hash(
       t_assistant_config_snapshot_material(
         config_schema_version=self.config_schema_version,
@@ -331,6 +393,9 @@ class TAssistantExecution:
     object.__setattr__(self, "rollout_stage", TAssistantRolloutStage(self.rollout_stage))
     object.__setattr__(self, "status", TAssistantExecutionStatus(self.status))
     object.__setattr__(self, "scorer_mode", TAssistantScorerMode(self.scorer_mode))
+    object.__setattr__(self, "model_runtime_binding", _validated_model_binding(
+      self.scorer_mode, self.feature_schema_version, self.model_runtime_binding,
+    ))
     if self.frozen_config_version < 1 or self.feature_schema_version < 1:
       raise ValueError("T-assistant frozen versions must be positive")
     if self.state_version < 1:

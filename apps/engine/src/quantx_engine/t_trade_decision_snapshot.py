@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantExecution,
-  stable_manifest_hash,
+  TModelRuntimeBinding,
 )
 from quantx_domain.trading.t_assistant_market_state import (
   T_ASSISTANT_MARKET_CAPTURE_MAX_AGE_MS,
@@ -241,7 +241,7 @@ class TDecisionSnapshotBuilder:
       market_context=dict(market_context or {}),
       scorer_mode=execution.scorer_mode.value,
       model_runtime_binding_hash=(
-        stable_manifest_hash(dict(execution.model_runtime_binding))
+        TModelRuntimeBinding.from_mapping(execution.model_runtime_binding).binding_hash
         if execution.model_runtime_binding is not None
         else None
       ),

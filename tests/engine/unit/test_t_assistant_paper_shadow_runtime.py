@@ -264,8 +264,13 @@ def _accepted(sequence: int) -> AcceptedTMarketTick:
   )
 
 
-def test_snapshot_builder_never_reads_past_capture_fence() -> None:
+@pytest.mark.parametrize("model_mode", ["RULE_ONLY", "SHADOW", "ACTIVE"])
+def test_snapshot_builder_never_reads_past_capture_fence(model_mode) -> None:
   execution = _execution()
+  if model_mode != "RULE_ONLY":
+    from tests.domain.test_t_model_runtime_binding import binding
+
+    execution = replace(execution, scorer_mode=model_mode, model_runtime_binding=binding(model_mode).to_dict())
   builder = TDecisionSnapshotBuilder()
   first = _accepted(1)
   second = _accepted(2)
@@ -300,6 +305,9 @@ def test_snapshot_builder_never_reads_past_capture_fence() -> None:
     ),
   )
 
+  assert snapshot.model_runtime_binding_hash == (
+    execution.model_runtime_binding["binding_hash"] if execution.model_runtime_binding else None
+  )
   assert snapshot.fence_sequence == 1
   assert [tick.accepted_sequence for tick in snapshot.symbols[0].delta_slice.ticks] == [
     1
