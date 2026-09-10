@@ -119,6 +119,7 @@ _MARKET_DATA_SYNC_MAX_DATE_SPAN_DAYS = {
   "1d": 3_700,
 }
 
+_STRICT_TICK_PREFLIGHT_MAX_PROJECTED_BYTES = 64 * 1024 * 1024
 _STRICT_TICK_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY = 120
 _STRICT_TICK_REPLAY_SESSION_EDGE_TOLERANCE = timedelta(minutes=5)
 _STRICT_TICK_REPLAY_MAX_CONTINUOUS_GAP = timedelta(minutes=15)
@@ -2322,9 +2323,7 @@ class StrategyManager:
 
         if require_tick:
           if strict_tick_quality:
-            inspection = await asyncio.to_thread(
-              self._inspect_strict_tick_replay_day,
-              service,
+            inspection = await self._inspect_strict_tick_replay_day(
               instrument,
               trading_date,
               require_order_book_depth=require_order_book_depth,
@@ -2387,9 +2386,8 @@ class StrategyManager:
 
     return missing
 
-  def _inspect_strict_tick_replay_day(
+  async def _inspect_strict_tick_replay_day(
     self,
-    service: HistoricalMarketDataService,
     instrument: str,
     trading_date: date,
     *,
@@ -2404,31 +2402,33 @@ class StrategyManager:
       "date": trading_date.isoformat(),
       "instrument_code": instrument,
     }
-    query_fields = ["time", "amount", "volume", "pvolume"]
+    records = []
+    projected_bytes = 0
+    fields = ("time", "amount", "volume", "pvolume")
     if require_order_book_depth:
-      query_fields.extend(
-        [
-          f"{prefix}{level}"
-          for prefix in ("ask", "bid")
-          for level in range(1, 6)
-        ]
-      )
-      query_fields.extend(
-        [
-          f"{prefix}{level}"
-          for prefix in ("ask_vol", "bid_vol")
-          for level in range(1, 6)
-        ]
-      )
+      fields += ("ask_price", "bid_price", "ask_vol", "bid_vol")
     try:
-      records = service.tick_repo.find_all(
-        filters={"stock_code": instrument},
-        start_time=query_start,
-        end_time=query_end,
-        fields=query_fields,
-        limit=None,
-        order_by="time ASC",
-      )
+      async with asyncio.timeout(60), aclosing(
+        LocalHistoricalTickReader().iter_tick_pages(
+          stock_code=instrument,
+          start_time=query_start,
+          end_time=query_end,
+          page_size=1000,
+          max_pages=200,
+          max_source_ticks=200_000,
+        )
+      ) as pages:
+        async for page in pages:
+          for tick in page:
+            record = {field: getattr(tick, field, None) for field in fields}
+            projected_bytes += len(
+              json.dumps(record, default=str, allow_nan=True).encode()
+            )
+            if projected_bytes > _STRICT_TICK_PREFLIGHT_MAX_PROJECTED_BYTES:
+              raise HistoricalTickPaginationError(
+                "strict Tick preflight memory budget exhausted"
+              )
+            records.append(record)
     except Exception as exc:
       self.logger.warning(
         "严格 Tick 回放逐日质量查询失败: instrument=%s, date=%s, error=%s",
@@ -2449,30 +2449,7 @@ class StrategyManager:
         },
       }
 
-    raw_records: List[Dict[str, Any]]
-    if hasattr(records, "empty"):
-      if records.empty or "time" not in records.columns:
-        raw_records = []
-      else:
-        raw_records = [dict(item) for item in records.to_dict("records")]
-    else:
-      raw_records = []
-      for record in records or []:
-        if isinstance(record, dict):
-          raw_records.append(dict(record))
-        else:
-          raw_records.append(
-            {
-              "time": getattr(record, "time", None),
-              "amount": getattr(record, "amount", None),
-              "volume": getattr(record, "volume", None),
-              "pvolume": getattr(record, "pvolume", None),
-              "ask_price": getattr(record, "ask_price", None),
-              "bid_price": getattr(record, "bid_price", None),
-              "ask_vol": getattr(record, "ask_vol", None),
-              "bid_vol": getattr(record, "bid_vol", None),
-            }
-          )
+    raw_records = records
     raw_times = [item.get("time") for item in raw_records]
 
     positive_amount_count = 0

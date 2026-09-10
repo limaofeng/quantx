@@ -37,6 +37,16 @@ from quantx_infrastructure.core.runtime_state_manager import (
 from quantx_infrastructure.models.enums import StrategyRunStatus
 
 
+def local_tick_fixture(monkeypatch, fetch):
+  class Reader:
+    async def iter_tick_pages(self, **kwargs):
+      records = fetch(**kwargs)
+      for offset in range(0, len(records), 100):
+        yield records[offset : offset + 100]
+
+  monkeypatch.setattr("quantx_engine.strategy_manager.LocalHistoricalTickReader", Reader)
+
+
 class MockStrategy(StrategyBase):
   """测试用的模拟策略"""
 
@@ -1055,6 +1065,7 @@ class TestStrategyManager:
       lambda: calendar,
     )
 
+    local_tick_fixture(monkeypatch, tick_repo.find_all)
     missing = await manager._find_missing_backtest_data(
       service=SimpleNamespace(tick_repo=tick_repo),
       instruments=["600887.SH"],
@@ -1101,6 +1112,7 @@ class TestStrategyManager:
       confirmed_empty,
     )
 
+    local_tick_fixture(monkeypatch, lambda **_: [])
     missing = await manager._find_missing_backtest_data(
       service=SimpleNamespace(tick_repo=SimpleNamespace(find_all=lambda **_: [])),
       instruments=["600887.SH"],
@@ -1138,6 +1150,7 @@ class TestStrategyManager:
       AsyncMock(return_value=set()),
     )
 
+    local_tick_fixture(monkeypatch, lambda **_: [])
     missing = await manager._find_missing_backtest_data(
       service=SimpleNamespace(tick_repo=SimpleNamespace(find_all=lambda **_: [])),
       instruments=["600887.SH"],
@@ -1181,6 +1194,7 @@ class TestStrategyManager:
       "quantx_engine.strategy_manager.TradingDateHelper", lambda: calendar
     )
 
+    local_tick_fixture(monkeypatch, tick_repo.find_all)
     missing = await manager._find_missing_backtest_data(
       service=SimpleNamespace(tick_repo=tick_repo),
       instruments=["600887.SH"],
@@ -1233,6 +1247,7 @@ class TestStrategyManager:
       "quantx_engine.strategy_manager.TradingDateHelper", lambda: calendar
     )
 
+    local_tick_fixture(monkeypatch, tick_repo.find_all)
     missing = await manager._find_missing_backtest_data(
       service=SimpleNamespace(tick_repo=tick_repo),
       instruments=["600887.SH"],
@@ -1246,7 +1261,10 @@ class TestStrategyManager:
     assert missing == {}
     StrategyManager._instance = None
 
-  def test_strict_tick_replay_depth_preflight_requires_five_valid_levels(self):
+  @pytest.mark.asyncio
+  async def test_strict_tick_replay_depth_preflight_requires_five_valid_levels(
+    self, monkeypatch
+  ):
     StrategyManager._instance = None
     manager = StrategyManager()
     trading_date = date(2026, 8, 3)
@@ -1277,24 +1295,22 @@ class TestStrategyManager:
       query.append(kwargs)
       return records
 
-    service = SimpleNamespace(tick_repo=SimpleNamespace(find_all=find_all))
-    complete = manager._inspect_strict_tick_replay_day(
-      service,
+    local_tick_fixture(monkeypatch, find_all)
+    complete = await manager._inspect_strict_tick_replay_day(
       "600887.SH",
       trading_date,
       require_order_book_depth=True,
     )
     records[100].bid_vol = [0.0] * 4
-    incomplete = manager._inspect_strict_tick_replay_day(
-      service,
+    incomplete = await manager._inspect_strict_tick_replay_day(
       "600887.SH",
       trading_date,
       require_order_book_depth=True,
     )
 
     assert complete["complete"] is True
-    assert "ask1" in query[0]["fields"]
-    assert "bid_vol5" in query[0]["fields"]
+    assert query[0]["page_size"] == 1000
+    assert query[0]["max_source_ticks"] == 200_000
     assert incomplete["classification"] == "PARTIAL"
     assert "ORDER_BOOK_DEPTH_INCOMPLETE" in incomplete["reason_codes"]
     assert incomplete["statistics"]["incomplete_order_book_depth_count"] == 1
