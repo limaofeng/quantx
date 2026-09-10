@@ -611,6 +611,20 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   不因模式篡改阻断规则入场。**53 项批量评分与安全制品测试通过**，Ruff/差异检查通过，
   证据 `p8-model-publish-binding.log`。该校验保护组件绑定，不是持久化 registry 撤销证明；
   独立 registry、snapshot 与创建 pending/outbox 前的当前授权复核仍待实现。
+  独立 registry 存储基础已实现：t_model_versions 保存登记证据/摘要及可变阶段，事件表保存
+  每次授权 revision 的 actor/reason/阶段；登记重试不重置阶段，证据漂移或损坏拒绝使用。
+  阶段 CAS、ACTIVE_ELIGIBLE 门、RETIRED 终态与全局唯一 ACTIVE 约束已落库；authorize
+  强制重新读取并锁定当前模型行，严格匹配模式/revision/制品/策略，供后续同事务执行门调用。
+  新增 0086 迁移（父 0085），模型导出/中文表注释/历史 baseline 排除清单同步更新。
+  **52 项 registry/评分测试通过**，包含 SQLite 持久化、重开会话撤权、审计故障回滚、唯一
+  ACTIVE 冲突回滚和真实迁移升降级；同迁移 PostgreSQL SQL 离线编译通过，当前迁移图单头。
+  Ruff/差异检查通过。证据 `p8-model-registry-final.log`；另有 schema 检查 17 通过、2 个既存
+  baseline 指纹失败，移除新增模型并执行 HEAD 原迁移复现同一 hash，见
+  `p8-model-registry-schema.log`、`p8-model-registry-baseline-before.log`，未改写锁定指纹。
+  该 repository 是内部事务存储，不是 FINAL 证据复核或人工审批入口；合成 evidence 仅供
+  单测。尚未应用业务库迁移/正式登记模型，未证明 PG 并发；登记服务、完整 binding 自检，
+  以及 Engine 评分/snapshot/pending/outbox 的实际授权接线仍待实现，TTA-P8-02 未勾选。
+
 
 - P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
   与同事务审计；重试及末尾异常整体回滚已有隔离验证。旧 pending/outbox 不迁移 owner。

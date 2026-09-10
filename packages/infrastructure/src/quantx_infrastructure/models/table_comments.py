@@ -131,6 +131,8 @@ TABLE_COMMENTS: dict[str, str] = {
   "t_assistant_execution_events": "做 T 助手执行生命周期与影子审计事件",
   "t_assistant_executions": "做 T 助手独立执行身份与生命周期",
   "t_assistant_symbol_states": "做 T 助手逐标的物化算法状态",
+  "t_model_versions": "做 T 独立模型登记证据与当前授权",
+  "t_model_registry_events": "做 T 模型授权阶段变更审计",
   "t_trade_candidate_outcomes": "做 T 候选因果结果成熟状态",
   "t_trade_global_configs": "账户级全局做 T 配置",
   "t_trade_global_monitor_projections": "账户级全局做 T 监控投影",

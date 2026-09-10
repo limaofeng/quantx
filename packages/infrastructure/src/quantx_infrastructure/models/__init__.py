@@ -172,6 +172,7 @@ from .t_assistant_execution import (
   TAssistantExecutionRecord,
   TAssistantSymbolStateRecord,
 )
+from .t_model_registry import TModelRegistryEventRecord, TModelVersionRecord
 from .t_trade_candidate_outcome import TTradeCandidateOutcome
 from .t_trade_global_config import TTradeGlobalConfig
 from .t_trade_global_monitor_projection import TTradeGlobalMonitorProjection
@@ -194,6 +195,8 @@ apply_table_comments(Base.metadata)
 
 # 导出所有模型
 __all__ = [
+  "TModelRegistryEventRecord",
+  "TModelVersionRecord",
   "ResearchPreparationJob",
   "ResearchPreparationSettings",
   # 枚举类型

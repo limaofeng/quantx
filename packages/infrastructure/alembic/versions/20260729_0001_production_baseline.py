@@ -104,6 +104,8 @@ POST_BASELINE_TABLES = {
   "t_assistant_execution_events",
   "t_assistant_executions",
   "t_assistant_symbol_states",
+  "t_model_versions",
+  "t_model_registry_events",
   "t_trade_candidate_outcomes",
   "t_trade_opportunity_evaluations",
   "t_trade_replay_projections",
