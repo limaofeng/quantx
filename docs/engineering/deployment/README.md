@@ -98,7 +98,10 @@ Web 和 Docs 在更新窗口提前构建到 `apps/web/dist`、`apps/docs/dist`�
 Caddy 将 `/market-data/internal/v1/*` 和 `/agent/market-data/*` 转发至 18085；
 其余公共行情接口由 Gateway 承接，交易 Agent 控制仍在业务 API。历史上传要求新版
 Agent 使用独立历史令牌，不能只切路由而保留旧 Agent。暂存清理由 Data Worker 执行，
-完整上传但摄取失败的 manifest 保留供原任务恢复。上线前须先完成数据库迁移与协调切换清单，不能仅更新
+有请求记录的完整/部分分片及 manifest 均保留，COMPLETED 不立即删文件，FAILED 不按
+时间清空清单或计数。当前只自动清理超过宽限期的临时文件和无请求记录的孤儿目录；
+有引用证据的退役流程仍待完成。上传继续受 1 GiB 暂存和 512 MiB 最低剩余空间门槛
+约束，达到容量门槛拒绝新上传，不通过删除恢复证据解锁。上线前须先完成数据库迁移与协调切换清单，不能仅更新
 旧进程。当前仅验证启动装配、路由和探针，实际常驻启动及 Windows 停止流程尚待验收。
 
 Monitor 仍通过 `-Component monitor` 独立管理。新增可选的“跨环境行情与补数”

@@ -59,9 +59,7 @@ from quantx_infrastructure.services.market_data_persistence_verification import 
   verify_persisted_bar_summaries,
 )
 from quantx_infrastructure.services.market_data_staging import (
-  is_reparse_point,
   market_data_staging_root,
-  safe_market_data_request_directory,
   safe_market_data_staging_file,
 )
 
@@ -956,10 +954,6 @@ async def load_uploaded_request_manifest(
     indices.append(chunk_index)
   if indices != list(range(expected)):
     raise _validation_error("market-data transfer has missing or unordered chunks")
-  from quantx_infrastructure.services.market_data_staging import (
-    market_data_staging_root,
-    safe_market_data_staging_file,
-  )
 
   staging_root = market_data_staging_root()
   resolved_manifest: list[dict[str, Any]] = []
@@ -1553,43 +1547,6 @@ async def ingest_uploaded_market_data_request(
   raise _validation_error("market-data request destination is unsupported")
 
 
-def _cleanup_completed_staging(
-  request_id: str,
-  manifest: list[dict[str, Any]],
-) -> None:
-  root = market_data_staging_root()
-  parents: set[Path] = set()
-  for item in manifest:
-    storage_reference = (
-      item.get("storage_reference") if isinstance(item, dict) else None
-    )
-    try:
-      path = safe_market_data_staging_file(
-        root=root,
-        request_id=request_id,
-        storage_reference=str(storage_reference or ""),
-      )
-    except FileNotFoundError:
-      continue
-    except (OSError, RuntimeError, TypeError, ValueError):
-      logger.warning(
-        "Skipped unsafe market-data staging path: %s",
-        storage_reference,
-      )
-      continue
-    path.unlink(missing_ok=True)
-    parents.add(path.parent)
-  for parent in parents:
-    try:
-      safe_parent = safe_market_data_request_directory(root, parent)
-      if safe_parent.is_symlink() or is_reparse_point(safe_parent):
-        logger.warning("Skipped unsafe market-data staging parent: %s", parent)
-        continue
-      safe_parent.rmdir()
-    except (OSError, RuntimeError):
-      pass
-
-
 async def _renew_claim(
   store: MarketDataTransferStore,
   request_id: str,
@@ -1650,14 +1607,8 @@ async def claim_ingest_and_finish_market_data_request(
       ingestion_result=ingestion,
       claim_token=claim_token,
     )
-    try:
-      manifest = await store.market_data_transfers(request_id)
-      await asyncio.to_thread(_cleanup_completed_staging, request_id, manifest)
-    except Exception:
-      logger.exception(
-        "Could not clean completed market-data staging request_id=%s",
-        request_id,
-      )
+    # Completion retains the frozen source manifest and files for recovery and
+    # content re-verification. Retirement requires a separate proven lifecycle.
     return {"status": "completed", "request_id": request_id, **ingestion}
   except asyncio.CancelledError:
     # Keep the claim while the bounded read-back worker closes its reader.

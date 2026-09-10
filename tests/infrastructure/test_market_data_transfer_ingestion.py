@@ -948,6 +948,44 @@ async def test_claim_success_persists_ingestion_audit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_claim_keeps_original_manifest_files(monkeypatch, tmp_path):
+  request_id = "33333333-3333-4333-8333-333333333333"
+  runtime = tmp_path / "runtime"
+  directory = runtime / "market-data" / request_id
+  directory.mkdir(parents=True)
+  item = _write_chunk(directory, [_kline_row()])
+  original = Path(item["storage_reference"]).read_bytes()
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(runtime))
+  store = AtomicRequestStore()
+  for method in (
+    "claim_market_data_request",
+    "renew_market_data_request_claim",
+    "finish_market_data_request",
+  ):
+    original_method = getattr(store, method)
+
+    async def delegate(identity, _method=original_method, **kwargs):
+      assert identity == request_id
+      return await _method("request-1", **kwargs)
+
+    monkeypatch.setattr(store, method, delegate)
+
+  async def manifest(_):
+    return [item]
+
+  async def ingest(*args, **kwargs):
+    return {"records_received": 1, "records_saved": 1}
+
+  monkeypatch.setattr(store, "market_data_transfers", manifest)
+  result = await ingestion.claim_ingest_and_finish_market_data_request(
+    store, request_id, ingest_request=ingest
+  )
+  assert result["status"] == "completed"
+  assert Path(item["storage_reference"]).read_bytes() == original
+  assert await store.market_data_transfers(request_id) == [item]
+
+
+@pytest.mark.asyncio
 async def test_validation_failure_is_terminal_but_influx_failure_is_retryable() -> None:
   invalid_store = AtomicRequestStore()
 
@@ -1160,77 +1198,6 @@ async def test_concurrent_consumers_only_ingest_one_claim() -> None:
     )
     == 1
   )
-
-
-def test_completed_staging_cleanup_is_bound_to_authoritative_root(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path: Path,
-) -> None:
-  request_id = "11111111-1111-4111-8111-111111111111"
-  runtime_root = tmp_path / "runtime"
-  staging_root = runtime_root / "market-data"
-  expected_directory = staging_root / request_id
-  outside_directory = tmp_path / "outside" / request_id
-  expected_directory.mkdir(parents=True)
-  outside_directory.mkdir(parents=True)
-  outside_file = outside_directory / "00000000.json.gz"
-  outside_file.write_bytes(b"must remain")
-  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(runtime_root))
-
-  ingestion._cleanup_completed_staging(
-    request_id,
-    [{"storage_reference": str(outside_file)}],
-  )
-
-  assert outside_file.read_bytes() == b"must remain"
-  assert expected_directory.is_dir()
-
-
-def test_completed_staging_cleanup_rejects_request_directory_reparse_point(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path: Path,
-) -> None:
-  request_id = "22222222-2222-4222-8222-222222222222"
-  runtime_root = tmp_path / "runtime"
-  request_directory = runtime_root / "market-data" / request_id
-  request_directory.mkdir(parents=True)
-  retained = request_directory / "00000000.json.gz"
-  retained.write_bytes(b"must remain")
-  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(runtime_root))
-  original_is_reparse_point = staging.is_reparse_point
-  monkeypatch.setattr(
-    staging,
-    "is_reparse_point",
-    lambda path: path == request_directory or original_is_reparse_point(path),
-  )
-
-  ingestion._cleanup_completed_staging(
-    request_id,
-    [{"storage_reference": str(retained)}],
-  )
-
-  assert retained.read_bytes() == b"must remain"
-
-
-def test_completed_staging_cleanup_removes_only_verified_request_files(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path: Path,
-) -> None:
-  request_id = "33333333-3333-4333-8333-333333333333"
-  runtime_root = tmp_path / "runtime"
-  request_directory = runtime_root / "market-data" / request_id
-  request_directory.mkdir(parents=True)
-  staged = request_directory / "00000000.json.gz"
-  staged.write_bytes(b"complete")
-  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(runtime_root))
-
-  ingestion._cleanup_completed_staging(
-    request_id,
-    [{"storage_reference": str(staged)}],
-  )
-
-  assert not staged.exists()
-  assert not request_directory.exists()
 
 
 def test_market_data_staging_root_prefers_explicit_runtime_directory(

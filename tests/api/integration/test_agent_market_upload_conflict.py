@@ -52,7 +52,11 @@ async def _market_data_database():
     poolclass=StaticPool,
   )
   async with engine.begin() as connection:
-    await connection.execute(text("CREATE TABLE market_data_history_session (device_id VARCHAR(36), expires_at DATETIME)"))
+    await connection.execute(
+      text(
+        "CREATE TABLE market_data_history_session (device_id VARCHAR(36), expires_at DATETIME)"
+      )
+    )
     await connection.execute(
       text(
         """
@@ -230,10 +234,6 @@ def _configure_api(monkeypatch, sessions, market_data_root) -> None:
   monkeypatch.setattr(cleanup, "MARKET_DATA_ROOT", market_data_root)
   monkeypatch.setattr(upload_api, "MARKET_DATA_ROOT", market_data_root)
   monkeypatch.setattr(upload_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 0)
-
-
-
-
 
 
 @pytest.mark.asyncio
@@ -932,7 +932,7 @@ async def test_disk_reserve_rejection_is_retryable_and_preserves_request(
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_staging_sweep_removes_completed_and_old_orphan_directories(
+async def test_staging_sweep_preserves_completed_evidence_and_removes_old_orphans(
   monkeypatch,
   tmp_path,
 ) -> None:
@@ -966,8 +966,8 @@ async def test_staging_sweep_removes_completed_and_old_orphan_directories(
 
     removed = await cleanup.sweep_market_data_staging_once(owner="test-owner")
 
-    assert removed["directories"] == 2
-    assert not completed.exists()
+    assert removed["directories"] == 1
+    assert (completed / "00000000.json.gz").read_bytes() == body
     assert not orphan.exists()
 
 
@@ -1001,22 +1001,21 @@ async def test_staging_sweep_retains_active_and_recent_failed_data(
     )
     expired = await cleanup.sweep_market_data_staging_once(
       owner="test-owner",
-      now=started
-      + timedelta(seconds=cleanup.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS + 1),
+      now=started + timedelta(days=30),
     )
 
     assert recent["directories"] == 0
-    assert expired["directories"] == (0 if complete else 1)
-    assert failed.exists() == complete
+    assert expired["directories"] == 0
+    assert (failed / "00000000.json.gz").read_bytes() == body
     async with sessions() as db:
       market_request = await db.get(MarketDataRequest, REQUEST_ID)
       transfer_count = await db.scalar(
         select(func.count()).select_from(MarketDataTransfer)
       )
     assert market_request is not None
-    assert market_request.expected_chunks == (1 if complete else None)
-    assert market_request.received_chunks == (1 if complete else 0)
-    assert transfer_count == (1 if complete else 0)
+    assert market_request.expected_chunks == (1 if complete else 2)
+    assert market_request.received_chunks == 1
+    assert transfer_count == 1
 
 
 @pytest.mark.asyncio
@@ -1047,8 +1046,7 @@ async def test_staging_sweep_never_removes_nonterminal_request_data(
 
     removed = await cleanup.sweep_market_data_staging_once(
       owner="test-owner",
-      now=started
-      + timedelta(seconds=cleanup.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS * 2),
+      now=started + timedelta(days=30),
     )
 
     assert removed["directories"] == 0

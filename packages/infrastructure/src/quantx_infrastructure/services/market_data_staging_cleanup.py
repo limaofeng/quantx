@@ -8,14 +8,11 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
-from quantx_infrastructure.models.agent_runtime import (
-  MarketDataRequest,
-  MarketDataTransfer,
-)
+from quantx_infrastructure.models.agent_runtime import MarketDataRequest
 from quantx_infrastructure.services import market_data_staging as _market_data_staging
 
 logger = logging.getLogger(__name__)
@@ -34,7 +31,6 @@ _relative_market_data_storage_reference = (
 MARKET_DATA_STAGING_SWEEP_SECONDS = 5 * 60
 MARKET_DATA_STAGING_TEMP_GRACE_SECONDS = 60 * 60
 MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS = 60 * 60
-MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS = 24 * 60 * 60
 
 
 async def _check_owner(owner, connection=None):
@@ -83,7 +79,7 @@ async def sweep_market_data_staging_once(
   owner,
   now: datetime | None = None,
 ) -> dict[str, int]:
-  """Remove stale temporary, terminal, and orphan Agent upload staging safely."""
+  """Remove stale temporary and orphan files; preserve registered evidence."""
   await _check_owner(owner)
   current = _as_aware_utc(now if now is not None else utcnow())
   if current is None:  # pragma: no cover - the expression above is never None
@@ -136,18 +132,12 @@ async def sweep_market_data_staging_once(
         await db.execute(
           select(
             MarketDataRequest.request_id,
-            MarketDataRequest.status,
-            MarketDataRequest.completed_at,
-            MarketDataRequest.updated_at,
           ).where(MarketDataRequest.request_id.in_(tuple(candidates)))
         )
       ).all()
     requests = {str(row.request_id): row for row in rows}
     orphan_cutoff = current - timedelta(
       seconds=MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS
-    )
-    failed_cutoff = current - timedelta(
-      seconds=MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS
     )
     for request_id, directory in candidates.items():
       await _check_owner(owner)
@@ -160,51 +150,9 @@ async def sweep_market_data_staging_once(
         )
         remove = modified <= orphan_cutoff
       else:
-        status = str(request_row.status or "").upper()
-        if status in {"COMPLETED", "FAILED"}:
-          # Recheck under the request row lock. A FAILED request may be reopened
-          # for ingestion by another process between the initial scan and delete.
-          async with AsyncSessionLocal() as db:
-            locked = await db.scalar(
-              select(MarketDataRequest)
-              .where(MarketDataRequest.request_id == request_id)
-              .with_for_update()
-            )
-            retired_failed_manifest = False
-            if locked is not None:
-              locked_status = str(locked.status or "").upper()
-              if locked_status == "COMPLETED":
-                remove = True
-              elif locked_status == "FAILED" and not (
-                locked.expected_chunks
-                and locked.received_chunks == locked.expected_chunks
-              ):
-                terminal_at = _as_aware_utc(locked.completed_at or locked.updated_at)
-                remove = terminal_at is not None and terminal_at <= failed_cutoff
-                if remove:
-                  # Retiring the durable manifest before deleting its files
-                  # prevents a later FAILED recovery from reopening paths that
-                  # no longer exist. It will derive a fresh request instead.
-                  await _check_owner(owner, await db.connection())
-                  await db.execute(
-                    delete(MarketDataTransfer).where(
-                      MarketDataTransfer.request_id == request_id
-                    )
-                  )
-                  locked.expected_chunks = None
-                  locked.received_chunks = 0
-                  await db.commit()
-                  retired_failed_manifest = True
-              if remove:
-                await _joined_thread(
-                  _remove_safe_market_data_request_directory,
-                  root,
-                  directory,
-                )
-                removed_directories += 1
-            if not retired_failed_manifest:
-              await db.rollback()
-          continue
+        # A terminal status does not retire its manifest, demand references or
+        # cumulative retry budget. Keep both full and partial frozen evidence.
+        continue
       if not remove:
         continue
       await _joined_thread(
