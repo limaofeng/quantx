@@ -220,6 +220,22 @@ Trainer 调度器使用同一约束：每次独立调用使用独立标识，发
 
 训练数据位于 `state/datasets`，控制证据位于 `state/control`，结果位于 `state/runs`。主机资源保护由独立机器策略控制，与开发 ENV 或旧 Worker 的 full/live 标记无关。准备任务暂时保留其原有 Worker 时间窗口检查，尚待职责交接。
 
+### 跨环境模型发布包
+
+`ops/trainer/release_model.py` 使用控制面的 `quantx` Conda 环境执行，不使用 Trainer 的开发数据库身份向目标环境写入。`export` 先核对开发库中成功的 FINAL_EVALUATION、成功的 DEVELOPMENT 父运行、配置坐标和制品哈希，再封装经人工审核的模型。包只包含有清单的制品和审核信息，不复制训练表、数据库连接或模型 ACTIVE 状态。
+
+导出与导入各自使用私有 TOML，字段必须恰好为 `environment`、`database_url`、`artifact_root`。开发导出使用 `development` 和 `_dev` 数据库；隔离验收导入使用 `testing` 和 `_test` 数据库；生产导入只能在 Windows 使用显式 `production` 配置。数据库 URL 必须为 `postgresql+asyncpg`，制品根目录必须为绝对路径。macOS 只接受本机数据库。配置包含凭据，不提交仓库；CLI 错误输出只保留固定错误代码。
+
+```sh
+conda run -n quantx python ops/trainer/release_model.py export --config /absolute/private/export.toml --run-key <成功最终评估的run_key> --reviewed-by <审核人> --output /absolute/releases/reviewed-model --reserve-mib 10240
+conda run -n quantx python ops/trainer/release_model.py verify --package /absolute/releases/reviewed-model --bundle-id <导出返回的bundle_id>
+conda run -n quantx python ops/trainer/release_model.py import --config /absolute/private/testing-import.toml --package /absolute/releases/reviewed-model --bundle-id <审核确认的bundle_id> --reserve-mib 10240
+```
+
+Windows 使用对应的本机绝对路径。传递整个包目录，并在目标端使用审核时确认的 bundle_id；`verify` 无需数据库配置。校验覆盖完整清单、最终评估门禁、干净代码身份、依赖和随机种子证据，并实际加载 LightGBM、Logistic 和校准器进行单线程 CPU 推理。此加载探针证明基本运行兼容性，不代替质量评估或真实 GPU 产物验收。
+
+导入先在目标 `artifact_root/<bundle_id>` 原子安装并复核文件，再创建该环境自己的 CANDIDATE。数据库写入失败保留已验证文件供重试；同包重试保留现有审批与阶段。包文件不得在安装后编辑；后续仍由目标环境的人工审批入口显式晋级，导入本身不激活模型、不建立策略绑定、不启动 Engine。当前已有真实小型 CPU 模型和隔离登记测试，完整真实训练产物、Windows 目标导入及绑定验收仍需完成。
+
 ### 冻结数据集发布与下载
 
 在已认证目录位于本机 Trainer `state_root/datasets/<dataset_version>` 时执行：

@@ -1,9 +1,8 @@
 """Manual registration boundary for finalized selection model evidence.
 
-The training database row is the source of truth for ``run_key``.  Filesystem
-artifacts are only accepted after that row has reached the immutable
-FINAL_EVALUATION/SUCCEEDED state and the strict schema-v2 loader has checked
-every identity and hash.
+Local registration and export verify successful final/development database
+lineage. Cross-environment imports instead verify a pinned, reviewed release
+and the target CPU runtime, then create an independent candidate registry row.
 """
 
 from __future__ import annotations
@@ -74,6 +73,42 @@ def _safe_error(exc: BaseException) -> str:
   return text[:256]
 
 
+def _registry_values(bundle, run_key):
+  manifest, metrics = bundle.manifest, bundle.metrics
+  gates = metrics["gates"]
+  conclusion = metrics["conclusion"]
+  return {
+    "model_version": manifest["model_version"],
+    "run_key": run_key,
+    "artifact_directory": str(bundle.directory),
+    "artifact_manifest_sha256": bundle.manifest_sha256,
+    "selected_family": manifest["selected_family"],
+    "indicator_version": manifest["indicator_version"],
+    "factor_set_version": manifest["factor_set_version"],
+    "factor_set_hash": manifest["factor_set_hash"],
+    "label_version": manifest["label_version"],
+    "calibrator_version": manifest["calibrator_version"],
+    "training_start": date.fromisoformat(manifest["training_start"]),
+    "training_end": date.fromisoformat(manifest["training_end"]),
+    "calibration_start": date.fromisoformat(manifest["calibration_start"]),
+    "calibration_end": date.fromisoformat(manifest["calibration_end"]),
+    "test_start": date.fromisoformat(manifest["test_start"]),
+    "test_end": date.fromisoformat(manifest["test_end"]),
+    "historical_universe_complete": bool(gates["historical_universe_complete"]),
+    "effect_gate_passed": bool(gates["effect_gate_passed"]),
+    "metrics": _safe_evidence(metrics),
+    "gates": _safe_evidence(gates),
+    "evidence": {
+      "config_hash": manifest.get("config_hash"),
+      "data_fingerprint": manifest.get("data_fingerprint"),
+      "artifact_count": len(manifest.get("artifacts") or []),
+      "conclusion": conclusion,
+      "data_quality": _safe_evidence(bundle.data_quality),
+    },
+    "approved_by": "",
+  }
+
+
 class StockSelectionModelService:
   def __init__(
     self,
@@ -115,7 +150,7 @@ class StockSelectionModelService:
       raise ValueError("训练运行目录无效")
     return resolved
 
-  async def register(self, run_key: str):
+  async def _validated_artifact(self, run_key: str):
     if not isinstance(run_key, str) or not _HASH.fullmatch(run_key):
       raise ValueError("runKey 必须是训练运行数据库中的 SHA-256 key")
     row = await self._run_by_key(run_key)
@@ -211,37 +246,34 @@ class StockSelectionModelService:
       or manifest.get("registerable") is not True
     ):
       raise ValueError("模型运行身份、结论或登记门禁无效")
-    # Only these fields cross into the registry.  ``artifact_directory`` is a
-    # private persistence field; GraphQL model projections never return it.
-    return await self.repository.register_model(
-      {
-        "model_version": manifest["model_version"],
-        "run_key": run_key,
-        "artifact_directory": str(bundle.directory),
-        "artifact_manifest_sha256": bundle.manifest_sha256,
-        "selected_family": manifest["selected_family"],
-        "indicator_version": manifest["indicator_version"],
-        "factor_set_version": manifest["factor_set_version"],
-        "factor_set_hash": manifest["factor_set_hash"],
-        "label_version": manifest["label_version"],
-        "calibrator_version": manifest["calibrator_version"],
-        "training_start": date.fromisoformat(manifest["training_start"]),
-        "training_end": date.fromisoformat(manifest["training_end"]),
-        "calibration_start": date.fromisoformat(manifest["calibration_start"]),
-        "calibration_end": date.fromisoformat(manifest["calibration_end"]),
-        "test_start": date.fromisoformat(manifest["test_start"]),
-        "test_end": date.fromisoformat(manifest["test_end"]),
-        "historical_universe_complete": bool(gates["historical_universe_complete"]),
-        "effect_gate_passed": bool(gates["effect_gate_passed"]),
-        "metrics": _safe_evidence(metrics),
-        "gates": _safe_evidence(gates),
-        "evidence": {
-          "config_hash": manifest.get("config_hash"),
-          "data_fingerprint": manifest.get("data_fingerprint"),
-          "artifact_count": len(manifest.get("artifacts") or []),
-          "conclusion": conclusion,
-          "data_quality": _safe_evidence(bundle.data_quality),
-        },
-        "approved_by": "",
-      }
-    )
+    return bundle
+
+  async def register(self, run_key: str):
+    bundle = await self._validated_artifact(run_key)
+    return await self.repository.register_model(_registry_values(bundle, run_key))
+
+  async def export_release(self, run_key: str, *, source_environment: str,
+                           reviewed_by: str, output: Path, reserve_bytes: int):
+    from quantx_infrastructure.selection_model_release import export_release
+
+    if source_environment != "development":
+      raise ValueError("RELEASE_SOURCE_MUST_BE_DEVELOPMENT")
+    bundle = await self._validated_artifact(run_key)
+    return export_release(bundle, run_key=run_key, reviewed_by=reviewed_by,
+                          output=output, reserve_bytes=reserve_bytes)
+
+  async def import_release(self, package: Path, *, expected_bundle_id: str,
+                           import_root: Path, reserve_bytes: int):
+    from quantx_infrastructure.selection_model_release import install_release
+
+    release = install_release(package, expected_bundle_id=expected_bundle_id,
+                              import_root=import_root, reserve_bytes=reserve_bytes)
+    values = _registry_values(release.artifact, release.review.run_key)
+    values["evidence"]["release"] = {
+      "bundle_id": release.inventory.bundle_id,
+      "review": release.review.model_dump(),
+      "cpu_runtime": release.cpu_runtime,
+    }
+    # A target registry entry has its own lifecycle; no training rows or ACTIVE
+    # state are imported, and repeated imports cannot undo later publication.
+    return await self.repository.register_model(values)
