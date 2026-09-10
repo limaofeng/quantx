@@ -30,6 +30,7 @@ class TRegistryModelBatchRuntime:
     self._sessions = session_factory
     self._lock = asyncio.Lock()
     self._last_visibility_ms = None
+    self._minute_input_fence = None
 
   @property
   def latest(self):
@@ -54,6 +55,11 @@ class TRegistryModelBatchRuntime:
           outcomes = minute_batch.outcomes
           if (
             stable_manifest_hash(material) != digest
+            or type(minute_batch.interval_start_ms) is not int
+            or minute_batch.interval_start_ms < 0 or minute_batch.interval_start_ms % 60000
+            or minute_batch.interval_end_ms != minute_batch.interval_start_ms + 60000
+            or not minute_batch.universe
+            or any(not isinstance(code, str) or not code or code != code.strip().upper() for code in minute_batch.universe)
             or tuple(bars) != minute_batch.complete_bars
             or type(minute_batch.watermark_ms) is not int
             or type(minute_batch.available_at_ms) is not int
@@ -76,6 +82,17 @@ class TRegistryModelBatchRuntime:
           ):
             raise ValueError("T_MODEL_MINUTE_MANIFEST_INVALID")
           unavailable = tuple(item for item in outcomes if item.status == "UNAVAILABLE")
+          identity = (minute_batch.interval_start_ms, minute_batch.manifest_hash)
+          previous = self._minute_input_fence
+          if previous is not None and (
+            identity[0] < previous[0] or (identity[0] == previous[0] and identity != previous)
+          ):
+            raise ValueError("T_MODEL_MINUTE_PUBLICATION_ORDER_INVALID")
+          # Preserve the accepted input fence even if inference/authorization or
+          # commit fails. Only this same sealed input or a later minute may retry.
+          self._minute_input_fence = identity
+        elif self._minute_input_fence is not None:
+          raise ValueError("T_MODEL_MINUTE_MANIFEST_REQUIRED")
         artifact, auth = candidate.artifact, candidate.authorization
         if artifact is None or auth is None:
           raise ValueError("T_MODEL_BINDING_MISSING")

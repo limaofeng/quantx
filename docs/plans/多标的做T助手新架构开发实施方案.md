@@ -676,6 +676,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   manifest 重算后的缺行/坐标/错误 watermark 拒绝。部分可用批次保留有效标的分数，消费端
   必须按标的识别 unavailable；全缺失 ACTIVE 阻断、SHADOW 保留规则顺序。仍未接入真实
   supervisor/完整模型 snapshot 契约或放开模型下单，未通过正式 P8 研究与发布门。
+  已修复分钟重放可复活旧分数的缺陷：新分钟缺数据或推理失败后，旧分钟原本可在 freshness
+  范围内重算并成为最新 revision，修复前 6 场景全部复现。授权 scorer 现保留实例内已接受
+  分钟起点/manifest 边界，拒绝倒退与同分钟修补，并在进入分钟协议后禁止裸 Bar 路径绕过；
+  边界跨评分/授权/提交失败保留，同一封口批次仍可重试，旧请求不推进 revision 或恢复旧分数。
+  **75 项授权评分/CPU batch 测试通过**，覆盖 SHADOW/ACTIVE、较新分钟全缺失与系统推理
+  失败、连续旧请求、同分钟补数据及裸 Bar 绕过；Ruff/差异检查通过，证据
+  `p8-minute-monotonic-before.log`、`p8-minute-monotonic-final.log`。此为内存实例内边界，
+  重启后的最新分钟重建仍需 supervisor 接线；未替代正式模型或实盘门。
+
 
 
 

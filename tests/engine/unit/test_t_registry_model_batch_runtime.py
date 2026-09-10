@@ -347,3 +347,62 @@ async def test_minute_batch_validation_rejects_corruption(sessions, tmp_path, da
     result = await scorer.evaluate_minute(broken, rule_order=())
   assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == 1
   assert result.entry_blocked and not result.active_scores and not result.unavailable
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+@pytest.mark.parametrize("newer", ["missing", "backend_failure"])
+async def test_old_minute_cannot_reappear_after_newer_unavailable(sessions, tmp_path, monkeypatch, mode, newer):
+  from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+
+  from tests.engine.unit.test_t_model_minute_batch import CODES, close, config, feed
+  from tests.research.test_t_assistant_model_data import START
+
+  model, scorer = await registered(sessions, tmp_path, mode)
+  minutes = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  for code in CODES:
+    feed(minutes, code)
+  old = close(minutes)
+  assert (await scorer.evaluate_minute(old, rule_order=())).revision == 1
+  minutes.advance(instrument_codes=CODES, **config(START + 60000))
+  if newer == "backend_failure":
+    for code in CODES:
+      feed(minutes, code, 60000)
+  new = close(minutes, START + 60000)
+  scorer._clock_ms = lambda: new.available_at_ms + 10
+  original = type(model.artifact).score
+  if newer == "backend_failure":
+    def fail(*args, **kwargs):
+      raise RuntimeError("synthetic inference failure")
+    monkeypatch.setattr(type(model.artifact), "score", fail)
+  second = await scorer.evaluate_minute(new, rule_order=())
+  assert not second.active_scores and not second.shadow_scores
+  monkeypatch.setattr(type(model.artifact), "score", original)
+  for _ in range(2):
+    replay = await scorer.evaluate_minute(old, rule_order=("current-rule",))
+    assert replay.reason == "MODEL_BATCH_UNAVAILABLE" and replay.revision == second.revision
+    assert replay.entry_blocked == (mode == "ACTIVE")
+    assert not replay.active_scores and not replay.shadow_scores
+  recovered = await scorer.evaluate_minute(new, rule_order=())
+  assert recovered.reason == "VALID" and recovered.revision == second.revision + 1
+
+
+@pytest.mark.parametrize("damage", ["repaired", "bare_bars"])
+async def test_sealed_minute_cannot_be_repaired_or_bypass_manifest(sessions, tmp_path, damage):
+  from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+
+  from tests.engine.unit.test_t_model_minute_batch import CODES, close, config, feed
+
+  _, scorer = await registered(sessions, tmp_path, "ACTIVE")
+  empty = close(TModelMinuteBatchRuntime(instrument_codes=CODES, **config()))
+  first = await scorer.evaluate_minute(empty, rule_order=())
+  assert first.reason == "VALID" and len(first.unavailable) == 3
+  repaired = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  for code in CODES:
+    feed(repaired, code)
+  complete = close(repaired)
+  if damage == "repaired":
+    result = await scorer.evaluate_minute(complete, rule_order=())
+  else:
+    result = await scorer.evaluate(complete.complete_bars, model_as_of_ms=complete.available_at_ms, rule_order=())
+  assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == first.revision
+  assert result.entry_blocked and not result.active_scores
