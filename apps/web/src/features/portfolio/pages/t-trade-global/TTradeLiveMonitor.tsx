@@ -321,7 +321,7 @@ export function TTradeHealthConsole({
             </div>
             <h1 className="mt-1 text-ui-title font-black">健康控制台</h1>
             <div className="mt-1 font-mono text-ui-micro text-slate-600">
-              {accountId || '未配置账户'}
+              {accountId || '无授权账户'}
             </div>
           </div>
           <button
@@ -408,7 +408,7 @@ export function TTradeHealthConsole({
             role="status"
             className="border-b border-amber-400/15 bg-amber-400/[0.04] px-3 py-3 text-ui-caption leading-4 text-amber-100"
           >
-            尚未配置交易账户，健康控制台处于只读等待状态。
+            当前会话没有可用的授权交易账户，健康控制台处于只读等待状态。
           </div>
         )}
         {!loading && !monitor && accountId && (

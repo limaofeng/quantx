@@ -22,7 +22,6 @@ import { TradingSafetyProvider } from '@/features/trading-safety/TradingSafetyPr
 import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import { appRoutes } from '@/router';
-import { tradingAccountConfig } from '@/shared/utils/env';
 import { cn } from '@/utils/cn';
 
 function WatchlistBootstrap() {
@@ -126,7 +125,6 @@ function AuthenticatedApp() {
     bootstrapError,
     isAuthenticated,
     user,
-    logout,
     retryBootstrap,
   } = useAuth();
   const [location, navigate] = useLocation();
@@ -174,21 +172,6 @@ function AuthenticatedApp() {
     return <LoginPage nextPath={nextPath} />;
   }
 
-  const configuredAccountId = tradingAccountConfig.defaultAccountId;
-  if (
-    configuredAccountId &&
-    !user.authorizedAccountIds.includes(configuredAccountId)
-  ) {
-    return (
-      <SessionStatusPage
-        title="默认账户未授权"
-        detail="VITE_DEFAULT_ACCOUNT_ID 与当前用户的后端账户授权不一致，请修正本地环境配置后重新登录。"
-        actionLabel="退出登录"
-        onAction={() => void logout()}
-      />
-    );
-  }
-
   if (location === '/login') {
     return (
       <SessionStatusPage
@@ -198,7 +181,7 @@ function AuthenticatedApp() {
       />
     );
   }
-  const accountId = configuredAccountId || user.authorizedAccountIds[0] || '';
+  const accountId = user.authorizedAccountIds[0] || '';
 
   return (
     <UrqlProvider value={urqlClient}>

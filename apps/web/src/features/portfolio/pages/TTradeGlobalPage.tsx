@@ -54,7 +54,6 @@ import {
 } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
 import { useTradingDays } from '@/hooks/useTradingDays';
-import { tradingAccountConfig } from '@/shared/utils/env';
 import { cn } from '@/utils/cn';
 
 import { useLatestMarketQuotes } from '../hooks/useRealTimeHoldings';
@@ -275,8 +274,7 @@ export function TTradeGlobalPage() {
   const { toast } = useToast();
   const { confirm: confirmDialog, prompt: promptDialog } = useAppDialog();
   const openStudioTab = useStudioNavigate();
-  const accountId = tradingAccountConfig.defaultAccountId;
-  const { refreshSafety } = useTradingSafety();
+  const { accountId, refreshSafety } = useTradingSafety();
   const [workspaceMode, setWorkspaceMode] = React.useState<
     'REALTIME' | 'REPLAY' | 'PAPER' | 'LIVE_ASSISTANT'
   >('REALTIME');
@@ -2419,7 +2417,7 @@ export function TTradeGlobalPage() {
       {!accountId && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/15 bg-amber-400/[0.07] px-ui-section py-2.5 text-ui-label font-bold text-amber-100">
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          未配置默认交易账户，请设置环境变量 VITE_DEFAULT_ACCOUNT_ID。
+          当前会话没有可用的授权交易账户。
         </div>
       )}
       {(monitorResult.error || monitor?.lastError) && (
@@ -3354,7 +3352,7 @@ export function TTradeGlobalPage() {
                     : '全局监控已停止'}
           </span>
           <span className="text-slate-700">|</span>
-          <span className="font-mono">{accountId || '未配置账户'}</span>
+          <span className="font-mono">{accountId || '无授权账户'}</span>
           {workspaceMode === 'REALTIME' && (
             <>
               <span className="text-slate-700">|</span>

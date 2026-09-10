@@ -26,7 +26,6 @@ const envSchema = z.object({
           ? 'testing'
           : 'development'
     ),
-  VITE_DEFAULT_ACCOUNT_ID: z.string().trim().default(''),
   VITE_AUTH_DEVELOPMENT_AUTO_LOGIN: z
     .string()
     .transform(val => val === 'true')
@@ -157,11 +156,6 @@ export const appInfo = {
   version: env.VITE_APP_VERSION,
   environment: env.VITE_APP_ENV,
   buildTime: new Date().toISOString(),
-} as const;
-
-// 交易账户由部署环境唯一指定，不从持仓响应反推或在页面切换。
-export const tradingAccountConfig = {
-  defaultAccountId: env.VITE_DEFAULT_ACCOUNT_ID,
 } as const;
 
 // 环境检查函数

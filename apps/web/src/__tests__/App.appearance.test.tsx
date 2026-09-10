@@ -13,7 +13,6 @@ import type * as MonitorApi from '@/features/system/monitor-api';
 // workspace, lazy routes and settings navigation all use their real wiring.
 vi.mock('@/core/auth', async importOriginal => {
   const actual = await importOriginal<typeof AuthModule>();
-  const { tradingAccountConfig } = await import('@/shared/utils/env');
   return {
     ...actual,
     AuthProvider: ({ children }: { children: ReactNode }) => children,
@@ -26,7 +25,7 @@ vi.mock('@/core/auth', async importOriginal => {
         username: 'appearance-test',
         displayName: '界面测试',
         permissions: [],
-        authorizedAccountIds: [tradingAccountConfig.defaultAccountId || 'test'],
+        authorizedAccountIds: ['test'],
       },
       login: vi.fn(),
       logout: vi.fn(),

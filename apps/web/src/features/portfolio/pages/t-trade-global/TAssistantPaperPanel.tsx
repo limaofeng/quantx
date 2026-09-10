@@ -400,7 +400,7 @@ export function TAssistantPaperPanel({ accountId }: { accountId: string }) {
   if (!accountId)
     return (
       <div className="p-ui-section text-ui-body text-slate-400" role="status">
-        尚未配置账户，无法读取 PAPER 执行。
+        当前会话没有可用的授权交易账户，无法读取 PAPER 执行。
       </div>
     );
   return (

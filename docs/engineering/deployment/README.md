@@ -136,8 +136,8 @@ macOS 的 LightGBM 需要 OpenMP 运行库；使用 Homebrew 安装 `caddy libom
 使用 nvm 时先在根目录执行 `nvm use`，采用 `.nvmrc` 指定的 Node 版本。
 首次启动本机 API/Caddy 后，执行
 `CODEGEN_GRAPHQL_ENDPOINT=http://127.0.0.1:8080/graphql npm run codegen`，
-生成当前源码对应的 Web 契约；本地 Web 的 `VITE_DEFAULT_ACCOUNT_ID` 应与
-开发配置中的模拟账户一致（样例为 `paper-local`）。
+生成当前源码对应的 Web 契约。Web 统一使用后端认证会话提供的交易账户，
+无需在前端重复配置；开发环境使用后端开发配置中的模拟账户（样例为 `paper-local`）。
 
 ```bash
 # 先在终端设置 QUANTX_DEV_POSTGRES_PASSWORD，再独立启动开发数据服务。
