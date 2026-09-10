@@ -136,6 +136,44 @@ async def publish(case, owner=None):
     assert await archive_worker.advance_realtime_archive(owner or case.first)
 
 
+async def test_engine_sender_recovers_lost_acceptance_without_duplicate_post(
+  archive_case,
+):
+  from quantx_engine.archive_sender import ArchiveSender
+
+  case = archive_case
+  posts = []
+
+  async def lose_response(request):
+    posts.append(request.identity())
+    await case.client.submit_archive(request)
+    # Source exit must not prevent resolving an already committed acceptance.
+    await unlock(case.source)
+    raise httpx.ReadTimeout("response lost")
+
+  sender = ArchiveSender(
+    SimpleNamespace(
+      submit_archive=lose_response, archive_status=case.client.archive_status
+    ),
+    scope_is_durable=lambda _: True,
+  )
+  sender.start()
+  try:
+    assert sender.offer(case.request)
+    await asyncio.wait_for(sender.wait_idle(), 3)
+    assert posts == [case.request.identity()]
+    assert sender.accepted == 1
+    assert (await case.client.archive_status(case.request)).proof is None
+    await publish(case)
+    assert (await case.client.archive_status(case.request)).phase == "VERIFIED"
+    assert len(case.storage.lines) == 1
+  finally:
+    await sender.stop()
+    # Restore only the fixture's lock ownership for its strict teardown.
+    if posts:
+      await lock(case.source)
+
+
 async def test_http_acceptance_is_not_proof_and_default_worker_publishes(
   archive_case, monkeypatch
 ):
