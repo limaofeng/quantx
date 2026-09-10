@@ -633,6 +633,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   无行情追加下的提交屏障/取消、已有缓存失败清理及并发批次 revision。SQLite 不证明 PG 行锁。
   该连接尚未由完整分钟 supervisor 调用，snapshot 与 pending/outbox 使用点仍需再次复核
   当前授权；实际 PAPER/LIVE 下单仍限定 RULE_ONLY，未放开模型模式或完成 P8 正式验收。
+  已授权 scorer 现要求显式毫秒时钟：输入 model_as_of 仅作评估下界，新分数在 registry
+  事务退出后采样真实可见时间，并以此重建 score id/manifest；精确缓存重放保留原时间与
+  身份，不能刷新有效期。发布时重新检查 Bar 年龄与时钟单调性，提交延迟导致过期、回退或
+  非整数时钟均清空分数且不推进 revision。**53 项授权评分/CPU batch 测试通过**，包括
+  模拟提交延迟 25ms 后的时间后移、重放不改时，以及缓存/重算两路径的时钟故障；Ruff/差异
+  检查通过，证据 `p8-model-visibility-final.log`。仅同步离线 scorer 仍接收显式实验时点；
+  完整分钟调度与 snapshot 的实际接线仍未完成，不把该组件测试计为正式 P8 门通过。
+
 
 
 

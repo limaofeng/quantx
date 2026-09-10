@@ -39,7 +39,7 @@ async def registered(sessions, tmp_path, mode):
   model = type(model)(mode=mode, artifact=artifact,
     authorization=replace(model.authorization, registry_authorization_revision=revision),
     policy_hash=model.policy_hash, max_age_ms=model.max_age_ms, inference_budget_ms=model.budget_ms)
-  return model, TRegistryModelBatchRuntime(model=model, session_factory=sessions)
+  return model, TRegistryModelBatchRuntime(model=model, session_factory=sessions, clock_ms=lambda: bar().available_at_ms + 10)
 
 
 @pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
@@ -124,7 +124,7 @@ async def test_rule_only_never_opens_registry(tmp_path):
 
   model = TModelBatchRuntime(mode="RULE_ONLY", artifact=None, authorization=None,
     policy_hash="a" * 64, max_age_ms=1, inference_budget_ms=1)
-  scorer = TRegistryModelBatchRuntime(model=model, session_factory=unavailable)
+  scorer = TRegistryModelBatchRuntime(model=model, session_factory=unavailable, clock_ms=lambda: bar().available_at_ms + 10)
   assert (await scorer.evaluate((), model_as_of_ms=0, rule_order=("a",))).reason == "MODEL_OFF"
 
 
@@ -135,9 +135,65 @@ async def test_offline_cached_scores_are_not_initial_registry_authority(tmp_path
   def unavailable():
     raise RuntimeError("registry unavailable")
 
-  scorer = TRegistryModelBatchRuntime(model=model, session_factory=unavailable)
+  scorer = TRegistryModelBatchRuntime(model=model, session_factory=unavailable, clock_ms=lambda: bar().available_at_ms + 10)
   assert scorer.latest.reason == "COLD" and not scorer.latest.active_scores
   result = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=())
   assert result.entry_blocked and result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == 0
   assert not result.active_scores
   assert model.latest.reason == "VALID"  # No mutation of the caller's offline state.
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+async def test_publication_time_is_after_commit_and_replay_does_not_rejuvenate(sessions, tmp_path, mode):
+  _, scorer = await registered(sessions, tmp_path, mode)
+  feature = bar()
+  now = feature.available_at_ms
+  scorer._clock_ms = lambda: now
+
+  @asynccontextmanager
+  async def delayed_commit():
+    nonlocal now
+    async with sessions() as db:
+      class Session:
+        @asynccontextmanager
+        async def begin(self):
+          nonlocal now
+          async with db.begin():
+            yield
+            now += 25
+        def __getattr__(self, key):
+          return getattr(db, key)
+      yield Session()
+
+  scorer._sessions = delayed_commit
+  first = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=())
+  scores = first.active_scores + first.shadow_scores
+  assert first.reason == "VALID" and scores[0].model_as_of_ms == feature.available_at_ms + 25
+  replay = await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=("new-rule-order",))
+  assert replay.revision == first.revision and replay.manifest_hash == first.manifest_hash
+  assert replay.active_scores + replay.shadow_scores == scores
+  assert now == feature.available_at_ms + 50
+  assert replay.execution_rule_order == ("new-rule-order",)
+
+
+@pytest.mark.parametrize("clock_value", ["backward", "expired", "invalid"])
+@pytest.mark.parametrize("recompute", [False, True])
+async def test_publication_clock_failure_clears_previous_cache(sessions, tmp_path, clock_value, recompute):
+  _, scorer = await registered(sessions, tmp_path, "ACTIVE")
+  feature = bar()
+  args = dict(model_as_of_ms=feature.available_at_ms, rule_order=())
+  first = await scorer.evaluate((feature,), **args)
+  assert first.revision == 1
+  if clock_value == "backward":
+    # Still later than the request, but earlier than the prior visible outcome.
+    value = feature.available_at_ms + 5
+  elif clock_value == "expired":
+    value = feature.interval_end_ms + 120001
+  else:
+    value = True
+  scorer._clock_ms = lambda: value
+  if recompute:
+    args["model_as_of_ms"] += 1
+  result = await scorer.evaluate((feature,), **args)
+  assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == 1
+  assert result.entry_blocked and not result.active_scores
