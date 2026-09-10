@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, replace
 from time import perf_counter_ns
 
 from quantx_application.t_trade_v3.model_features import TModelFeatureBar
+from quantx_application.t_trade_v3.model_minute_window import TModelMinuteOutcome
 from quantx_application.t_trade_v3.model_score import TModelScore
 from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
 from quantx_infrastructure.services.t_model_cpu_artifact import TCpuArtifact
@@ -31,6 +32,8 @@ class TModelBatchResult:
   execution_rule_order: tuple[str, ...]
   active_scores: tuple[TModelScore, ...]
   shadow_scores: tuple[TModelScore, ...]
+  unavailable: tuple[TModelMinuteOutcome, ...] = ()
+  model_as_of_ms: int | None = None
 
 
 class TModelBatchRuntime:
@@ -69,6 +72,8 @@ class TModelBatchRuntime:
     *,
     model_as_of_ms: int,
     rule_order: tuple[str, ...],
+    unavailable: tuple[TModelMinuteOutcome, ...] = (),
+    input_manifest_hash: str | None = None,
   ) -> TModelBatchResult:
     if self._bound_config[0] == "RULE_ONLY":
       self._cache_key = None
@@ -110,17 +115,24 @@ class TModelBatchRuntime:
         or auth.gate_conclusion not in allowed_gates
       ):
         raise ValueError("T_MODEL_AUTHORIZATION_INVALID")
-      if (not bars or len({bar.instrument_code for bar in bars}) != len(bars)
+      planned = tuple(bars) + tuple(unavailable)
+      if (not planned or len({bar.instrument_code for bar in planned}) != len(planned)
         or len({bar.feature_bar_id for bar in bars}) != len(bars)):
         raise ValueError("T_MODEL_BATCH_SYMBOL_SET_INVALID")
+      if any(item.status != "UNAVAILABLE" or item.feature_bar is not None or not item.reason for item in unavailable):
+        raise ValueError("T_MODEL_UNAVAILABLE_OUTCOME_INVALID")
+      if type(model_as_of_ms) is not int or any(model_as_of_ms < item.interval_end_ms or model_as_of_ms - item.interval_end_ms > self.max_age_ms for item in planned):
+        raise ValueError("T_MODEL_SCORE_STALE")
+      if len({(item.interval_start_ms, item.interval_end_ms) for item in planned}) != 1:
+        raise ValueError("T_MODEL_BATCH_COORDINATE_INVALID")
       if len({(
         bar.interval_start_ms, bar.interval_end_ms, bar.market_session,
         bar.stream_id, bar.continuity_generation,
-      ) for bar in bars}) != 1 or any(
+      ) for bar in bars}) > 1 or any(
         type(bar.interval_start_ms) is not int
         or bar.interval_start_ms % 60000
         or bar.interval_end_ms != bar.interval_start_ms + 60000
-        for bar in bars
+        for bar in planned
       ):
         raise ValueError("T_MODEL_BATCH_COORDINATE_INVALID")
       ordered_bars = sorted(bars, key=lambda bar: bar.instrument_code)
@@ -128,6 +140,8 @@ class TModelBatchRuntime:
         "authorization": asdict(auth), "policy_hash": self.policy_hash,
         "mode": self.mode, "max_age_ms": self.max_age_ms, "budget_ms": self.budget_ms,
         "bars": [asdict(bar) for bar in ordered_bars], "model_as_of_ms": model_as_of_ms,
+        "unavailable": [asdict(item) for item in sorted(unavailable, key=lambda item: item.instrument_code)],
+        "input_manifest_hash": input_manifest_hash,
       })
       if cache_key == self._cache_key and artifact is self._cached_artifact:
         if (perf_counter_ns() - started) / 1_000_000 > self.budget_ms:
@@ -188,16 +202,20 @@ class TModelBatchRuntime:
           "features": [score.source_feature_bar_id for score in scores],
           "model_as_of_ms": model_as_of_ms,
           "probabilities": [score.probabilities for score in scores],
+          "unavailable": [asdict(item) for item in sorted(unavailable, key=lambda item: item.instrument_code)],
+          "input_manifest_hash": input_manifest_hash,
         }
       )
       result = TModelBatchResult(
         revision,
         digest,
-        False,
+        self.mode == "ACTIVE" and not scores,
         "VALID",
         rule_order,
         tuple(scores) if self.mode == "ACTIVE" else (),
         tuple(scores) if self.mode == "SHADOW" else (),
+        tuple(sorted(unavailable, key=lambda item: item.instrument_code)),
+        model_as_of_ms,
       )
       validate_before_publish()
       self.revision, self.latest = revision, result

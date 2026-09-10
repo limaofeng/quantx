@@ -261,3 +261,89 @@ async def test_snapshot_does_not_adopt_batch_published_during_registry_read(sess
     if not pending.done():
       pending.cancel()
       await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+async def test_real_minute_batch_publishes_missing_outcomes_without_old_score_reuse(sessions, tmp_path, monkeypatch, mode):
+  from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+
+  from tests.engine.unit.test_t_model_minute_batch import CODES, close, config, feed
+  from tests.research.test_t_assistant_model_data import START
+
+  model, scorer = await registered(sessions, tmp_path, mode)
+  minutes = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  for code in CODES:
+    feed(minutes, code)
+  first_batch = close(minutes)
+  first = await scorer.evaluate_minute(first_batch, rule_order=("rule-1",))
+  assert first.reason == "VALID" and first.revision == 1 and not first.unavailable
+  assert len(first.active_scores + first.shadow_scores) == 3
+  minutes.advance(instrument_codes=CODES, **config(START + 60000))
+  for code in CODES[:2]:
+    feed(minutes, code, 60000)
+  second_batch = close(minutes, START + 60000)
+  scorer._clock_ms = lambda: second_batch.available_at_ms + 10
+  second = await scorer.evaluate_minute(second_batch, rule_order=("rule-2",))
+  assert second.reason == "VALID" and second.revision == 2
+  assert [item.instrument_code for item in second.unavailable] == [CODES[2]]
+  assert len(second.active_scores + second.shadow_scores) == 2
+  replay = await scorer.evaluate_minute(second_batch, rule_order=("current-rule",))
+  assert replay.revision == 2 and replay.manifest_hash == second.manifest_hash
+  frozen = await scorer.freeze_for_snapshot(as_of_ms=second_batch.available_at_ms + 10,
+    instrument_codes=CODES, rule_order=("current-rule",))
+  assert frozen.reason == "VALID" and frozen.unavailable == second.unavailable
+  assert frozen.execution_rule_order == ("current-rule",)
+  minutes.advance(instrument_codes=CODES, **config(START + 120000))
+  third_batch = close(minutes, START + 120000)
+  scorer._clock_ms = lambda: third_batch.available_at_ms + 10
+
+  def forbidden(*args, **kwargs):
+    raise AssertionError("no feature should enter inference")
+
+  monkeypatch.setattr(type(model.artifact), "score", forbidden)
+  third = await scorer.evaluate_minute(third_batch, rule_order=())
+  assert third.reason == "VALID" and third.revision == 3 and len(third.unavailable) == 3
+  assert not third.active_scores and not third.shadow_scores
+  assert third.entry_blocked == (mode == "ACTIVE")
+  assert third.model_as_of_ms == third_batch.available_at_ms + 10
+  frozen = await scorer.freeze_for_snapshot(as_of_ms=third.model_as_of_ms,
+    instrument_codes=CODES, rule_order=())
+  assert frozen.revision == 3 and len(frozen.unavailable) == 3 and frozen.reason == "VALID"
+
+
+@pytest.mark.parametrize("damage", ["manifest", "missing", "bar_coordinate", "watermark", "supplied_bars"])
+async def test_minute_batch_validation_rejects_corruption(sessions, tmp_path, damage):
+  from dataclasses import asdict
+
+  from quantx_application.t_trade_v3.model_minute_batch import TModelMinuteBatchRuntime
+  from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+
+  from tests.engine.unit.test_t_model_minute_batch import CODES, close, config, feed
+
+  _, scorer = await registered(sessions, tmp_path, "ACTIVE")
+  minutes = TModelMinuteBatchRuntime(instrument_codes=CODES, **config())
+  feed(minutes, CODES[0])
+  batch = close(minutes)
+  first = await scorer.evaluate_minute(batch, rule_order=())
+  assert first.reason == "VALID" and first.revision == 1
+  if damage == "supplied_bars":
+    broken = batch
+  elif damage == "manifest":
+    broken = replace(batch, manifest_hash="f" * 64)
+  else:
+    if damage == "missing":
+      broken = replace(batch, outcomes=batch.outcomes[:-1])
+    elif damage == "watermark":
+      broken = replace(batch, watermark_ms=batch.interval_end_ms - 1)
+    else:
+      outcomes = tuple(replace(item, feature_bar=replace(item.feature_bar, stream_id="other")) if item.feature_bar else item for item in batch.outcomes)
+      broken = replace(batch, outcomes=outcomes)
+    material = asdict(broken)
+    material.pop("manifest_hash")
+    broken = replace(broken, manifest_hash=stable_manifest_hash(material))
+  if damage == "supplied_bars":
+    result = await scorer.evaluate((), model_as_of_ms=batch.available_at_ms, rule_order=(), minute_batch=batch)
+  else:
+    result = await scorer.evaluate_minute(broken, rule_order=())
+  assert result.reason == "MODEL_BATCH_UNAVAILABLE" and result.revision == 1
+  assert result.entry_blocked and not result.active_scores and not result.unavailable

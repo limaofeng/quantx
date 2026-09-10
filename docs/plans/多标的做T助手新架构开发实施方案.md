@@ -665,6 +665,18 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   跨分钟不复用、早封口原子拒绝和全批缺失的时间身份；Ruff/差异检查通过，证据
   `p8-minute-batch-final.log`。这是批量 Feature Bar 组装与显式轮转，实际 supervisor 调度、
   不可用标的进入评分 manifest、模型加载及 snapshot 契约接线仍待实现。
+  分钟批次现通过 evaluate_minute 接入真实 registry/CPU scorer：校验整批摘要、Universe、
+  outcome/Feature Bar 坐标与实际传入 Bar 集合；缓存与发布摘要同时绑定输入 manifest 和所有
+  不可用标的。结果包含有效 scores、显式 unavailable 与批次可见时点，缺行不能冒充完整。
+  全部缺数据也发布新的不可用 revision（不调用推理），替换旧分数；系统推理/授权/事务
+  失败仍不发布新 revision。snapshot 覆盖核验同时包含正/负 outcome，不回退历史有效分数。
+  **81 项评分/分钟批次回归通过**，随后输入 Bar 集合一致性补验 **33 项通过**（新增 1 场景），
+  Ruff/差异检查通过；证据 `p8-minute-scoring-final.log`、`p8-minute-scoring-input.log`。
+  包含真实三标的 3 分钟 COMPLETE→部分缺失→全缺失的组装/registry/CPU/视图链路，以及
+  manifest 重算后的缺行/坐标/错误 watermark 拒绝。部分可用批次保留有效标的分数，消费端
+  必须按标的识别 unavailable；全缺失 ACTIVE 阻断、SHADOW 保留规则顺序。仍未接入真实
+  supervisor/完整模型 snapshot 契约或放开模型下单，未通过正式 P8 研究与发布门。
+
 
 
 
