@@ -128,6 +128,22 @@ async def _import_partition_owned(
     )
   if local["state"] == "BLOCKED":
     return {"id": identity, "status": "BLOCKED", "reason": local["error"]}
+  if local["state"] == "WAITING_LOCAL_INGESTION":
+    local_store = DevelopmentIngestionStore(AsyncSessionLocal, identity, owner=owner)
+    local_progress = await local_store.status()
+    if local_progress is not None:
+      state = local_progress["progress"]
+      if state["blocked"] or not local_progress["due"]:
+        return {
+          "id": identity,
+          "status": "BLOCKED" if state["blocked"] else "WAITING_LOCAL_INGESTION",
+          "reason": state["reason_code"],
+        }
+      # This path uses already pinned local files; exhausted network budgets do not
+      # authorize another download and must not prevent an explicit local recovery.
+      return await _ingest_local_partition(
+        identity, request, local["manifest"], local_store
+      )
   budget = DevelopmentDownloadBudget(AsyncSessionLocal, identity, owner=owner)
   schedule = await budget.schedule()
   if schedule["reason_code"]:

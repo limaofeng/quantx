@@ -14,8 +14,7 @@ from .immutable_bar_storage import prepare_immutable_bar_version
 from .market_data_ingestion_progress import evidence_hash
 
 
-async def upgrade_legacy_delivery(receipt, request, source, *, delivery_id):
-  """No writes: caller must freeze both catalogs and retain the returned old receipt."""
+def validate_legacy_receipt(receipt):
   if (
     not isinstance(receipt, dict)
     or len(json.dumps(receipt, allow_nan=False).encode()) > MAX_DELIVERY_METADATA_BYTES
@@ -47,6 +46,12 @@ async def upgrade_legacy_delivery(receipt, request, source, *, delivery_id):
   ).hexdigest()
   if original["data_version"] != old_version:
     raise ValueError("LEGACY_DELIVERY_VERSION_INVALID")
+  return original
+
+
+async def upgrade_legacy_delivery(receipt, request, source, *, delivery_id):
+  """No writes: caller must freeze both catalogs and retain the returned old receipt."""
+  original = validate_legacy_receipt(receipt)
   if (
     source.get("status") != "COMPLETED"
     or source.get("request_id") != original["source_request_id"]

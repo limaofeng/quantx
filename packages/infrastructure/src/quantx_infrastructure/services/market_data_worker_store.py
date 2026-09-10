@@ -51,7 +51,8 @@ class MarketDataWorkerStore(MarketDataDemandStore):
         LEFT JOIN development_data_download_budget b ON b.delivery_id=e.id
         LEFT JOIN development_data_ingestion i ON i.delivery_id=e.id
         WHERE e.state IN ('QUEUED','WAITING_SOURCE','WAITING_LOCAL_INGESTION','WAITING_LOCAL_PROOF')
-          AND (b.delivery_id IS NULL OR (b.reason_code IS NULL AND b.next_probe_at <= clock_timestamp()))
+          AND ((e.state='WAITING_LOCAL_INGESTION' AND i.delivery_id IS NOT NULL)
+            OR b.delivery_id IS NULL OR (b.reason_code IS NULL AND b.next_probe_at <= clock_timestamp()))
           AND (i.delivery_id IS NULL OR (
             NOT (i.progress->>'blocked')::boolean AND
             (i.progress->>'next_retry_at' IS NULL OR
