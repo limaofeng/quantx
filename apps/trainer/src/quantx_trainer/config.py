@@ -148,6 +148,7 @@ class TrainerConfig:
     """Inherit OS essentials, never broker, production or Python search settings."""
     allowed = {
       "SYSTEMROOT",
+      "SYSTEMDRIVE",
       "WINDIR",
       "COMSPEC",
       "TEMP",

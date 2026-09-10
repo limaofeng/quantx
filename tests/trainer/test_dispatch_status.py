@@ -187,3 +187,14 @@ async def test_dispatch_reports_claim_transaction_outcome_without_starting_compu
   value = module.read_dispatch_status(tmp_path, config, "training")
   assert value["state"] == "FRESH"
   assert value["decision"]["reason"] == reason
+
+
+@pytest.mark.parametrize("reason", ["HOST_GUARD_LOCATION_UNAVAILABLE", "HOST_GUARD_LINK_FORBIDDEN"])
+def test_guard_location_failures_remain_visible(tmp_path, monkeypatch, reason):
+  config = tmp_path / "trainer.toml"
+  config.write_text("fixture")
+  monkeypatch.setattr(runtime, "current_config", lambda: SimpleNamespace(state_root=tmp_path))
+  module.DispatchObservation(config, "preparation").record({"status": "QUEUED", "reason": reason})
+  value = module.read_dispatch_status(tmp_path, config, "preparation")
+  assert value["state"] == "FRESH"
+  assert value["decision"]["reason"] == reason

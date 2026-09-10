@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -121,6 +124,7 @@ def test_child_does_not_inherit_broker_or_production_environment(tmp_path, deplo
   env = config.child_environment(
     {
       "SystemRoot": "C:\\Windows",
+      "SystemDrive": "C:",
       "ENV": "production",
       "DATABASE_URL": "production",
       "QUANTX_ENV_FILE": "production.env",
@@ -132,6 +136,7 @@ def test_child_does_not_inherit_broker_or_production_environment(tmp_path, deplo
     }
   )
   assert env["SystemRoot"] == "C:\\Windows"
+  assert env["SystemDrive"] == "C:"
   assert env["ENV"] == "development"
   assert env["DATABASE_URL"] == deployment["database_url"]
   assert env["ENABLE_REAL_TRADING"] == env["QMT_REAL_TRADING_ENABLED"] == "false"
@@ -149,3 +154,17 @@ def test_unreadable_and_malformed_config_are_redacted(tmp_path):
     with pytest.raises(TrainerConfigurationError) as caught:
       TrainerConfig.load(filename)
     assert "private" not in str(caught.value)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows known-folder API")
+def test_windows_research_environment_preserves_machine_guard_location(tmp_path, deployment):
+  from quantx_infrastructure.training_host_guard import host_guard_root
+
+  config = load(tmp_path, deployment)
+  expected = host_guard_root()
+  script = "from quantx_infrastructure.training_host_guard import host_guard_root; print(host_guard_root())"
+  result = subprocess.run([sys.executable, "-I", "-c", script],
+                          env=config.research_environment(os.environ),
+                          capture_output=True, text=True, timeout=15)
+  assert result.returncode == 0, result.stderr
+  assert Path(result.stdout.strip()) == expected
