@@ -1,46 +1,14 @@
 import pandas as pd
-import pytest
-from prefect.states import Failed
 from quantx_contracts import (
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
 )
-from quantx_infrastructure.database.timeseries_connection import WriteError
-from quantx_worker.prefector.tasks import market_data_tasks
-from quantx_worker.prefector.tasks.market_data_tasks import (
-  _should_retry_market_data_save,
+from quantx_infrastructure.services.market_data_transfer_ingestion import (
   preprocess_market_data,
-  save_market_data,
 )
 
 
-class _Logger:
-  def info(self, *_args, **_kwargs):
-    return None
-
-
-@pytest.mark.parametrize(
-  "server_message",
-  [
-    "another process has written to the WAL ahead of this one",
-    "wal is shutdown",
-  ],
-)
-def test_save_task_does_not_retry_fatal_influx_wal_failure(server_message):
-  state = Failed(data=WriteError(f"write failed: {server_message}"))
-
-  assert not _should_retry_market_data_save(None, None, state)
-  assert save_market_data.retry_condition_fn is _should_retry_market_data_save
-
-
-def test_save_task_still_retries_transient_influx_failure():
-  state = Failed(data=WriteError("write failed: connection timed out"))
-
-  assert _should_retry_market_data_save(None, None, state)
-
-
-def test_preprocess_tick_uses_reversible_microsecond_storage_time(monkeypatch):
-  monkeypatch.setattr(market_data_tasks, "get_run_logger", _Logger)
+def test_preprocess_tick_uses_reversible_microsecond_storage_time():
   source_time = 1_700_000_000_123
   frame = pd.DataFrame(
     [
@@ -106,8 +74,7 @@ def test_preprocess_tick_uses_reversible_microsecond_storage_time(monkeypatch):
   assert reconstructed.tolist() == [source_time, source_time]
 
 
-def test_preprocess_non_tick_time_is_unchanged(monkeypatch):
-  monkeypatch.setattr(market_data_tasks, "get_run_logger", _Logger)
+def test_preprocess_non_tick_time_is_unchanged():
   source_time = 1_700_000_000_123
   frame = pd.DataFrame(
     [

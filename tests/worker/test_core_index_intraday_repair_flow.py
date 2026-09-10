@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 import quantx_worker.prefector.flows.core_index_intraday_repair_flow as repair_flow
@@ -164,7 +164,7 @@ async def test_repair_flow_downloads_only_incomplete_codes_and_rechecks(
   target = date(2026, 8, 17)
   before = _audit(complete=False, incomplete_codes=["000001.SH"])
   after = _audit(complete=True)
-  audit = Mock(side_effect=[before, after])
+  audit = AsyncMock(side_effect=[before, after])
   request = AsyncMock(
     return_value={
       "status": "completed",
@@ -228,7 +228,7 @@ async def test_repair_flow_skips_download_when_history_is_complete(monkeypatch):
   monkeypatch.setattr(
     repair_flow,
     "audit_core_index_intraday",
-    Mock(return_value=_audit(complete=True)),
+    AsyncMock(return_value=_audit(complete=True)),
   )
   monkeypatch.setattr(repair_flow, "_request_and_wait", request)
   monkeypatch.setattr(repair_flow, "get_run_logger", FakeLogger)
@@ -242,3 +242,74 @@ async def test_repair_flow_skips_download_when_history_is_complete(monkeypatch):
 
   assert result["dates"][0]["status"] == "complete"
   request.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kind", ["complete", "interrupted", "cancel", "capacity"])
+async def test_default_index_audit_uses_bounded_http_and_discards_failed_pages(
+  monkeypatch, kind
+):
+  import asyncio
+  from zoneinfo import ZoneInfo
+
+  import httpx
+  from quantx_infrastructure.services.local_market_data_client import (
+    LocalMarketDataClient,
+  )
+
+  target = date(2026, 8, 17)
+  calls = []
+
+  async def reply(request):
+    query = request.url.params
+    calls.append(dict(query))
+    assert query["period"] == "1m" and query["page_size"] == "1000"
+    assert query["trading_date"] == target.isoformat()
+    code = query["instrument"]
+    if code == repair_flow.CORE_INDEX_SYMBOLS[0] and "after" in query:
+      if kind == "interrupted":
+        return httpx.Response(503)
+      if kind == "cancel":
+        raise asyncio.CancelledError()
+    bars = sorted(_complete_bars(code, target), key=lambda bar: bar.time)
+    if kind == "capacity" and code == repair_flow.CORE_INDEX_SYMBOLS[0]:
+      bars = [
+        _bar(code, datetime(2026, 8, 17, 9, 30) + timedelta(seconds=i))
+        for i in range(2001)
+      ]
+    after = datetime.fromisoformat(query["after"]) if "after" in query else None
+    rows = [
+      {
+        **vars(bar),
+        "time": bar.time.replace(tzinfo=ZoneInfo("Asia/Shanghai")).isoformat(),
+      }
+      for bar in bars
+      if after is None or bar.time.replace(tzinfo=ZoneInfo("Asia/Shanghai")) > after
+    ]
+    rows = rows[:100]
+    return httpx.Response(
+      200,
+      json={
+        "records": rows,
+        "exhausted": not rows,
+        "next_after": rows[-1]["time"] if rows else None,
+      },
+    )
+
+  client = LocalMarketDataClient(transport=httpx.MockTransport(reply), token="test")
+  monkeypatch.setattr(repair_flow, "LocalMarketDataClient", lambda: client)
+  if kind == "cancel":
+    with pytest.raises(asyncio.CancelledError):
+      await repair_flow.audit_core_index_intraday(target)
+  else:
+    result = await repair_flow.audit_core_index_intraday(target)
+    assert result["complete"] is (kind == "complete")
+    if kind != "complete":
+      assert result["incomplete_codes"] == [repair_flow.CORE_INDEX_SYMBOLS[0]]
+      failed = result["codes"][repair_flow.CORE_INDEX_SYMBOLS[0]]
+      assert failed["classification"] == "UNAVAILABLE"
+      assert failed["row_count"] is None and failed["missing_minutes"] is None
+      assert failed["query_error_type"] == (
+        "HTTPStatusError" if kind == "interrupted" else "ValueError"
+      )
+  assert client.client.is_closed
+  assert len(calls) <= 42

@@ -5,7 +5,6 @@ from typing import Any
 
 _EXPORTS = {
   "collect_disclosure_sync_symbols": "announcement_tasks",
-  "save_market_data": "market_data_tasks",
   "sync_stock_disclosures_task": "announcement_tasks",
 }
 

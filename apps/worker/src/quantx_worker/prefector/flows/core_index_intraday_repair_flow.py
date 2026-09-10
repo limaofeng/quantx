@@ -10,9 +10,12 @@ from typing import Any, Optional
 
 from prefect import flow, get_run_logger
 from prefect.runtime import flow_run as flow_run_runtime
+from quantx_contracts.market_data_service import HistoryRead
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
-from quantx_infrastructure.repositories.kline_repository import KLineRepository
+from quantx_infrastructure.services.local_market_data_client import (
+  LocalMarketDataClient,
+)
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
 from quantx_worker.prefector.flows.daily_indicator_snapshot_flow import (
@@ -154,17 +157,47 @@ def assess_intraday_coverage(
   }
 
 
-def audit_core_index_intraday(target_date: date) -> dict[str, Any]:
-  start = datetime.combine(target_date, time.min)
-  end = datetime.combine(target_date, time.max)
-  records = KLineRepository().find_by_period_and_time_range(
-    period="1m",
-    start=start,
-    end=end,
-    stock_codes=list(CORE_INDEX_SYMBOLS),
-    use_cache=False,
-  )
-  return assess_intraday_coverage(records, target_date=target_date)
+async def audit_core_index_intraday(target_date: date) -> dict[str, Any]:
+  records, errors = [], {}
+  client = LocalMarketDataClient()
+  try:
+    for code in CORE_INDEX_SYMBOLS:
+      selected = []
+      try:
+        async with asyncio.timeout(15):
+          request = HistoryRead(
+            instrument=code, period="1m", trading_date=target_date, page_size=1000
+          )
+          while True:
+            page = await client.read_history(request)
+            if not page.records:
+              break
+            selected.extend(page.records)
+            if len(selected) > 2000:
+              raise ValueError("index minute audit row budget exhausted")
+            request.after = page.next_after
+      except Exception as exc:
+        errors[code] = type(exc).__name__
+      else:
+        records.extend(KLine(**row) for row in selected)
+  finally:
+    await client.close()
+  result = assess_intraday_coverage(records, target_date=target_date)
+  for code, error in errors.items():
+    result["codes"][code] = {
+      "complete": False,
+      "classification": "UNAVAILABLE",
+      "query_error_type": error,
+      "row_count": None,
+      "distinct_minutes": None,
+      "valid_required_minutes": None,
+      "missing_minutes": None,
+      "invalid_required_rows": None,
+      "first_time": None,
+      "last_time": None,
+      "missing_sample": [],
+    }
+  return result
 
 
 async def resolve_repair_dates(
@@ -223,7 +256,7 @@ async def core_index_intraday_repair_flow(
   failed_dates: list[str] = []
 
   for repair_date in repair_dates:
-    before = await asyncio.to_thread(audit_core_index_intraday, repair_date)
+    before = await audit_core_index_intraday(repair_date)
     incomplete_codes = list(before["incomplete_codes"])
     if not incomplete_codes:
       logger.info("核心指数分钟行情完整: date=%s", repair_date.isoformat())
@@ -268,7 +301,7 @@ async def core_index_intraday_repair_flow(
           f"durable_status={transfer.get('durable_status', '')} "
           f"reason={transfer.get('reason', '')}"
         )
-      after = await asyncio.to_thread(audit_core_index_intraday, repair_date)
+      after = await audit_core_index_intraday(repair_date)
       status = "repaired" if after["complete"] else "incomplete"
       results.append(
         {
