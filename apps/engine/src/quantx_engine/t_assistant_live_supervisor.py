@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import logging
 import re
 from dataclasses import dataclass, field, fields
 from datetime import datetime
@@ -49,6 +50,7 @@ from sqlalchemy import select
 
 from .accepted_order_market import accepted_order_market
 from .instrument_universe_provider import InstrumentUniverseSnapshot
+from .t_allocation_trigger import ALLOCATION_TRIGGER_DELAY_SECONDS, AllocationTrigger
 from .t_assistant_candidate_controls import read_candidate_controls
 from .t_assistant_decision_runtime import TAssistantLiveDecisionRuntime
 from .t_assistant_live_admission import canary_instrument_codes
@@ -108,6 +110,9 @@ class TAssistantLiveSupervisor:
     self._handle = None
     self._bindings = {}
     self.last_results = {}
+    self._allocation_triggers = {}
+    self._allocation_timers = {}
+    self._last_allocation_at = {}
 
   async def start(self):
     async with self._lock:
@@ -121,13 +126,25 @@ class TAssistantLiveSupervisor:
       if self._handle is not None:
         await self.hub.unsubscribe(self._handle)
         self._handle = None
-      self._bindings.clear()
+      timers = tuple(self._allocation_timers.values())
+      for key in tuple(self._bindings):
+        self._unbind(key)
+      if timers:
+        await asyncio.gather(*timers, return_exceptions=True)
       self.last_results.clear()
       self.runtime = TAssistantLiveDecisionRuntime(
         session_factory=self.sessions, clock=self.clock
       )
 
+  def _clear_allocation_trigger(self, execution_id):
+    self._allocation_triggers.pop(execution_id, None)
+    self._last_allocation_at.pop(execution_id, None)
+    timer = self._allocation_timers.pop(execution_id, None)
+    if timer is not None and timer is not asyncio.current_task():
+      timer.cancel()
+
   def _unbind(self, execution_id):
+    self._clear_allocation_trigger(execution_id)
     self.runtime.unbind_execution(execution_id)
     self._bindings.pop(execution_id, None)
     self.last_results.pop(execution_id, None)
@@ -231,6 +248,9 @@ class TAssistantLiveSupervisor:
     async with self._lock:
       # Revoke memory before validation: a failed refresh cannot keep producing.
       previous = self._bindings.pop(execution_id, None)
+      pending_trigger = self._allocation_triggers.get(execution_id)
+      last_allocation_at = self._last_allocation_at.get(execution_id)
+      self._clear_allocation_trigger(execution_id)
       if legacy_active:
         self.last_results.pop(execution_id, None)
         raise ValueError("T_ASSISTANT_LIVE_LEGACY_PRODUCER_ACTIVE")
@@ -356,6 +376,15 @@ class TAssistantLiveSupervisor:
       )
       if previous is not None and changed:
         await self._warming_reason(self._bindings[execution_id], "LIVE_READY_RECOVERY_REQUIRED", now)
+      elif pending_trigger is not None and execution.readiness.readiness.value == "READY":
+        # An unchanged refresh must neither discard pending work nor extend its window.
+        self._allocation_triggers[execution_id] = pending_trigger
+        self._last_allocation_at[execution_id] = last_allocation_at
+        delay = max(0, last_allocation_at + ALLOCATION_TRIGGER_DELAY_SECONDS - asyncio.get_running_loop().time())
+        self._allocation_timers[execution_id] = asyncio.create_task(
+          self._flush_allocation_trigger(execution_id, self._bindings[execution_id], delay),
+          name=f"t-allocation-trigger:{execution_id}",
+        )
       return execution_id
 
   def entry_review_adapter(self, db):
@@ -494,6 +523,71 @@ class TAssistantLiveSupervisor:
       )
       await self._warming_reason(binding, reason, observed)
 
+  async def _dispatch_allocation_trigger(self, key, binding, trigger):
+    capture = trigger.capture
+
+    def validate_market():
+      if (not self.hub.is_ready or self.hub.stream_id != capture.stream_id
+        or str(self.hub.generation) != capture.continuity_generation
+        or not 0 <= (self.clock() - capture.captured_at).total_seconds() < 90):
+        raise ValueError("LIVE_ALLOCATION_MARKET_CHANGED")
+
+    validate_market()
+    if trigger.count > 1:
+      async with self.sessions() as db, db.begin():
+        await self.runtime._lock_live_source(db, binding.execution)
+        await TAssistantExecutionRepository(db).append_event(TAssistantExecutionEvent(
+          key, f"allocation-trigger:{key}:{capture.stream_id}:{capture.continuity_generation}:{trigger.first_fence}:{capture.fence_sequence}",
+          "ALLOCATION_TRIGGERS_COALESCED", self.clock(), trigger.evidence(),
+        ))
+    await self.allocation_runtime.dispatch(
+      execution_id=key, market_mark_reader=self.market_marks, validate_market=validate_market,
+    )
+    await self.entry_runtime.dispatch(execution_id=key, validate_market=validate_market)
+    self._last_allocation_at[key] = asyncio.get_running_loop().time()
+
+  async def _flush_allocation_trigger(self, key, binding, delay):
+    try:
+      await asyncio.sleep(delay)
+      async with self._lock:
+        if self._bindings.get(key) is not binding:
+          return
+        trigger = self._allocation_triggers.pop(key, None)
+        self._allocation_timers.pop(key, None)
+        if trigger is None or binding.execution.readiness.readiness.value != "READY":
+          return
+        try:
+          await self._dispatch_allocation_trigger(key, binding, trigger)
+        except Exception:
+          try:
+            await self._warming_reason(binding, "LIVE_ALLOCATION_TRIGGER_FAILED", self.clock())
+          finally:
+            self._unbind(key)
+          logging.getLogger(__name__).warning("Deferred LIVE T allocation failed; source unbound")
+    except asyncio.CancelledError:
+      raise
+    except Exception:
+      # A failed readiness write must not leave an unobserved task exception.
+      logging.getLogger(__name__).warning("Deferred LIVE T allocation recovery failed; source unbound")
+
+  async def _request_allocation_trigger(self, key, binding, capture, *, material):
+    pending = self._allocation_triggers.get(key)
+    trigger = pending.merge(capture) if pending else AllocationTrigger(capture, capture.fence_sequence)
+    elapsed = asyncio.get_running_loop().time() - self._last_allocation_at.get(key, float("-inf"))
+    if material or elapsed >= ALLOCATION_TRIGGER_DELAY_SECONDS:
+      self._allocation_triggers.pop(key, None)
+      timer = self._allocation_timers.pop(key, None)
+      if timer is not None:
+        timer.cancel()
+      await self._dispatch_allocation_trigger(key, binding, trigger)
+    else:
+      self._allocation_triggers[key] = trigger
+      if key not in self._allocation_timers:
+        self._allocation_timers[key] = asyncio.create_task(
+          self._flush_allocation_trigger(key, binding, ALLOCATION_TRIGGER_DELAY_SECONDS - elapsed),
+          name=f"t-allocation-trigger:{key}",
+        )
+
   async def _on_quotes(self, data):
     async with self._lock:
       now = self.clock()
@@ -574,16 +668,11 @@ class TAssistantLiveSupervisor:
           if self.last_results[key].committed:
             await self._try_activate(binding, self.last_results[key].cycle_id, capture)
             if binding.execution.readiness.readiness.value == "READY":
-              def validate_allocation_market():
-                if (not self.hub.is_ready or self.hub.stream_id != capture.stream_id
-                  or str(self.hub.generation) != capture.continuity_generation
-                  or not 0 <= (self.clock() - capture.captured_at).total_seconds() < 90):
-                  raise ValueError("LIVE_ALLOCATION_MARKET_CHANGED")
-              await self.allocation_runtime.dispatch(
-                execution_id=key, market_mark_reader=self.market_marks,
-                validate_market=validate_allocation_market,
+              output = self.last_results[key].output
+              await self._request_allocation_trigger(
+                key, binding, capture,
+                material=bool(output.trade_intents or any(patch.material for patch in output.symbol_state_patches)),
               )
-              await self.entry_runtime.dispatch(execution_id=key, validate_market=validate_allocation_market)
         except Exception as exc:
           try:
             if isinstance(exc, ValueError) and str(exc) in {"LIVE_ALLOCATION_MARKET_CHANGED", "LIVE_ENTRY_MARKET_WITNESS_CHANGED", "LIVE_ENTRY_LATEST_MARKET_EXPIRED"}:

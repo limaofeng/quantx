@@ -402,7 +402,7 @@ async def test_committed_ready_cycle_dispatches_allocation_and_market_failure_re
     supervisor._bindings[key].execution = await TAssistantExecutionRepository(db).get_domain(key)
   supervisor._bindings[key].ready_market_identity = (hub.stream_id, str(hub.generation))
   supervisor._bindings[key].rewarm.clear()
-  supervisor.runtime.run_cycle = AsyncMock(return_value=SimpleNamespace(committed=True, cycle_id="cycle"))
+  supervisor.runtime.run_cycle = AsyncMock(return_value=SimpleNamespace(committed=True, cycle_id="cycle", output=SimpleNamespace(trade_intents=(), symbol_state_patches=())))
   supervisor._try_activate = AsyncMock()
   calls = []
 

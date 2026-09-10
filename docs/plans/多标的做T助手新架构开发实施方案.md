@@ -981,7 +981,17 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   则解除绑定，等待批次不再执行、不新增周期；显式 reconcile 后从新 ring/rewarm 恢复。
   **19 项 supervisor 测试通过**，Ruff/差异检查通过，证据 `p7-live-batch-serialization.log`。
   此证据使用合成行情回调与真实决策 runtime/SQLite，未覆盖 Hub 的实际队列溢出或 PostgreSQL
-  并发；当前仍每个 accepted batch 执行周期，尚未实现 scorer/Coordinator 触发有界合并。
+  并发；每个 accepted batch 仍执行完整周期。
+  LIVE 分配/ENTRY dispatch 触发现接入固定 100ms 合并窗口：首次立即执行，普通触发只覆盖
+  最新完整 capture/fence、不延长窗口，静默后由单个 timer 执行；material patch/提案立即
+  结束合并。reducer/step/周期提交不合并，scorer 与 PAPER 路径尚未接入此机制。
+  多触发合并在分配前写 ALLOCATION_TRIGGERS_COALESCED（stream/generation、首末 fence、
+  数量及窗口）；写入失败不分配。停止/解除绑定取消 timer；未变更 reconcile 保留原触发及
+  原截止时间；延迟任务复核行情，失效或执行错误解除绑定并阻断后续 ENTRY。
+  **27 项相关验证通过**，包含真实 step/SQLite 三 Tick 三周期、两次分配调用，material
+  立即执行、静默触发、刷新保留、停止、行情失效、分配和审计故障。Ruff/差异检查通过；
+  证据 `p7-allocation-trigger.log`、`p7-allocation-trigger-final.log`。分配/下单端口为 spy，
+  未发送订单；100ms 是合并调度窗口，不是阻塞事件循环下的执行耗时保证，P7 完整门仍未完成。
   legacy 当前仅由 global monitor 调用 entry authority 失效并阻断新源，尚未接通持久化 DRAINING，
   不能据此清除 head.strategy_run_id 或判定切换完成。
 - legacy 义务清单冻结组件已完成：按配置头/旧 run/版本锁定读取原 owner 的 intent、pending、
