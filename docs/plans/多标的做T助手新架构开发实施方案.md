@@ -782,6 +782,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   查询期间新批次发布不污染旧视图、撤权后观察拒绝，以及实际 ORM 查询的 PostgreSQL
   编译结果确认读观察无 FOR UPDATE、写授权有锁；Ruff/差异检查通过。证据
   `p8-snapshot-unlocked-authority.log`。未执行实际 PostgreSQL 锁竞争或生产延迟验收。
+  后续已补实际 PostgreSQL 锁竞争：仅允许 localhost 专用 *_test/test_* 数据库，
+  每例创建随机隔离 schema 和两张 registry 表，结束 DROP 后再次查询确认清理。
+  **2 项实际多连接测试通过（SHADOW/ACTIVE）**：pg_blocking_pids 确认撤权连接被
+  authorize 持有者阻塞；同时观察读取在 300ms lock_timeout 下成功，锁释放后撤权
+  提交，后续观察拒绝旧 revision。不是单纯 sleep 推断阻塞，也未执行业务库迁移。
+  Ruff/差异检查通过，证据 `p8-registry-real-lock.log`；新增测试默认跳过，显式
+  `QUANTX_RUN_MIGRATION_GATE=true` 运行。生产延迟与正式 SHADOW 观察验收仍未完成。
 
 
 
