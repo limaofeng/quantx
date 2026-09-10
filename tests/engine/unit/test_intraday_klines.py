@@ -97,6 +97,97 @@ class FakeTradingTimeService:
     return from_date - timedelta(days=1)
 
 
+def _archive_tick(second=10, *, generation=1, stream="source-a", sequence=10):
+  tick = _tick("600900.SH", datetime(2026, 9, 10, 9, 31, second), 10, 1000, 10000, 5)
+  tick.continuity_generation = generation
+  tick.market_stream_id = stream
+  tick.market_stream_sequence = sequence
+  return tick
+
+
+@pytest.mark.parametrize(
+  "updates",
+  [
+    {"market_stream_sequence": 9},
+    {"market_stream_sequence": 10},
+    {"market_stream_id": "other-source"},
+    {"continuity_generation": 0},
+    {"continuity_generation": 1, "market_stream_id": ""},
+    {"time": datetime(2026, 9, 10, 9, 31, 9)},
+  ],
+)
+def test_minute_aggregate_rejects_unordered_source_without_mutation(updates):
+  manager = RealTimeDataManager()
+  first = _archive_tick()
+  original = manager._build_tick_generated_kline(first.stock_code, first)
+  newer = _archive_tick(second=20, sequence=11)
+  newer.last_price = 12
+  for key, value in updates.items():
+    setattr(newer, key, value)
+  assert manager._build_tick_generated_kline(first.stock_code, newer) is None
+  assert original.close == original.high == 10
+  assert manager.tick_minute_klines[first.stock_code]["sequence"] == 10
+
+
+@pytest.mark.parametrize("cause", ["generation", "reset", "counter", "gap"])
+def test_minute_aggregate_discontinuity_discards_old_ohlc_and_baseline(cause):
+  manager = RealTimeDataManager()
+  first = _archive_tick()
+  manager._build_tick_generated_kline(first.stock_code, first)
+  newer = _archive_tick(second=20, sequence=11)
+  newer.last_price = 12
+  newer.volume = 1100
+  newer.amount = 11200
+  if cause == "generation":
+    newer.continuity_generation = 2
+    newer.market_stream_id = "source-b"
+    newer.market_stream_sequence = 1
+  elif cause == "reset":
+    newer.market_stream_reset = True
+  elif cause == "counter":
+    newer.volume = 900
+    newer.amount = 9000
+  else:
+    newer.time = datetime(2026, 9, 10, 13, 0, 1)
+  bar = manager._build_tick_generated_kline(first.stock_code, newer)
+  assert bar.open == bar.high == bar.low == bar.close == 12
+  assert bar.volume == 5
+  assert bar.amount == 60
+  assert manager.tick_minute_klines[first.stock_code]["origin_reset"] is True
+  if cause == "generation":
+    stale = _archive_tick(second=30, sequence=100)
+    assert manager._build_tick_generated_kline(first.stock_code, stale) is None
+
+
+def test_minute_aggregate_allows_same_timestamp_with_newer_source_sequence():
+  manager = RealTimeDataManager()
+  first = _archive_tick()
+  manager._build_tick_generated_kline(first.stock_code, first)
+  newer = _archive_tick(sequence=11)
+  newer.last_price = 11
+  bar = manager._build_tick_generated_kline(first.stock_code, newer)
+  assert bar.open == 10
+  assert bar.close == bar.high == 11
+
+
+@pytest.mark.asyncio
+async def test_reconnect_does_not_flush_previous_minute_as_continuous(monkeypatch):
+  manager = RealTimeDataManager()
+  saved = []
+
+  async def save(bar):
+    saved.append(bar)
+
+  monkeypatch.setattr(manager, "_safe_save_tick_generated_kline", save)
+  first = _archive_tick()
+  await manager._handle_tick_generated_1m(first.stock_code, first)
+  newer = _archive_tick(generation=2, stream="source-b", sequence=1)
+  newer.time = datetime(2026, 9, 10, 9, 32, 1)
+  await manager._handle_tick_generated_1m(first.stock_code, newer)
+  assert len(saved) == 2
+  assert saved[-1].time.minute == 32
+
+
 class FakeDividFactorService:
   def __init__(self, factors=None):
     self.factors = list(factors or [])
@@ -317,12 +408,12 @@ async def test_realtime_tick_query_merges_warm_cache_without_scheduling_download
       tickvol=100,
     ),
     _tick(
-    stock_code=stock_code,
-    value_time=datetime(2026, 6, 1, 9, 32, 0),
-    price=27.81,
-    volume=200,
-    amount=5562.0,
-    tickvol=100,
+      stock_code=stock_code,
+      value_time=datetime(2026, 6, 1, 9, 32, 0),
+      price=27.81,
+      volume=200,
+      amount=5562.0,
+      tickvol=100,
     ),
     _tick(
       stock_code=stock_code,
@@ -494,9 +585,7 @@ async def test_warm_cache_initializes_symbol_once_per_trading_day(monkeypatch):
       return True
 
   service.subscription_manager = FakeSubscriptionManager()
-  monkeypatch.setattr(
-    warm_cache_module.time_utils, "today", lambda: date(2026, 6, 1)
-  )
+  monkeypatch.setattr(warm_cache_module.time_utils, "today", lambda: date(2026, 6, 1))
 
   async def fake_run_initial_download(stock_code, trading_date):
     download_calls.append((stock_code, trading_date))
@@ -534,9 +623,7 @@ async def test_warm_cache_query_sources_do_not_start_initial_download(monkeypatc
       return True
 
   service.subscription_manager = FakeSubscriptionManager()
-  monkeypatch.setattr(
-    warm_cache_module.time_utils, "today", lambda: date(2026, 6, 1)
-  )
+  monkeypatch.setattr(warm_cache_module.time_utils, "today", lambda: date(2026, 6, 1))
 
   async def fake_run_initial_download(stock_code, trading_date):
     download_calls.append((stock_code, trading_date))
@@ -580,9 +667,7 @@ async def test_warm_cache_proactively_subscribes_core_market_indices(monkeypatch
     "get_watchlist",
     empty_watchlist,
   )
-  monkeypatch.setattr(
-    service, "replace_source_symbols", fake_replace_source_symbols
-  )
+  monkeypatch.setattr(service, "replace_source_symbols", fake_replace_source_symbols)
 
   await service.refresh_source_symbols()
 
@@ -828,12 +913,8 @@ async def test_tick_pre_close_caches_native_fallback_and_logs_once(
   second_tick.last_close = 12.68
 
   with caplog.at_level(logging.INFO, logger="quantx_engine.realtime_manager"):
-    first_normalized = await manager._normalize_tick_pre_close(
-      stock_code, first_tick
-    )
-    second_normalized = await manager._normalize_tick_pre_close(
-      stock_code, second_tick
-    )
+    first_normalized = await manager._normalize_tick_pre_close(stock_code, first_tick)
+    second_normalized = await manager._normalize_tick_pre_close(stock_code, second_tick)
 
   cache_key = manager._previous_daily_close_cache_key(stock_code, first_tick.time)
   assert calls["count"] == 1
@@ -1099,13 +1180,11 @@ async def test_market_data_service_tick_pre_close_caches_native_fallback_and_log
   )
   second_tick.last_close = 12.68
 
-  with caplog.at_level(logging.INFO, logger="quantx_infrastructure.core.data.market_data_service"):
-    first_normalized = await service._normalize_tick_pre_close(
-      stock_code, first_tick
-    )
-    second_normalized = await service._normalize_tick_pre_close(
-      stock_code, second_tick
-    )
+  with caplog.at_level(
+    logging.INFO, logger="quantx_infrastructure.core.data.market_data_service"
+  ):
+    first_normalized = await service._normalize_tick_pre_close(stock_code, first_tick)
+    second_normalized = await service._normalize_tick_pre_close(stock_code, second_tick)
 
   cache_key = service._previous_daily_close_cache_key(stock_code, first_tick.time)
   assert calls["count"] == 1

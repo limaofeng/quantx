@@ -79,8 +79,7 @@ class RealTimeDataManager:
     self.tick_generated_kline_save_interval_seconds = max(
       0.0,
       float(
-        getattr(settings, "realtime_generated_kline_save_interval_seconds", 10.0)
-        or 0.0
+        getattr(settings, "realtime_generated_kline_save_interval_seconds", 10.0) or 0.0
       ),
     )
     self.historical_market_data_service = HistoricalMarketDataService()
@@ -306,9 +305,7 @@ class RealTimeDataManager:
     for tick in sorted(ticks, key=lambda item: item.time):
       dead_queues = set()
       for queue in self.tick_subscribers[stock_code].copy():
-        success = await self._safe_queue_put(
-          queue, tick, f"tick_backfill_{stock_code}"
-        )
+        success = await self._safe_queue_put(queue, tick, f"tick_backfill_{stock_code}")
         if success:
           delivered += 1
         else:
@@ -341,9 +338,7 @@ class RealTimeDataManager:
     for kline in sorted(klines, key=lambda item: item.time):
       dead_queues = set()
       for queue in self.kline_subscribers[key].copy():
-        success = await self._safe_queue_put(
-          queue, kline, f"kline_backfill_{key}"
-        )
+        success = await self._safe_queue_put(queue, kline, f"kline_backfill_{key}")
         if success:
           delivered += 1
         else:
@@ -395,9 +390,14 @@ class RealTimeDataManager:
   async def _read_previous_daily_klines(self, stock_code, previous_trading_date):
     client = LocalMarketDataClient()
     try:
-      page = await client.read_history(HistoryRead(
-        instrument=stock_code, period="1d", trading_date=previous_trading_date, page_size=2,
-      ))
+      page = await client.read_history(
+        HistoryRead(
+          instrument=stock_code,
+          period="1d",
+          trading_date=previous_trading_date,
+          page_size=2,
+        )
+      )
       if len(page.records) > 1:
         raise ValueError("previous daily close partition contains multiple rows")
       return [KLine(**row) for row in page.records]
@@ -537,6 +537,45 @@ class RealTimeDataManager:
     if state and minute < state["minute"]:
       return None
 
+    # Sequence is ordered only inside one authoritative continuity generation.
+    # Source time is checked separately: a newer envelope can carry an old quote.
+    observed_at = time_utils.to_shanghai(tick.time)
+    generation = tick.continuity_generation
+    stream_id = tick.market_stream_id
+    sequence = tick.market_stream_sequence
+    lineage = (generation, stream_id)
+    has_lineage = generation > 0 and bool(stream_id) and sequence > 0
+    if (generation or stream_id or sequence) and not has_lineage:
+      return None
+    reset = bool(tick.market_stream_reset)
+    if state:
+      if observed_at < state["last_observed_at"]:
+        return None
+      old_generation, old_stream = state["lineage"]
+      if old_generation:
+        if not has_lineage or generation < old_generation:
+          return None
+        if generation == old_generation:
+          if stream_id != old_stream or sequence <= state["sequence"]:
+            return None
+        else:
+          reset = True
+      elif has_lineage:
+        reset = True
+      elif observed_at == state["last_observed_at"]:
+        # Without a source ordinal, two different values at the same timestamp
+        # cannot be assigned an arrival-independent revision order.
+        return None
+      reset = reset or (
+        tick_volume < state["last_cumulative_volume"]
+        or tick_amount < state["last_cumulative_amount"]
+        or minute - state["minute"] > timedelta(minutes=1)
+      )
+    if reset:
+      # A reconnect snapshot is a new partial aggregate, never an extension of
+      # the previous OHLC or its cumulative volume baseline.
+      state = None
+
     if not state or minute > state["minute"]:
       observed_tick_volume = max(0.0, float(getattr(tick, "tickvol", 0.0) or 0.0))
       if state:
@@ -570,6 +609,10 @@ class RealTimeDataManager:
         "last_cumulative_amount": tick_amount,
         "last_cumulative_volume": tick_volume,
         "minute": minute,
+        "lineage": lineage,
+        "sequence": sequence,
+        "last_observed_at": observed_at,
+        "origin_reset": reset,
       }
       self.tick_minute_klines[stock_code] = state
       return kline
@@ -587,6 +630,9 @@ class RealTimeDataManager:
     kline.suspend_flag = int(getattr(tick, "stock_status", kline.suspend_flag) or 0)
     state["last_cumulative_amount"] = tick_amount
     state["last_cumulative_volume"] = tick_volume
+    state["sequence"] = sequence
+    state["last_observed_at"] = observed_at
+    state["origin_reset"] = False
     return kline
 
   def _copy_kline(self, kline: KLine) -> KLine:
@@ -693,7 +739,10 @@ class RealTimeDataManager:
 
     save_candidates: List[KLine] = []
     if previous_kline is not None and previous_minute is not None:
-      if kline_snapshot.time > previous_minute:
+      if (
+        kline_snapshot.time > previous_minute
+        and not self.tick_minute_klines[stock_code]["origin_reset"]
+      ):
         save_candidates.append(previous_kline)
 
     if self._should_save_tick_generated_kline(stock_code, tick, kline_snapshot):
