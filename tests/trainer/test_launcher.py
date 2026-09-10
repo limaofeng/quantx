@@ -51,7 +51,9 @@ with publication_lock(root):
     ]
     assert "DATABASE_URL" not in kwargs["env"]
     assert kwargs["close_fds"] is True
-    assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert Path(kwargs["stdout"].name).name == "stdout.log"
+    assert Path(kwargs["stderr"].name).name == "stderr.log"
     process = create(
       [
         sys.executable,
@@ -101,12 +103,22 @@ def test_unknown_spawn_persists_ambiguity_and_refuses_retry(tmp_path, monkeypatc
 
 
 def test_confirmed_early_exit_allows_a_new_attempt(tmp_path, monkeypatch):
+  from quantx_trainer.run_log import read_service_launch_logs
+
   config, path = configuration(tmp_path)
   create = subprocess.Popen
   processes = []
 
   def spawn(*args, **kwargs):
-    process = create([sys.executable, "-c", "raise SystemExit(2)"], **kwargs)
+    process = create(
+      [
+        sys.executable,
+        "-c",
+        "import sys; print('BOOTSTRAP_STARTED'); "
+        "print('token=synthetic-secret', file=sys.stderr); raise SystemExit(2)",
+      ],
+      **kwargs,
+    )
     processes.append(process)
     return process
 
@@ -116,6 +128,11 @@ def test_confirmed_early_exit_allows_a_new_attempt(tmp_path, monkeypatch):
       result = launcher.start_service(config, path, startup_seconds=5)
       assert result["service"] == "OFFLINE"
       assert result["reason"] == "SERVICE_PROCESS_EXITED"
+      logs = read_service_launch_logs(config.state_root)
+      assert [(entry["stream"], entry["message"]) for entry in logs] == [
+        ("stdout", "BOOTSTRAP_STARTED"),
+        ("stderr", "token=[REDACTED]"),
+      ]
     assert len(processes) == 2
   finally:
     for process in processes:

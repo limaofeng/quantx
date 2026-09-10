@@ -1,6 +1,7 @@
 """Offline, bounded and redacted access to one training execution's logs."""
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -84,3 +85,34 @@ def _read_logs(root: Path, identity: dict[str, str], *, lines: int) -> list[dict
       for message in messages
     )
   return result
+
+
+def read_service_launch_logs(state_root: Path, *, lines: int = 100) -> list[dict]:
+  """Read the latest launch, including failures before a service heartbeat."""
+  if not 1 <= lines <= 1000:
+    raise ValueError("RUN_LOG_LINES_INVALID")
+  root = state_root / "service-launches"
+  current = root / "current.json"
+  reject_links(current)
+  if not current.exists():
+    return []
+  before = current.stat()
+  if before.st_nlink != 1 or not stat.S_ISREG(before.st_mode):
+    raise ValueError("SERVICE_LAUNCH_LOG_POINTER_INVALID")
+  with current.open("rb") as source:
+    opened = os.fstat(source.fileno())
+    if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino) or opened.st_nlink != 1:
+      raise ValueError("SERVICE_LAUNCH_LOG_POINTER_CHANGED")
+    raw = source.read(1025)
+  if len(raw) > 1024:
+    raise ValueError("SERVICE_LAUNCH_LOG_POINTER_INVALID")
+  value = json.loads(raw)
+  if (
+    not isinstance(value, dict)
+    or set(value) != {"attempt"}
+    or not isinstance(value["attempt"], str)
+    or not re.fullmatch(r"[a-f0-9]{32}", value["attempt"])
+  ):
+    raise ValueError("SERVICE_LAUNCH_LOG_POINTER_INVALID")
+  owner = value["attempt"]
+  return _read_logs(root / owner, {"launch_id": owner}, lines=lines)

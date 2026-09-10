@@ -79,7 +79,11 @@ def main(argv: list[str] | None = None) -> int:
   if args.command == "logs":
     from quantx_infrastructure.training_bundle_store import BundleTransferError
 
-    from quantx_trainer.run_log import read_preparation_logs, read_run_logs
+    from quantx_trainer.run_log import (
+      read_preparation_logs,
+      read_run_logs,
+      read_service_launch_logs,
+    )
     from quantx_trainer.service_log import read_events
 
     try:
@@ -91,7 +95,10 @@ def main(argv: list[str] | None = None) -> int:
         else (
           read_run_logs(config.state_root, args.run_id, lines=args.lines)
           if args.run_id
-          else read_events(config.state_root, lines=args.lines)
+          else (
+            read_events(config.state_root, lines=args.lines)
+            + read_service_launch_logs(config.state_root, lines=args.lines)
+          )
         )
       )
       for event in events:

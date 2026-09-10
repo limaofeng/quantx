@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 
 from quantx_infrastructure.training_bundle_store import publication_lock, reject_links
@@ -122,7 +123,7 @@ def start_service(config, config_path: Path, *, startup_seconds=10.0):
   root = config.state_root / "service-launches"
   reject_links(root)
   root.mkdir(parents=True, exist_ok=True)
-  with publication_lock(root):
+  with publication_lock(root), ExitStack() as logs:
     status = service_status(config.state_root, config_path)
     if status["service"] != "OFFLINE":
       return status
@@ -131,6 +132,8 @@ def start_service(config, config_path: Path, *, startup_seconds=10.0):
     owner = uuid.uuid4().hex
     attempt = root / owner
     attempt.mkdir()
+    stdout = logs.enter_context((attempt / "stdout.log").open("xb"))
+    stderr = logs.enter_context((attempt / "stderr.log").open("xb"))
     request = attempt / "request.json"
     _write(
       request, {"config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest()}
@@ -165,8 +168,8 @@ def start_service(config, config_path: Path, *, startup_seconds=10.0):
         cwd=config.code_root,
         env=environment,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stdout,
+        stderr=stderr,
         close_fds=True,
         **options,
       )

@@ -289,7 +289,7 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 ### 后台启动
 
-在独立 `quantx-train` 环境执行 `python -m quantx_trainer.main up --config <配置绝对路径>`。命令启动后台 `serve`，使用明确的 Conda 解释器、代码目录和隔离环境，不继承终端输入输出；诊断通过上述结构化服务日志与状态入口读取。
+在独立 `quantx-train` 环境执行 `python -m quantx_trainer.main up --config <配置绝对路径>`。命令启动后台 `serve`，使用明确的 Conda 解释器、代码目录和隔离环境，不继承终端输入输出。每次启动的标准输出与错误保存在对应 `service-launches/<attempt>/stdout.log`、`stderr.log`，供诊断首次心跳前或部署注册时的失败。无任务筛选的 `logs` 同时读取生命周期事件和最近一次启动输出；每个输出流最多读取末尾 128 KiB，按指定行数截取并脱敏，拒绝链接与非法启动指针。原始文件保留在受限状态目录。
 
 启动前保存请求哈希和 STARTING 证据，启动后记录子进程身份。`up` 最多观察 10 秒；`ALIVE` 仅表示本地服务身份与心跳已确认，仍应检查阶段和控制面能力。超时返回 `START_PENDING`、退出码 3，保留原进程。再次调用先检查服务和上次启动证据；未知启动不会重复创建进程，只有确认旧尝试退出后才允许新的启动。已在线的服务直接返回当前状态，排空标记不会被清除。`state_root/service-launches` 保存逐次启动证据。
 
