@@ -39,6 +39,70 @@ def test_rule_only_does_not_require_features_or_load_model():
 
 
 @pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+def test_identical_batch_reuses_revision_but_keeps_current_rule_order(tmp_path, monkeypatch, mode):
+  model, feature = runtime(tmp_path, mode), bar()
+  original = type(model.artifact).score
+  calls = []
+
+  def score(artifact, feature, **kwargs):
+    calls.append(feature.instrument_code)
+    return original(artifact, feature, **kwargs)
+
+  monkeypatch.setattr(type(model.artifact), "score", score)
+  first = model.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=("a", "b"))
+  replay = model.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=("b", "a"))
+  assert first.reason == replay.reason == "VALID"
+  assert first.revision == replay.revision == 1 and first.manifest_hash == replay.manifest_hash
+  assert replay.execution_rule_order == ("b", "a") and len(calls) == 1
+  fresh = model.evaluate((feature,), model_as_of_ms=feature.available_at_ms + 1, rule_order=("a",))
+  assert fresh.revision == 2 and len(calls) == 2
+  model.authorization = replace(model.authorization, gate_conclusion="BLOCKED")
+  failed = model.evaluate((feature,), model_as_of_ms=feature.available_at_ms + 1, rule_order=("a",))
+  assert failed.reason == "MODEL_BATCH_UNAVAILABLE" and not failed.active_scores and not failed.shadow_scores
+  model.authorization = replace(model.authorization, gate_conclusion=f"{mode}_ELIGIBLE")
+  restored = model.evaluate((feature,), model_as_of_ms=feature.available_at_ms + 1, rule_order=("a",))
+  assert restored.revision == 3 and len(calls) == 3
+
+
+@pytest.mark.parametrize("field,value", [
+  ("interval_start_ms", 0), ("stream_id", "other-stream"),
+  ("continuity_generation", "other-generation"), ("market_session", "other-session"),
+])
+def test_batch_rejects_mixed_minute_or_stream_coordinates(tmp_path, field, value):
+  model, feature = runtime(tmp_path, "ACTIVE"), bar()
+  other = replace(feature, instrument_code="000001.SZ", feature_bar_id="other-bar", **{field: value})
+  result = model.evaluate((feature, other), model_as_of_ms=feature.available_at_ms, rule_order=())
+  assert result.entry_blocked and result.revision == 0 and not result.active_scores
+
+
+@pytest.mark.parametrize("damage", ["artifact", "features", "future", "budget"])
+def test_cache_never_hides_changed_artifact_features_or_budget(tmp_path, monkeypatch, damage):
+  model, feature = runtime(tmp_path, "ACTIVE"), bar()
+  at = feature.available_at_ms
+  assert model.evaluate((feature,), model_as_of_ms=at, rule_order=()).reason == "VALID"
+  if damage == "artifact":
+    model.artifact = replace(model.artifact, feature_bounds=((0, 0),) * 6)
+  elif damage == "features":
+    feature = replace(feature, feature_values=(float("nan"),) * 6)
+  elif damage == "future":
+    feature = replace(feature, available_at_ms=at + 1)
+  else:
+    times = iter((0, 100_000_000_000))
+    monkeypatch.setattr("quantx_engine.t_model_batch_runtime.perf_counter_ns", lambda: next(times))
+  result = model.evaluate((feature,), model_as_of_ms=at, rule_order=())
+  assert result.entry_blocked and result.revision == 1 and not result.active_scores
+
+
+def test_duplicate_feature_identity_cannot_publish_two_score_owners(tmp_path):
+  model, feature = runtime(tmp_path, "ACTIVE"), bar()
+  result = model.evaluate(
+    (feature, replace(feature, instrument_code="000001.SZ")),
+    model_as_of_ms=feature.available_at_ms, rule_order=(),
+  )
+  assert result.entry_blocked and not result.active_scores and result.revision == 0
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
 def test_mode_batch_is_atomic_and_never_reuses_old_scores(tmp_path, mode):
   model, feature = runtime(tmp_path, mode), bar()
   first = model.evaluate(

@@ -4,7 +4,7 @@ The supervisor supplies a frozen, registry-authorized binding. This component
 cannot register a model, change execution mode, or touch orders and ExitPlans.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from time import perf_counter_ns
 
 from quantx_application.t_trade_v3.model_features import TModelFeatureBar
@@ -58,6 +58,8 @@ class TModelBatchRuntime:
     )
     self.revision = 0
     self.latest = TModelBatchResult(0, "", mode == "ACTIVE", "COLD", (), (), ())
+    self._cache_key = None
+    self._cached_artifact = None
 
   def evaluate(
     self,
@@ -67,6 +69,8 @@ class TModelBatchRuntime:
     rule_order: tuple[str, ...],
   ) -> TModelBatchResult:
     if self.mode == "RULE_ONLY":
+      self._cache_key = None
+      self._cached_artifact = None
       self.latest = TModelBatchResult(
         self.revision, "", False, "MODEL_OFF", rule_order, (), ()
       )
@@ -91,12 +95,34 @@ class TModelBatchRuntime:
         or auth.gate_conclusion not in allowed_gates
       ):
         raise ValueError("T_MODEL_AUTHORIZATION_INVALID")
-      if not bars or len({bar.instrument_code for bar in bars}) != len(bars):
+      if (not bars or len({bar.instrument_code for bar in bars}) != len(bars)
+        or len({bar.feature_bar_id for bar in bars}) != len(bars)):
         raise ValueError("T_MODEL_BATCH_SYMBOL_SET_INVALID")
+      if len({(
+        bar.interval_start_ms, bar.interval_end_ms, bar.market_session,
+        bar.stream_id, bar.continuity_generation,
+      ) for bar in bars}) != 1 or any(
+        type(bar.interval_start_ms) is not int
+        or bar.interval_start_ms % 60000
+        or bar.interval_end_ms != bar.interval_start_ms + 60000
+        for bar in bars
+      ):
+        raise ValueError("T_MODEL_BATCH_COORDINATE_INVALID")
+      ordered_bars = sorted(bars, key=lambda bar: bar.instrument_code)
+      cache_key = stable_manifest_hash({
+        "authorization": asdict(auth), "policy_hash": self.policy_hash,
+        "mode": self.mode, "max_age_ms": self.max_age_ms, "budget_ms": self.budget_ms,
+        "bars": [asdict(bar) for bar in ordered_bars], "model_as_of_ms": model_as_of_ms,
+      })
+      if cache_key == self._cache_key and artifact is self._cached_artifact:
+        if (perf_counter_ns() - started) / 1_000_000 > self.budget_ms:
+          raise ValueError("T_MODEL_INFERENCE_BUDGET_EXCEEDED")
+        self.latest = replace(self.latest, execution_rule_order=rule_order)
+        return self.latest
       scores = []
       revision = self.revision + 1
       binding_hash = stable_manifest_hash(asdict(auth))
-      for bar in sorted(bars, key=lambda b: b.instrument_code):
+      for bar in ordered_bars:
         if model_as_of_ms - bar.interval_end_ms > self.max_age_ms:
           raise ValueError("T_MODEL_SCORE_STALE")
         score = artifact.score(bar, model_as_of_ms=model_as_of_ms)
@@ -158,8 +184,10 @@ class TModelBatchRuntime:
         tuple(scores) if self.mode == "SHADOW" else (),
       )
       self.revision, self.latest = revision, result
+      self._cache_key, self._cached_artifact = cache_key, artifact
     except Exception:
       # No partial publish, stale-cache reuse or implicit ACTIVE -> RULE_ONLY.
+      self._cache_key, self._cached_artifact = None, None
       self.latest = TModelBatchResult(
         self.revision,
         "",

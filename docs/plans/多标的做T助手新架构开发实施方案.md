@@ -597,6 +597,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   模型批量运行共 **42 项通过**，含真实 SQLite 刷新失败后不再新增周期；Ruff/差异检查通过。
   证据 `p8-model-config-before.log`、`p8-model-config-final.log`。配置形状校验不替代 registry
   授权、安全制品加载或人工发布门，未运行正式模型比较。
+  TModelBatchRuntime 已补同坐标重复调用缓存：绑定完整特征内容、授权、模式、策略、预算和
+  model_as_of，且要求同一个不可变 CPU 制品对象；精确重放复用 revision/分数，当前规则顺序
+  独立保留。评分时点变化仍重新推理，失败清空缓存，授权恢复后不能复用失败前结果。
+  批次要求同一完整分钟/session/stream/generation、唯一标的及 Feature Bar ID；缓存命中也
+  校验耗时预算。模型替换、特征篡改、未来可见时间及授权撤销均不能绕过校验。
+  **39 项批量评分/安全制品验证通过**，Ruff/差异检查通过，证据 `p8-model-batch-cache-final.log`。
+  此为组件内精确重放，不是跨时点评分复用；尚不证明实际 registry 撤销广播、supervisor
+  完整分钟评分接线或 SHADOW/ACTIVE 正式发布通过，未训练或比较正式模型。
 - P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
   与同事务审计；重试及末尾异常整体回滚已有隔离验证。旧 pending/outbox 不迁移 owner。
   审批事件使用合成夹具，真实 P6 准入审计及人工发布入口仍待接入；内部消息箱接线见后续检查点。
