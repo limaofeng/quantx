@@ -102,6 +102,9 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
   from .development_history import router as development_history_router
 
   app.include_router(development_history_router)
+  from .realtime_archive_api import router as realtime_archive_router
+
+  app.include_router(realtime_archive_router)
 
   async def authorize(authorization: str = Header(default="")):
     expected = "Bearer " + app.state.token
@@ -126,6 +129,17 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
         )
         await connection.execute(
           text("SELECT demand_id FROM market_data_demand LIMIT 0")
+        )
+        await connection.execute(
+          text("SELECT generation FROM engine_archive_generation LIMIT 0")
+        )
+        await connection.execute(
+          text(
+            "SELECT generation,continuity_generation,stream_id FROM realtime_archive_stream LIMIT 0"
+          )
+        )
+        await connection.execute(
+          text("SELECT request_id,phase,proof FROM realtime_archive_revision LIMIT 0")
         )
     except Exception:
       raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None

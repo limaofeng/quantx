@@ -29,6 +29,33 @@ from quantx_contracts.market_data_service import (
 
 
 class LocalMarketDataClient:
+  async def submit_archive(self, request):
+    from quantx_contracts.realtime_archive import ArchiveAccepted
+
+    result = ArchiveAccepted.model_validate(
+      await self._json(
+        "POST",
+        "/market-data/internal/v1/archives",
+        json=request.model_dump(mode="json"),
+      )
+    )
+    if result.request_id != request.identity():
+      raise ValueError("archive acceptance identity mismatch")
+    return result.request_id
+
+  async def archive_status(self, request):
+    from quantx_contracts.realtime_archive import ArchiveStatus
+
+    value = await self._json(
+      "GET", "/market-data/internal/v1/archives/" + request.identity()
+    )
+    if value is None:
+      return None
+    result = ArchiveStatus.model_validate(value)
+    if result.request != request:
+      raise ValueError("archive status request mismatch")
+    return result
+
   def __init__(self, *, transport=None, token=None):
     credential = token or os.environ.get("QUANTX_MARKET_DATA_INTERNAL_TOKEN", "")
     if not credential:

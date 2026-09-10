@@ -220,7 +220,7 @@ conda run --no-capture-output -n quantx python ops/t-assistant-backtest-data.py 
 生产导出和开发导入均由独立 Data Worker 的对应循环推进，每轮最多一个行情分区；
 CLI/历史 Flow 通过本机 Data API 提交并查询需求。生产导出使用独立发布锁并校验
 Worker 租约，源请求创建与交付关联同事务提交，取消时等文件操作结束再释放锁。
-上线本批前应用迁移至 `20260910_0084`，并停止、移除旧 Prefect deployment
+上线本批前应用迁移至 `20260910_0085`，并停止、移除旧 Prefect deployment
 `development-data-import`、`development-data-export`，确认旧执行已经退出，再启动新
 Data Worker；删除代码中的日程不会自动删除 Prefect Server 上已注册的 deployment。此处是切换步骤，尚未执行。
 macOS 离线不删除生产任务。下载资格保留七天；目录仍引用的原分片继续保留。
@@ -237,7 +237,9 @@ DEVELOPMENT_REFERENCE_PENDING 属于等待日历导入，不应另启旧导入 F
 Engine 启动在取得单实例锁后，通过同一专用数据库连接登记持久化归档代次；
 迁移 0084 未应用或登记失败时，在启动行情和策略组件之前退出。代次记录不可降级删除；
 Engine 停止需物理关闭租约连接，不可归还池中继续使用。这是实时归档修订排序的前置
-接线，当前还未接通归档队列/Worker/缺口对账，不能据此宣称实时 writer 已完成迁移。
+接线。迁移 0085 增加归档待办及版本证明，Data API 就绪检查包含这两张表，Data Worker
+默认消费已接受归档。Engine 队列、通用读端和缺口对账仍待接入，不能据此宣称实时
+writer 已完成迁移。
 
 参考数据仅导出明确的证券、日历和因子字段。复权覆盖沿用原有 schema-v2 证据，
 研究读取时再次与本机当前因子逐行核验；财务数据继续使用既有独立研究来源。

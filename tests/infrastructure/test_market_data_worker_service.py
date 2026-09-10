@@ -143,6 +143,26 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
       reference_migration.upgrade()
 
     await connection.run_sync(upgrade_reference)
+    for filename in (
+      "20260910_0084_engine_archive_generation.py",
+      "20260910_0085_realtime_archive_inbox.py",
+    ):
+      archive_path = path.with_name(filename)
+      spec = importlib.util.spec_from_file_location("archive_tables", archive_path)
+      archive_migration = importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(archive_migration)
+
+      def upgrade_archive(sync_connection):
+        operations = Operations(MigrationContext.configure(sync_connection))
+        archive_migration.op = SimpleNamespace(
+          create_index=operations.create_index,
+          create_table=lambda *args, **kwargs: operations.create_table(
+            *args, prefixes=["TEMPORARY"], **kwargs
+          ),
+        )
+        archive_migration.upgrade()
+
+      await connection.run_sync(upgrade_archive)
   result = []
   for owner in ("owner-a", "owner-b"):
     store = object.__new__(WorkerStore)
@@ -317,6 +337,11 @@ async def test_api_status_is_read_only_and_resume_preserves_identity(workers):
 
 
 async def test_worker_joins_active_ingestion_before_releasing_lease(monkeypatch):
+  from quantx_infrastructure.services import realtime_archive_worker
+
+  monkeypatch.setattr(
+    realtime_archive_worker, "advance_realtime_archive", AsyncMock(return_value=False)
+  )
   entered, finished = asyncio.Event(), asyncio.Event()
   stop = asyncio.Event()
 

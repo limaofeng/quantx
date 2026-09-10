@@ -196,6 +196,28 @@ GET  /market-data/internal/v1/reference-requests/{request_id}
 因子验证行数；有明确覆盖证明的零因子结果可以成功。GET 不返回固定源对象，状态
 查询不会重复导入或消耗尝试。此机制证明本地内容与源快照一致，不代替源日历的维护。
 
+实时分钟归档使用内部服务 token，接收和验证分开：
+
+```text
+POST /market-data/internal/v1/archives
+GET  /market-data/internal/v1/archives/{request_id}
+```
+
+POST 接收单标的、单分钟的一次修订，请求体最多 4096 字节、读取期限 3 秒；返回
+202 / ACCEPTED 只表示 PostgreSQL 待办已提交。身份由持久化 Engine generation、
+continuity_generation、stream_id、sequence、分钟和 sealed 构成，同身份不同内容返回
+409。旧代次、新提交的倒序修订、同连续性代次换流、封口后同源继续修改均拒绝。
+相同内容重放不重置预算，原 Engine 退出后仍可确认已接收身份，但不能新增归档。
+待处理修订最多 20000 条，满时 429；超大请求 413；非法字段和时间 422。
+
+GET 返回固定请求、WRITE / READBACK / VERIFIED / BLOCKED、写入和回读累计次数、
+下一次重试时间、原因及证明。独立 Data Worker 在每次 IO 前持久化尝试，写入与回读
+分别最多 4 次；正常写完只推进 READBACK，逐字段核验通过后才提交 VERIFIED。
+Influx 使用独立 storage_version，迟到旧写入不覆盖新修订；最新接收修订尚未验证时，
+发布选择不退回旧证明。阶段超时触发取消后仍等待实际 SDK 操作退出，不能将 30 秒
+取消期限理解为强制终止外部写入的保证。Engine 队列、缺口对账及通用历史读端合并
+尚待接入，现有 Engine 直接 writer 尚未删除。
+
 GraphQL 使用单一 `qmtAgentConnection` 视图返回当前 Agent、五段连接链路、
 行情流与本地 journal 的非敏感指标，以及折叠的历史登记。Web 通过
 `createAgentEnrollment` 发起安全交接，使用 `cancelAgentHandover` 取消；
