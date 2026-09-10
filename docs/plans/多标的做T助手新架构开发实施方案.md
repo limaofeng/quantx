@@ -647,6 +647,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   **26 项授权评分/视图测试通过**，含真实 registry/CPU scorer 及并发发布屏障，Ruff/差异
   检查通过，证据 `p8-model-snapshot-view.log`。该视图入口尚未写入 TDecisionSnapshot 的
   完整模型契约，也未接通完整分钟调度；pending/outbox 创建仍须在使用点另行复核授权。
+  分钟输入新增共享 TModelMinuteWindow：按显式标的/分钟/stream/generation 接收逐笔已接受
+  Tick，容量上限由调用方显式提供；序列缺失、重复/乱序、换代、跨分钟和溢出使该分钟失效，
+  清空缓冲且不允许后续 Tick 修复。仅同身份 accepted-stream watermark 到达分钟结束才
+  封口，复用 build_complete_feature_bar 校验完整覆盖/报价能力/接收时间并返回 COMPLETE
+  或显式 UNAVAILABLE；封口后不可改写，重复封口返回同一结果，释放 Tick 缓冲。
+  **44 项窗口/Research 特征验证通过**，完整窗口与直接 Research Feature Bar 全字段一致，
+  并覆盖错误 watermark 身份、容量、缺口、迟到接收和缺失能力；Ruff/差异检查通过，证据
+  `p8-minute-window-final.log`。这是单分钟有界输入组件，尚未接入 supervisor 的跨分钟
+  轮转、Universe 批量结果发布及模型配置加载；不代表完整分钟调度已经完成。
+
 
 
 
