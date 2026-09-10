@@ -970,6 +970,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `p7-reducer-benchmark-smoke.json`。纯 domain RULE_ONLY，无模型、数据库、行情或交易 IO；
   尚未测量组合触发合并、跨标的调度和完整 Engine，performance_gate=NOT_EVALUATED，
   不据此勾选 P7-02 或宣称生产吞吐通过。
+  LIVE supervisor 追加排队故障验证：暂停首批真实 run_cycle 时，两个后续回调等待同一
+  lifecycle lock；正常路径三个周期逐次提交，cursor=1/2/3，无遗漏或并发决策。首批抛错
+  则解除绑定，等待批次不再执行、不新增周期；显式 reconcile 后从新 ring/rewarm 恢复。
+  **19 项 supervisor 测试通过**，Ruff/差异检查通过，证据 `p7-live-batch-serialization.log`。
+  此证据使用合成行情回调与真实决策 runtime/SQLite，未覆盖 Hub 的实际队列溢出或 PostgreSQL
+  并发；当前仍每个 accepted batch 执行周期，尚未实现 scorer/Coordinator 触发有界合并。
   legacy 当前仅由 global monitor 调用 entry authority 失效并阻断新源，尚未接通持久化 DRAINING，
   不能据此清除 head.strategy_run_id 或判定切换完成。
 - legacy 义务清单冻结组件已完成：按配置头/旧 run/版本锁定读取原 owner 的 intent、pending、

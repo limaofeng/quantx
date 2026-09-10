@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -138,6 +139,82 @@ async def test_current_source_restores_and_reconciles_without_losing_hot_ring(se
   finally:
     await supervisor.stop()
   assert not supervisor._bindings and hub.unsubscribed
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_queued_quote_batches_serialize_without_skipping_reducer_ticks(sessions, monkeypatch, fail_first):
+  key = await seed(sessions)
+  hub = FakeWholeQuoteHub()
+  supervisor = TAssistantLiveSupervisor(
+    quote_hub=hub, session_factory=sessions, clock=lambda: NOW + timedelta(seconds=1),
+  )
+  entered, release = asyncio.Event(), asyncio.Event()
+  original = supervisor.runtime.run_cycle
+  active = 0
+  consumed = []
+
+  async def paused_cycle(**kwargs):
+    nonlocal active
+    active += 1
+    assert active == 1
+    try:
+      if not entered.is_set():
+        entered.set()
+        await release.wait()
+        if fail_first:
+          raise RuntimeError("injected cycle failure")
+      result = await original(**kwargs)
+      assert result.committed
+      state = supervisor.runtime.symbol_states(key)["600000.SH"]
+      consumed.append(state.cursor.accepted_sequence)
+      return result
+    finally:
+      active -= 1
+
+  monkeypatch.setattr(supervisor.runtime, "run_cycle", paused_cycle)
+  tasks = []
+  await supervisor.start()
+  try:
+    await supervisor.reconcile(execution_id=key, universe=UNIVERSE, legacy_active=False)
+    tasks.append(asyncio.create_task(hub.emit(1)))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    tasks.extend(asyncio.create_task(hub.emit(sequence)) for sequence in (2, 3))
+    # A loop turn lets both callbacks reach the lifecycle lock while cycle 1 waits.
+    await asyncio.sleep(0)
+    assert active == 1 and consumed == []
+    assert not any(task.done() for task in tasks)
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10)
+    if fail_first:
+      assert isinstance(results[0], RuntimeError)
+      assert str(results[0]) == "injected cycle failure"
+      assert results[1:] == [None, None]
+      assert consumed == [] and key not in supervisor._bindings
+      async with sessions() as db:
+        assert await db.scalar(select(func.count(TAssistantDecisionCycleRecord.cycle_id)).where(
+          TAssistantDecisionCycleRecord.execution_id == key,
+        )) == 0
+      await supervisor.reconcile(execution_id=key, universe=UNIVERSE, legacy_active=False)
+      assert supervisor._bindings[key].rewarm == {"600000.SH"}
+      await hub.emit(4)
+      assert consumed == [1]
+    else:
+      assert results == [None, None, None]
+      assert consumed == [1, 2, 3]
+    async with sessions() as db:
+      cycles = list(await db.scalars(select(TAssistantDecisionCycleRecord).where(
+        TAssistantDecisionCycleRecord.execution_id == key,
+      )))
+      assert len(cycles) == (1 if fail_first else 3)
+      assert all(cycle.status == "PROPOSALS_COMMITTED" for cycle in cycles)
+      assert await db.scalar(select(func.count(TradeCommandOutbox.message_id))) == 0
+  finally:
+    release.set()
+    for task in tasks:
+      if not task.done():
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await supervisor.stop()
 
 
 async def test_failed_refresh_revokes_previous_binding(sessions):
