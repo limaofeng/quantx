@@ -175,10 +175,10 @@ async def test_reconnect_does_not_flush_previous_minute_as_continuous(monkeypatc
   manager = RealTimeDataManager()
   saved = []
 
-  async def save(bar):
+  def save(bar, state):
     saved.append(bar)
 
-  monkeypatch.setattr(manager, "_safe_save_tick_generated_kline", save)
+  monkeypatch.setattr(manager, "_offer_archive", save)
   first = _archive_tick()
   await manager._handle_tick_generated_1m(first.stock_code, first)
   newer = _archive_tick(generation=2, stream="source-b", sequence=1)
@@ -200,7 +200,8 @@ class FakeDividFactorService:
 
 
 @pytest.mark.asyncio
-async def test_realtime_manager_start_is_idempotent_for_same_loop():
+async def test_realtime_manager_start_is_idempotent_for_same_loop(monkeypatch):
+  monkeypatch.setenv("QUANTX_MARKET_DATA_INTERNAL_TOKEN", "test-only")
   manager = RealTimeDataManager()
   calls = []
 
@@ -1386,7 +1387,7 @@ async def test_tick_stream_generates_saves_and_pushes_current_1m_bar(
   manager.kline_subscribers[f"{stock_code}_1m"] = {queue}
   saved = []
 
-  async def fake_save(kline):
+  def fake_save(kline, state):
     saved.append(
       KLine(
         stock_code=kline.stock_code,
@@ -1405,7 +1406,7 @@ async def test_tick_stream_generates_saves_and_pushes_current_1m_bar(
       )
     )
 
-  monkeypatch.setattr(manager, "_safe_save_tick_generated_kline", fake_save)
+  monkeypatch.setattr(manager, "_offer_archive", fake_save)
   from quantx_engine import warm_cache as warm_cache_module
 
   with warm_cache_module.intraday_warm_cache._lock:
@@ -1479,7 +1480,7 @@ async def test_tick_generated_1m_save_is_throttled_within_same_minute(
   manager = RealTimeDataManager()
   saved = []
 
-  async def fake_save(kline):
+  def fake_save(kline, state):
     saved.append(
       KLine(
         stock_code=kline.stock_code,
@@ -1498,7 +1499,7 @@ async def test_tick_generated_1m_save_is_throttled_within_same_minute(
       )
     )
 
-  monkeypatch.setattr(manager, "_safe_save_tick_generated_kline", fake_save)
+  monkeypatch.setattr(manager, "_offer_archive", fake_save)
 
   await manager._handle_tick_generated_1m(
     stock_code,

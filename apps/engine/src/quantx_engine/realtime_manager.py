@@ -31,9 +31,6 @@ from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.market_depth import MarketDepth
 from quantx_infrastructure.models.realtime_price import RealTimePrice
 from quantx_infrastructure.models.tick import Tick
-from quantx_infrastructure.services.historical_market_data_service import (
-  HistoricalMarketDataService,
-)
 from quantx_infrastructure.services.local_market_data_client import (
   LocalMarketDataClient,
 )
@@ -82,10 +79,10 @@ class RealTimeDataManager:
         getattr(settings, "realtime_generated_kline_save_interval_seconds", 10.0) or 0.0
       ),
     )
-    self.historical_market_data_service = HistoricalMarketDataService()
     self.trading_time_service = TradingTimeService()
     self._started_loop: Optional[asyncio.AbstractEventLoop] = None
     self.archive_generation: int | None = None
+    self.archive_session = None
 
   def _previous_daily_close_cache_key(
     self, stock_code: str, tick_time: datetime
@@ -108,11 +105,21 @@ class RealTimeDataManager:
     # Aggregates from a previous Engine run cannot acquire the new generation.
     self.tick_minute_klines.clear()
     self.archive_generation = archive_generation
+    from .archive_session import EngineArchiveSession
+
+    self.archive_session = EngineArchiveSession(archive_generation)
     self._started_loop = loop
     logger.info("实时数据管理器已启动")
 
   async def stop(self):
     """停止实时数据管理器并清理所有订阅"""
+    if self.archive_session is not None:
+      archive_session = self.archive_session
+      self.archive_session = None
+      try:
+        await archive_session.stop()
+      except Exception:
+        logger.warning("Engine archive transport shutdown failed")
     try:
       # 取消所有通过统一管理器的订阅
       await self.subscription_manager.unsubscribe_all(self.subscriber_id)
@@ -652,17 +659,9 @@ class RealTimeDataManager:
       suspend_flag=kline.suspend_flag,
     )
 
-  async def _safe_save_tick_generated_kline(self, kline: KLine) -> None:
-    try:
-      await asyncio.to_thread(self.historical_market_data_service.save_kline, kline)
-    except Exception as exc:
-      logger.warning(
-        "保存tick生成1m K线失败: %s %s %s, %s",
-        kline.stock_code,
-        kline.period,
-        kline.time,
-        exc,
-      )
+  def _offer_archive(self, kline: KLine, state) -> None:
+    if self.archive_session is not None:
+      self.archive_session.offer(kline, state)
 
   def _should_save_tick_generated_kline(
     self, stock_code: str, tick: Tick, kline: KLine
@@ -737,20 +736,20 @@ class RealTimeDataManager:
     intraday_warm_cache.store_kline(kline_snapshot)
     await self._publish_kline_to_subscribers(f"{stock_code}_1m", kline_snapshot)
 
-    save_candidates: List[KLine] = []
+    save_candidates = []
     if previous_kline is not None and previous_minute is not None:
       if (
         kline_snapshot.time > previous_minute
         and not self.tick_minute_klines[stock_code]["origin_reset"]
       ):
-        save_candidates.append(previous_kline)
+        save_candidates.append((previous_kline, previous_state))
 
     if self._should_save_tick_generated_kline(stock_code, tick, kline_snapshot):
       self._mark_tick_generated_kline_save_attempt(stock_code, tick, kline_snapshot)
-      save_candidates.append(kline_snapshot)
+      save_candidates.append((kline_snapshot, self.tick_minute_klines[stock_code]))
 
-    for candidate in save_candidates:
-      await self._safe_save_tick_generated_kline(candidate)
+    for candidate, state in save_candidates:
+      self._offer_archive(candidate, state)
 
   async def subscribe_price(self, stock_code: str) -> AsyncIterator[RealTimePrice]:
     """
