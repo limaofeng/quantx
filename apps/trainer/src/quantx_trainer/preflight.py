@@ -212,6 +212,8 @@ def check_worker_runtime() -> None:
 
   try:
     import_module("prefect.workers.process").ProcessWorker
+    import_module("quantx_trainer.preparation_flow")
+    import_module("quantx_trainer.training_flow")
   except Exception:
     raise TrainerPreflightError("TRAINER_WORKER_RUNTIME_UNAVAILABLE") from None
 

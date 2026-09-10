@@ -1,78 +1,48 @@
+"""Database APIs loaded only when explicitly requested.
+
+Importing a model or repository must not initialize service database connections.
 """
-数据库管理模块
-支持关系型数据库（PostgreSQL）和时间序列数据库（InfluxDB）
-"""
 
-# 数据库管理器
-# 统一连接接口 - 提供更便捷的导入方式
-from .connection import (
-  AsyncSessionLocal,
-  TimeSeriesConnectionPool,
-  TimeSeriesOperations,
-  relational_engine,
-)
-from .manager import DatabaseManager, db_manager
+from importlib import import_module
 
-# Redis 缓存数据库组件
-from .redis import RedisClient, redis_client
+_EXPORTS = {
+  'AsyncSessionLocal': ('connection', 'AsyncSessionLocal'),
+  'TimeSeriesConnectionPool': ('connection', 'TimeSeriesConnectionPool'),
+  'TimeSeriesOperations': ('connection', 'TimeSeriesOperations'),
+  'relational_engine': ('connection', 'relational_engine'),
+  'DatabaseManager': ('manager', 'DatabaseManager'),
+  'db_manager': ('manager', 'db_manager'),
+  'RedisClient': ('redis', 'RedisClient'),
+  'redis_client': ('redis', 'redis_client'),
+  'Base': ('relational_base', 'Base'),
+  'BaseModel': ('relational_base', 'BaseModel'),
+  'BaseRepository': ('relational_base', 'BaseRepository'),
+  'BulkSaveResult': ('relational_base', 'BulkSaveResult'),
+  'TimestampMixin': ('relational_base', 'TimestampMixin'),
+  'WhereBuilder': ('relational_base', 'WhereBuilder'),
+  'get_async_db': ('relational', 'get_async_db'),
+  'create_relational_tables': ('relational', 'create_tables'),
+  'TimeSeriesConnection': ('timeseries', 'TimeSeriesConnection'),
+  'create_timeseries_connection': ('timeseries', 'create_timeseries_connection'),
+  'get_timeseries_connection': ('timeseries', 'get_timeseries_connection'),
+  'get_timeseries_operations': ('timeseries', 'get_timeseries_operations'),
+  'init_timeseries': ('timeseries', 'init_timeseries'),
+  'shutdown_timeseries': ('timeseries', 'shutdown_timeseries'),
+  'Pageable': ('types', 'Pageable'),
+  'Pagination': ('types', 'Pagination'),
+  'Sort': ('types', 'Sort'),
+  'SortDirection': ('types', 'SortDirection'),
+  'SortOrder': ('types', 'SortOrder'),
+  'T': ('types', 'T'),
+}
 
-# 关系型数据库组件
-from .relational import (
-  Base,
-  BaseModel,
-  BaseRepository,
-  BulkSaveResult,
-  TimestampMixin,
-  WhereBuilder,
-  get_async_db,
-)
-from .relational import create_tables as create_relational_tables
+__all__ = list(_EXPORTS)
 
-# 时间序列数据库组件
-from .timeseries import (
-  TimeSeriesConnection,
-  create_timeseries_connection,
-  get_timeseries_connection,
-  get_timeseries_operations,
-  init_timeseries,
-  shutdown_timeseries,
-)
 
-# 通用类型定义
-from .types import Pageable, Pagination, Sort, SortDirection, SortOrder, T
-
-__all__ = [
-  # 数据库管理
-  "DatabaseManager",
-  "db_manager",
-  # 关系型数据库
-  "get_async_db",
-  "create_relational_tables",
-  "Base",
-  "BaseModel",
-  "TimestampMixin",
-  "BaseRepository",
-  "BulkSaveResult",
-  "WhereBuilder",
-  "relational_engine",
-  "AsyncSessionLocal",
-  # 时间序列数据库
-  "TimeSeriesConnection",
-  "create_timeseries_connection",
-  "get_timeseries_connection",
-  "get_timeseries_operations",
-  "init_timeseries",
-  "shutdown_timeseries",
-  "TimeSeriesConnectionPool",
-  "TimeSeriesOperations",
-  # Redis 缓存数据库
-  "redis_client",
-  "RedisClient",
-  # 通用类型定义
-  "SortDirection",
-  "SortOrder",
-  "Sort",
-  "Pageable",
-  "Pagination",
-  "T",
-]
+def __getattr__(name):
+  if name not in _EXPORTS:
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+  module, attribute = _EXPORTS[name]
+  value = getattr(import_module(f".{module}", __name__), attribute)
+  globals()[name] = value
+  return value
