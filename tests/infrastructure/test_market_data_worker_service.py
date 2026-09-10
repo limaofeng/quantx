@@ -389,7 +389,7 @@ async def test_reference_backlog_does_not_hide_supported_work(workers):
 
 async def test_api_submission_validates_scope_and_only_persists_demand():
   store = SimpleNamespace(submit_history_demand=AsyncMock(return_value="d" * 64))
-  app = create_app(store=store, token="test-token")
+  app = create_app(store=store, token="test-token", reader=object())
   async with app.router.lifespan_context(app):
     async with AsyncClient(
       transport=ASGITransport(app),

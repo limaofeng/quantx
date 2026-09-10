@@ -180,7 +180,7 @@ async def test_non_development_default_reader_keeps_existing_storage(
   from quantx_infrastructure.config.settings import settings
 
   monkeypatch.setattr(settings, "environment", environment)
-  app = create_app(store=object(), token="secret")
+  app = create_app(store=SimpleNamespace(engine=None), token="secret")
   async with app.router.lifespan_context(app):
     assert type(app.state.reader) is LocalHistoryReader
 

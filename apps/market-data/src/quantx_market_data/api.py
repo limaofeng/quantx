@@ -71,7 +71,9 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
       if reader is not None
       else PublishedHistoryReader(async_sessionmaker(app.state.store.engine))
       if settings.environment == "development"
-      else LocalHistoryReader()
+      else LocalHistoryReader(
+        session_factory=async_sessionmaker(app.state.store.engine)
+      )
     )
     app.state.factor_reader = LocalDividFactorReader(
       getattr(app.state.store, "engine", None)

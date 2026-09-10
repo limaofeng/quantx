@@ -29,11 +29,18 @@ class HistoryReadInvalid(RuntimeError):
 class LocalHistoryReader:
   """One active local read per API process; cancellation joins its SDK thread."""
 
-  def __init__(self, connection=None):
+  def __init__(self, connection=None, *, session_factory=None):
     self.connection = connection
+    self.session_factory = session_factory
     self._slot = asyncio.Lock()
 
   async def read(self, request: HistoryRead) -> HistoryPage:
+    if request.period == "1m" and self.session_factory is not None:
+      from .realtime_archive_reader import read_archive_history
+
+      return await read_archive_history(
+        self, request, session_factory=self.session_factory, development=False
+      )
     return await self._run_read(self._read, request)
 
   async def read_published(
@@ -108,13 +115,24 @@ class LocalHistoryReader:
         task.exception()
       raise
 
-  def _read(self, request: HistoryRead, *, storage_version=None) -> HistoryPage:
+  def _read(
+    self,
+    request: HistoryRead,
+    *,
+    storage_version=None,
+    archive_versions=None,
+    excluded_minutes=None,
+    budget=None,
+  ) -> HistoryPage:
     if storage_version is not None and (
       not isinstance(storage_version, str)
       or re.fullmatch(r"[0-9a-f]{64}", storage_version) is None
     ):
       raise HistoryReadInvalid("invalid published storage version")
-    deadline = time.monotonic() + 10
+    budget = (
+      budget if budget is not None else {"deadline": time.monotonic() + 10, "bytes": 0}
+    )
+    deadline = budget["deadline"]
 
     def remaining():
       seconds = deadline - time.monotonic()
@@ -123,6 +141,26 @@ class LocalHistoryReader:
       return seconds
 
     start, end = request.bounds()
+    if archive_versions is not None:
+      if request.period != "1m" or storage_version is not None:
+        raise HistoryReadInvalid("invalid realtime archive scope")
+      if not archive_versions:
+        return HistoryPage(records=[], next_after=None, exhausted=True)
+      expected_minutes = sorted(
+        minute
+        for minute in archive_versions
+        if request.after is None or minute > request.after
+      )[: request.page_size]
+      if not expected_minutes:
+        return HistoryPage(records=[], next_after=None, exhausted=True)
+    for minute in [*(archive_versions or {}), *(excluded_minutes or {})]:
+      if (
+        minute.tzinfo is None
+        or not start <= minute < end
+        or minute.second
+        or minute.microsecond
+      ):
+        raise HistoryReadInvalid("invalid realtime archive minute")
     conditions = [
       "stock_code = $stock_code",
       "period = $period",
@@ -138,13 +176,26 @@ class LocalHistoryReader:
       measurement += "_versions"
       conditions.append("storage_version = $storage_version")
       parameters["storage_version"] = storage_version
+    if archive_versions is not None:
+      measurement += "_versions"
+      placeholders = []
+      for index, head in enumerate(archive_versions.values()):
+        name = f"archive_version_{index}"
+        parameters[name] = head.proof.storage_version
+        placeholders.append("$" + name)
+      conditions.append(f"storage_version IN ({','.join(placeholders)})")
+    if excluded_minutes:
+      values = ",".join(
+        "'" + minute.astimezone(timezone.utc).isoformat() + "'"
+        for minute in excluded_minutes
+      )
+      conditions.append(f"time NOT IN ({values})")
     sql = (
       f"SELECT * FROM {measurement} WHERE {' AND '.join(conditions)} "
       f"ORDER BY time ASC LIMIT {request.page_size}"
     )
     connection = self.connection or get_timeseries_connection()
     records = []
-    byte_count = 0
     previous = request.after
     with connection.get_client(timeout=remaining()) as client:
       reader = client.query(
@@ -159,9 +210,9 @@ class LocalHistoryReader:
       try:
         for batch in reader:
           remaining()
-          byte_count += batch.nbytes
+          budget["bytes"] += batch.nbytes
           if (
-            byte_count > 4 * 1024 * 1024
+            budget["bytes"] > 4 * 1024 * 1024
             or len(records) + batch.num_rows > request.page_size
           ):
             raise HistoryReadInvalid("history query exceeded its result budget")
@@ -185,6 +236,25 @@ class LocalHistoryReader:
             ):
               raise HistoryReadInvalid("history page is unordered or outside scope")
             row["time"] = stamp
+            if excluded_minutes and stamp in excluded_minutes:
+              raise HistoryReadInvalid("canonical query ignored archive exclusion")
+            if archive_versions is not None:
+              from .market_data_content_verification import _compare
+
+              head = archive_versions.get(stamp)
+              if (
+                head is None or row.get("storage_version") != head.proof.storage_version
+              ):
+                raise HistoryReadInvalid("archive query returned an unselected version")
+              _compare(
+                {
+                  **head.request.bar.model_dump(),
+                  "time": stamp,
+                  "stock_code": request.instrument,
+                  "period": "1m",
+                },
+                row,
+              )
             if request.period == "tick":
               tick = SimpleNamespace(**row)
               key = _strict_source_identity(tick)
@@ -202,6 +272,11 @@ class LocalHistoryReader:
       finally:
         reader.close()
     remaining()
+    if (
+      archive_versions is not None
+      and [row["time"] for row in records] != expected_minutes
+    ):
+      raise HistoryReadInvalid("published archive rows are missing")
     return HistoryPage(
       records=records,
       next_after=previous if records else None,
@@ -213,10 +288,15 @@ class PublishedHistoryReader(LocalHistoryReader):
   """The development API adapter reads only receipt-selected versions."""
 
   def __init__(self, session_factory, connection=None):
-    super().__init__(connection)
-    self.session_factory = session_factory
+    super().__init__(connection, session_factory=session_factory)
 
   async def read(self, request):
+    if request.period == "1m":
+      from .realtime_archive_reader import read_archive_history
+
+      return await read_archive_history(
+        self, request, session_factory=self.session_factory, development=True
+      )
     return await self.read_published(request, session_factory=self.session_factory)
 
   async def read_latest_daily(self, request):
