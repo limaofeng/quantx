@@ -76,6 +76,8 @@ def test_backend_snapshot_never_exposes_uncertain_evidence(tmp_path, fault):
 async def test_capability_snapshot_only_follows_successful_database_write(
   tmp_path, monkeypatch, failed_commit
 ):
+  from quantx_trainer import public_status
+  monkeypatch.setattr(public_status, "publish_runtime_status", AsyncMock())
   from quantx_infrastructure import training_activity
   from quantx_trainer import training_flow as module
 
@@ -179,6 +181,8 @@ def test_activity_free_text_is_redacted_and_progress_not_coerced(tmp_path):
 
 @pytest.mark.asyncio
 async def test_protected_window_skips_probe_without_fabricating_capability(tmp_path, monkeypatch):
+  from quantx_trainer import public_status
+  monkeypatch.setattr(public_status, "publish_runtime_status", AsyncMock())
   from unittest.mock import Mock
   from quantx_trainer import training_flow as module
 

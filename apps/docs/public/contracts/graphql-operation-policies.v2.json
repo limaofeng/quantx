@@ -2824,6 +2824,16 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "stockSelectionTrainerStatus": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
       "stockSelectionTrainingCapabilities": {
         "audiences": [
           "web"

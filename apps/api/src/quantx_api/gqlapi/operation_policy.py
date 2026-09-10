@@ -202,6 +202,7 @@ _register(
     "stockSelectionModel",
     "stockSelectionModels",
     "stockSelectionTrainingCapabilities",
+    "stockSelectionTrainerStatus",
     "stockSelectionDatasetVersions",
     "previewStockSelectionTraining",
     "stockSelectionTrainingRuns",
@@ -222,6 +223,7 @@ _register(
 )
 for _field in {
   "stockSelectionTrainingCapabilities",
+  "stockSelectionTrainerStatus",
   "stockSelectionDatasetVersions",
   "previewStockSelectionTraining",
   "stockSelectionTrainingRuns",

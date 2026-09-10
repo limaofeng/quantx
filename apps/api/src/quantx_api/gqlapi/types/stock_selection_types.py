@@ -328,6 +328,25 @@ class StockSelectionTrainingCapabilities:
   environment_summary: JSON
 
 
+@strawberry.type(description="独立 Trainer 最近一次调度决定，不作为执行授权")
+class StockSelectionTrainerDispatch:
+  state: str
+  status: Optional[str]
+  reason: Optional[str]
+
+
+@strawberry.type(description="独立 Trainer 服务心跳、准入及调度状态")
+class StockSelectionTrainerStatus:
+  service: str
+  phase: Optional[str]
+  admission: str
+  resource_reason: Optional[str]
+  fresh: bool
+  updated_at: Optional[datetime]
+  training: StockSelectionTrainerDispatch
+  preparation: StockSelectionTrainerDispatch
+
+
 @strawberry.type(description="已认证的次日概率训练数据集版本")
 class StockSelectionDatasetVersion:
   dataset_version: str

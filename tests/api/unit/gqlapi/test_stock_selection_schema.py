@@ -73,6 +73,7 @@ def test_probability_and_indicator_contracts_are_atomic() -> None:
 def test_training_workbench_contract_is_typed_and_web_only() -> None:
   graphql = schema.as_str()
   for field in (
+    "stockSelectionTrainerStatus",
     "stockSelectionTrainingCapabilities",
     "stockSelectionDatasetVersions",
     "previewStockSelectionTraining",
@@ -99,6 +100,28 @@ def test_training_workbench_contract_is_typed_and_web_only() -> None:
   assert (
     operation_policy("Mutation", "deleteExitPlanHistory").risk == "NON_TRADING_WRITE"
   )
+
+
+@pytest.mark.asyncio
+async def test_trainer_query_projects_service_separately_from_execution_capability(monkeypatch):
+  from quantx_contracts.trainer_status import TrainerRuntimeStatus
+
+  class Repository:
+    def __init__(self, db):
+      pass
+
+    async def read(self):
+      return {**TrainerRuntimeStatus(service="ALIVE", admission="DRAINING",
+              resource_reason="TRADING_OR_POST_CLOSE_CRITICAL_WINDOW").model_dump(),
+              "fresh": True, "updated_at": datetime.now(timezone.utc)}
+
+  monkeypatch.setattr(stock_selection_schema, "AsyncSessionLocal", _SessionContext)
+  monkeypatch.setattr(stock_selection_schema, "TrainerStatusRepository", Repository)
+  result = await StockSelectionQuery().stock_selection_trainer_status(_training_info())
+  assert result.service == "ALIVE" and result.fresh is True
+  assert result.admission == "DRAINING"
+  assert result.training.state == "UNKNOWN" and result.training.reason is None
+  assert operation_policy("Query", "stockSelectionTrainerStatus").audiences == ("web",)
 
 
 @pytest.mark.asyncio

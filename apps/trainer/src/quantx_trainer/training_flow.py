@@ -1076,6 +1076,9 @@ async def stock_selection_training_capability_flow(config_path: str) -> dict[str
   config_digest = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
   async with training_session(config_path) as db:
     reason = await asyncio.to_thread(_host_admission_reason)
+    from quantx_trainer.public_status import publish_runtime_status
+
+    await publish_runtime_status(db, config_path, reason)
     if reason:
       return {"status": "BLOCKED", "reason": reason}
     probe = await asyncio.to_thread(_probe_capability)

@@ -9,6 +9,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { TrainingCapabilityStatus } from '@/features/settings/components/TrainingCapabilityStatus';
 
+vi.mock('@/features/research/components/training/TrainerServiceStatus', () => ({
+  TrainerServiceStatus: () => <section>独立训练服务</section>,
+}));
+
 const mocks = vi.hoisted(() => ({
   data: null as Record<string, unknown> | null,
   error: undefined as Error | undefined,

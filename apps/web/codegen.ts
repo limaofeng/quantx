@@ -12,6 +12,7 @@ const liveAssistantDocuments =
   'src/features/portfolio/hooks/tAssistantLiveQueries.gql';
 const preparationDocuments =
   'src/features/system/pages/researchPreparation.gql';
+const trainerDocuments = 'src/features/research/hooks/trainerStatus.gql';
 const scalarTypes = {
   DateTime: 'string',
   Date: 'string',
@@ -42,6 +43,7 @@ const config: CodegenConfig = {
         `!${paperDocuments}`,
         `!${liveAssistantDocuments}`,
         `!${preparationDocuments}`,
+        `!${trainerDocuments}`,
       ],
       preset: 'client',
       plugins: [],
@@ -54,6 +56,12 @@ const config: CodegenConfig = {
     },
     'src/generated/t-assistant-live/': {
       documents: [liveAssistantDocuments],
+      preset: 'client',
+      plugins: [],
+      config: { scalars: scalarTypes },
+    },
+    'src/generated/trainer/': {
+      documents: [trainerDocuments],
       preset: 'client',
       plugins: [],
       config: { scalars: scalarTypes },

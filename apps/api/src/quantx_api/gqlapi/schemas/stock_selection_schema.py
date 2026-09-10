@@ -20,6 +20,7 @@ from quantx_infrastructure.repositories.stock_selection_repository import (
 from quantx_infrastructure.repositories.stock_selection_training_repository import (
   StockSelectionTrainingRepository,
 )
+from quantx_infrastructure.repositories.trainer_status_repository import TrainerStatusRepository
 from sqlalchemy import select
 
 from quantx_api.stock_selection_model_service import StockSelectionModelService
@@ -39,6 +40,8 @@ from ..types.stock_selection_types import (
   StockSelectionResolvedBackend,
   StockSelectionTrainingBackend,
   StockSelectionTrainingCapabilities,
+  StockSelectionTrainerStatus,
+  StockSelectionTrainerDispatch,
   StockSelectionTrainingComparison,
   StockSelectionTrainingConclusion,
   StockSelectionTrainingFold,
@@ -539,6 +542,17 @@ class StockSelectionQuery(ResearchPreparationQuery):
     async with AsyncSessionLocal() as db:
       repository = StockSelectionTrainingRepository(db)
       return _capabilities(await repository.get_capability())
+
+  @strawberry.field(description="读取独立 Trainer 服务与排队原因，不触发计算")
+  async def stock_selection_trainer_status(self, info: strawberry.types.Info) -> StockSelectionTrainerStatus:
+    principal_from_context(info.context)
+    async with AsyncSessionLocal() as db:
+      value = await TrainerStatusRepository(db).read()
+    return StockSelectionTrainerStatus(
+      **{name: value[name] for name in ("service", "phase", "admission", "resource_reason", "fresh", "updated_at")},
+      training=StockSelectionTrainerDispatch(**{name: value["training"][name] for name in ("state", "status", "reason")}),
+      preparation=StockSelectionTrainerDispatch(**{name: value["preparation"][name] for name in ("state", "status", "reason")}),
+    )
 
   @strawberry.field(description="列出可用于训练的认证数据集版本")
   async def stock_selection_dataset_versions(

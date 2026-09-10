@@ -5,6 +5,10 @@ import { memoryLocation } from 'wouter/memory-location';
 
 import ResearchTrainingPage from '@/features/research/pages/ResearchTrainingPage';
 
+vi.mock('@/features/research/components/training/TrainerServiceStatus', () => ({
+  TrainerServiceStatus: () => <section>独立训练服务</section>,
+}));
+
 const mocks = vi.hoisted(() => ({
   lifecycle: {
     error: undefined as Error | undefined,

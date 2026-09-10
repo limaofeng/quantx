@@ -5209,6 +5209,9 @@ type Query {
   """读取训练 worker 能力与脱敏环境摘要"""
   stockSelectionTrainingCapabilities: StockSelectionTrainingCapabilities!
 
+  """读取独立 Trainer 服务与排队原因，不触发计算"""
+  stockSelectionTrainerStatus: StockSelectionTrainerStatus!
+
   """列出可用于训练的认证数据集版本"""
   stockSelectionDatasetVersions(limit: Int! = 100, offset: Int! = 0): [StockSelectionDatasetVersion!]!
 
@@ -6367,6 +6370,25 @@ enum StockSelectionModelStage {
 enum StockSelectionResolvedBackend {
   CPU
   LIGHTGBM_OPENCL_GPU
+}
+
+"""独立 Trainer 最近一次调度决定，不作为执行授权"""
+type StockSelectionTrainerDispatch {
+  state: String!
+  status: String
+  reason: String
+}
+
+"""独立 Trainer 服务心跳、准入及调度状态"""
+type StockSelectionTrainerStatus {
+  service: String!
+  phase: String
+  admission: String!
+  resourceReason: String
+  fresh: Boolean!
+  updatedAt: DateTime
+  training: StockSelectionTrainerDispatch!
+  preparation: StockSelectionTrainerDispatch!
 }
 
 """次日概率训练请求后端"""

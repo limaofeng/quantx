@@ -28,6 +28,7 @@ import {
 
 import { ResearchCenterFrame } from '../components/ResearchCenterFrame';
 import { ResearchLifecycleRunTable } from '../components/ResearchLifecycleRunTable';
+import { TrainerServiceStatus } from '../components/training/TrainerServiceStatus';
 import {
   useResearchLifecycleRuns,
   useStockSelectionDatasetVersions,
@@ -219,6 +220,7 @@ export default function ResearchTrainingPage() {
         </div>
       }
     >
+      <TrainerServiceStatus />
       <div className="grid min-w-0 gap-ui-section xl:grid-cols-[minmax(0,1fr)_18rem]">
         <StudioPanel className="order-2 min-w-0 xl:order-1">
           <StudioPanelHeader className="gap-3">

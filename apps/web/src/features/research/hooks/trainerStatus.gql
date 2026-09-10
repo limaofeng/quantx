@@ -1,0 +1,13 @@
+query StockSelectionTrainerStatus {
+  stockSelectionTrainerStatus {
+    service
+    phase
+    admission
+    resourceReason
+    fresh
+    updatedAt
+    training { state status reason }
+    preparation { state status reason }
+  }
+}
+

@@ -220,6 +220,10 @@ Trainer 调度器使用同一约束：每次独立调用使用独立标识，发
 
 训练数据位于 `state/datasets`，控制证据位于 `state/control`，结果位于 `state/runs`。主机资源保护由独立机器策略控制，与开发 ENV 或旧 Worker 的 full/live 标记无关。准备任务暂时保留其原有 Worker 时间窗口检查，尚待职责交接。
 
+### 前端服务状态
+
+训练页与运行环境页通过 `stockSelectionTrainerStatus` 显示独立服务状态、任务领取开关、资源等待原因以及训练/准备调度的最近决定。专用能力流程每分钟向开发库 `runtime_component_heartbeats` 的 `trainer` 行上报这一轻量快照，保护时段也照常上报，但不执行 CPU/GPU 探测、不刷新计算资格。API 在 90 秒后隐藏旧服务/调度信息；该快照仅用于展示，不参与领取授权。原有 `stock-selection-training` 能力证书仍独立校验。
+
 ### 跨环境模型发布包
 
 `ops/trainer/release_model.py` 使用控制面的 `quantx` Conda 环境执行，不使用 Trainer 的开发数据库身份向目标环境写入。`export` 先核对开发库中成功的 FINAL_EVALUATION、成功的 DEVELOPMENT 父运行、配置坐标和制品哈希，再封装经人工审核的模型。包只包含有清单的制品和审核信息，不复制训练表、数据库连接或模型 ACTIVE 状态。

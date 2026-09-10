@@ -12,6 +12,9 @@ from quantx_worker.prefector.flows import research_preparation_flow as preparati
 async def test_capability_flow_never_claims_jobs_and_does_not_refresh_failed_probe(
   monkeypatch, tmp_path,
 ):
+  from quantx_trainer import public_status
+  monkeypatch.setattr(public_status, "publish_runtime_status", AsyncMock())
+  monkeypatch.setattr(training, "_host_admission_reason", lambda: None)
   from quantx_infrastructure import training_activity
 
   config = tmp_path / "config.toml"
