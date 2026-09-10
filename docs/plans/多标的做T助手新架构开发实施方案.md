@@ -656,6 +656,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   并覆盖错误 watermark 身份、容量、缺口、迟到接收和缺失能力；Ruff/差异检查通过，证据
   `p8-minute-window-final.log`。这是单分钟有界输入组件，尚未接入 supervisor 的跨分钟
   轮转、Universe 批量结果发布及模型配置加载；不代表完整分钟调度已经完成。
+  多标的分钟组装新增 TModelMinuteBatchRuntime：冻结排序后的显式 Universe，每个标的均
+  生成 COMPLETE/UNAVAILABLE outcome；批次摘要绑定全部 outcome、窗口身份、实际 watermark
+  身份及首次可见时间，缺数据不能静默少行。只允许已封口、连续同流同代分钟显式 advance，
+  使用下一分钟 PIT 上下文和 Universe 创建全新缓冲；缺分钟/换代要求新 runtime，失败不替换
+  旧状态，上一分钟完整特征不会被下一分钟缺失标的复用。封口释放所有逐笔缓冲。
+  **57 项分钟批次/窗口/Research 特征测试通过**，包括三标的完整覆盖、输入顺序不影响摘要、
+  跨分钟不复用、早封口原子拒绝和全批缺失的时间身份；Ruff/差异检查通过，证据
+  `p8-minute-batch-final.log`。这是批量 Feature Bar 组装与显式轮转，实际 supervisor 调度、
+  不可用标的进入评分 manifest、模型加载及 snapshot 契约接线仍待实现。
+
 
 
 
