@@ -760,7 +760,7 @@ class TAssistantPaperShadowSupervisor:
     self._last_allocation_at[key] = asyncio.get_running_loop().time()
 
   async def _dispatch_entries(self, binding):
-    if binding.execution.scorer_mode is not TAssistantScorerMode.RULE_ONLY:
+    if binding.execution.scorer_mode is TAssistantScorerMode.ACTIVE:
       return PaperEntryDispatchResult("BLOCKED", ("PAPER_MODEL_ENTRY_NOT_ENABLED",))
     async def witness(code):
       if not self._quote_hub.is_ready:

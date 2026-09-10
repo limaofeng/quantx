@@ -415,3 +415,18 @@ def test_nested_sample_integer_evidence_is_strict(gate_input, field, value):
 def test_nested_tick_integer_evidence_is_strict(gate_input, field, value):
   with pytest.raises(ValueError):
     replace(gate_input, latest_tick=replace(gate_input.latest_tick, **{field: value}))
+
+
+@pytest.mark.parametrize("damage", [None, "missing", "changed", "mode"])
+def test_paper_shadow_gate_requires_same_model_binding_but_no_score(gate_input, damage):
+  binding = replace(gate_input.frozen_binding, scorer_mode="SHADOW", model_binding_hash="a" * 64)
+  current = binding
+  if damage == "missing":
+    current = replace(binding, model_binding_hash=None)
+  elif damage == "changed":
+    current = replace(binding, model_binding_hash="b" * 64)
+  elif damage == "mode":
+    current = replace(binding, scorer_mode="RULE_ONLY")
+  request = replace(gate_input, frozen_binding=binding, current_binding=current)
+  result = EntryExecutionGate.evaluate(request)
+  assert (result.decision is EntryExecutionDecision.ALLOW) == (damage is None)

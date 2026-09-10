@@ -170,11 +170,11 @@ class PaperPortfolioSnapshotReader:
       or frozen.version != execution.frozen_config_version
       or frozen.policy_version != execution.policy_version
       or frozen.scorer_mode.value != execution.scorer_mode
-      or execution.scorer_mode != "RULE_ONLY"
+      or execution.scorer_mode not in {"RULE_ONLY", "SHADOW"}
       or frozen.feature_schema_version != execution.feature_schema_version
       or frozen.entry_authorization.value != execution.entry_authorization
       or frozen.rollout_stage.value != execution.rollout_stage
-      or execution.model_runtime_binding is not None
+      or execution.model_runtime_binding != frozen.model_runtime_binding
     ):
       raise ValueError("PAPER_PORTFOLIO_CONFIG_BINDING_CONFLICT")
     globals_ = await rows(

@@ -223,3 +223,20 @@ def test_account_circuit_breakers_preserve_specific_audit_reason(changes, reason
   assert result.action == TAllocationAction.REJECT
   assert result.blockers == (reason,)
   assert result.allocated_amount_cap == 0
+
+
+
+def test_paper_shadow_keeps_rule_ranking_and_rejects_model_rank():
+  values = tuple(candidate(code, score=score, rank_score=D(score) / 100)
+    for code, score in (("A", 80), ("B", 95), ("C", 90)))
+  baseline = allocate(values)
+  shadow = replace(portfolio(), scorer_binding="SHADOW")
+  observed = allocate(values, source=shadow)
+  assert [replace(item, decision_id=base.decision_id, portfolio_input_fingerprint=base.portfolio_input_fingerprint)
+    for item, base in zip(observed, baseline)] == list(baseline)
+  with pytest.raises(ValueError, match="SHADOW_RULE_RANK_REQUIRED"):
+    allocate((replace(values[0], rank_score=D(99)),), source=shadow)
+  cut = replace(shadow.cut, environment=ExecutionEnvironment.LIVE)
+  live = replace(shadow, cut=cut, envelopes=tuple(replace(envelope, cut=cut) for envelope in shadow.envelopes))
+  with pytest.raises(ValueError, match="SCORER_NOT_ENABLED"):
+    allocate(values, source=live)

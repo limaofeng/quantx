@@ -97,11 +97,21 @@ async def seed_candidate_cycle(
   candidate_at=NOW,
   instrument_codes=("600000.SH",),
   environment="PAPER",
+  scorer_mode="RULE_ONLY",
 ):
   """Requires frozen_config fixture; invokes the real runtime/strategy, no signal rewrite."""
   values = asdict(allocation_tests._version("config-1"))
   values.pop("config_snapshot_hash")
   values["entry_authorization"] = "AUTO"
+  from quantx_domain.trading.t_model_score import TModelSnapshotView
+
+  model_binding = None
+  if scorer_mode != "RULE_ONLY":
+    from tests.domain.test_t_model_runtime_binding import binding
+    model_binding = binding(scorer_mode)
+    values["scorer_mode"] = scorer_mode
+    values["model_runtime_binding"] = model_binding.to_dict()
+
   values["canonical_payload"]["entry_execution_gate_policy"] = {
     "version": "entry-gate-v1",
     "quote_max_age_ms": 3000,
@@ -262,6 +272,11 @@ async def seed_candidate_cycle(
       execution.readiness.readiness,
       execution.readiness.as_of,
       symbols,
+      scorer_mode=scorer_mode,
+      model_runtime_binding_hash=model_binding.binding_hash if model_binding else None,
+      model_view=(TModelSnapshotView(model_binding, 0, "UNAVAILABLE", "MODEL_NOT_READY",
+        None, "", None, (), tuple((code, "MODEL_NOT_READY") for code in instrument_codes))
+        if model_binding else None),
     )
 
   def bind(execution, states):

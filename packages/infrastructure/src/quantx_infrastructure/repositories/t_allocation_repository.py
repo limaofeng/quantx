@@ -542,7 +542,9 @@ class TAllocationRepository:
       raise TAllocationConflict("T_ALLOCATION_SNAPSHOT_INVALID")
     if (
       snapshot.environment not in {ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE}
-      or snapshot.scorer_binding != "RULE_ONLY"
+      or (snapshot.scorer_binding != "RULE_ONLY" and not (
+        snapshot.environment is ExecutionEnvironment.PAPER and snapshot.scorer_binding == "SHADOW"
+      ))
     ):
       raise TAllocationConflict("T_ALLOCATION_SCOPE_INVALID")
     head = await self._lock_live_head(snapshot.cycle_id)
@@ -564,7 +566,7 @@ class TAllocationRepository:
       execution is None
       or cycle.execution_id != snapshot.cut.execution_ref.owner_id
       or execution.environment != snapshot.environment.value
-      or execution.scorer_mode != "RULE_ONLY"
+      or execution.scorer_mode != snapshot.scorer_binding
       or snapshot.config_version != execution.config_version_id
       or snapshot.strategy_binding != execution.policy_version
     ):

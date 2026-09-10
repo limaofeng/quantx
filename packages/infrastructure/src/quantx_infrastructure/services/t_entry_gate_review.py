@@ -14,6 +14,7 @@ from quantx_contracts import ExecutionEnvironment
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantConfigVersion,
+  TModelRuntimeBinding,
   stable_manifest_hash,
 )
 from quantx_domain.trading.t_assistant_market_state import (
@@ -211,7 +212,8 @@ async def review_t_entry_gate(db, *, execution, intent, gate, now: datetime):
     execution.feature_schema_version,
     capabilities.version,
     execution.scorer_mode,
-    None,
+    (TModelRuntimeBinding.from_mapping(execution.model_runtime_binding).binding_hash
+      if execution.model_runtime_binding is not None else None),
   )
   created = datetime.fromisoformat(metadata["intent_created_at"])
   deadline = (

@@ -50,8 +50,8 @@ CODES = ("600000.SH", "000001.SZ")
 AT = datetime(2026, 9, 3, 1, 30, tzinfo=UTC)
 
 
-async def seeded(sessions, *, initialize=True):
-  source = await seed_candidate_cycle(sessions, candidate_at=AT, instrument_codes=CODES)
+async def seeded(sessions, *, initialize=True, scorer_mode="RULE_ONLY"):
+  source = await seed_candidate_cycle(sessions, candidate_at=AT, instrument_codes=CODES, scorer_mode=scorer_mode)
   witnesses = {}
   for code, tick in source.latest_ticks:
     sample = tick.sample
@@ -97,8 +97,9 @@ async def seeded(sessions, *, initialize=True):
   return source, witnesses
 
 
-async def test_actual_two_symbol_ranked_dispatch_and_retry(sessions, frozen_config):
-  source, witnesses = await seeded(sessions)
+@pytest.mark.parametrize("scorer_mode", ["RULE_ONLY", "SHADOW"])
+async def test_actual_two_symbol_ranked_dispatch_and_retry(sessions, frozen_config, scorer_mode):
+  source, witnesses = await seeded(sessions, scorer_mode=scorer_mode)
   statements = []
 
   def observe(_connection, _cursor, statement, _parameters, _context, _many):

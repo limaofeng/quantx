@@ -118,8 +118,12 @@ def allocate_portfolio(
     or now < snapshot.cut.as_of
   ):
     raise ValueError("T_ALLOCATION_INVALID_EVALUATION_TIME")
-  if snapshot.scorer_binding != "RULE_ONLY":
+  if snapshot.scorer_binding != "RULE_ONLY" and not (
+    snapshot.scorer_binding == "SHADOW" and snapshot.environment.value == "PAPER"
+  ):
     raise ValueError("T_ALLOCATION_SCORER_NOT_ENABLED")
+  if snapshot.scorer_binding == "SHADOW" and any(v.rank_score != v.rule_score / 100 for v in candidates):
+    raise ValueError("T_ALLOCATION_SHADOW_RULE_RANK_REQUIRED")
   if len({v.intent_id for v in candidates}) != len(candidates) or len(
     {v.candidate_id for v in candidates}
   ) != len(candidates):

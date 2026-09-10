@@ -269,15 +269,23 @@ class EntryExecutionGate:
       rejects.append("T_ENTRY_MARKET_DISCONTINUITY")
     if r.execution_environment is not environment:
       rejects.append("T_ENTRY_ENVIRONMENT_UNSUPPORTED")
-    if (
+    shadow = (
+      environment is ExecutionEnvironment.PAPER
+      and binding.scorer_mode is TAssistantScorerMode.SHADOW
+      and r.current_binding.scorer_mode is TAssistantScorerMode.SHADOW
+    )
+    if not shadow and (
       binding.scorer_mode is not TAssistantScorerMode.RULE_ONLY
       or r.current_binding.scorer_mode is not TAssistantScorerMode.RULE_ONLY
     ):
       rejects.append("T_ENTRY_SCORER_UNSUPPORTED")
-    if (
-      binding.model_binding_hash is not None
-      or r.current_binding.model_binding_hash is not None
-    ):
+    if shadow:
+      digest = binding.model_binding_hash
+      if (not isinstance(digest, str) or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+        or digest != r.current_binding.model_binding_hash):
+        rejects.append("T_ENTRY_MODEL_BINDING_INVALID")
+    elif binding.model_binding_hash is not None or r.current_binding.model_binding_hash is not None:
       rejects.append("T_ENTRY_MODEL_BINDING_INVALID")
     if r.evaluated_at_ms >= expiry:
       rejects.append("T_ENTRY_TTL_EXPIRED")

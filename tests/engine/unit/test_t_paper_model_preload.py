@@ -107,7 +107,8 @@ async def test_paper_quote_persists_cold_model_observation(sessions, tmp_path):
       assert view["scores"] == [] and view["model_as_of_ms"] is None
       assert view["unavailable"] == [["600000.SH", "MODEL_SNAPSHOT_UNAVAILABLE"]]
     dispatch = await supervisor._dispatch_entries(supervisor._bindings[key])
-    assert dispatch.status == "BLOCKED"
+    assert dispatch.status == "SEED_REQUIRED"
+    assert "PAPER_MODEL_ENTRY_NOT_ENABLED" not in dispatch.reason_codes
   finally:
     await supervisor.stop()
 

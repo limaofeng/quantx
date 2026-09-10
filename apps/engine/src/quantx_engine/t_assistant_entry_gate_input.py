@@ -9,7 +9,10 @@ from quantx_application.t_trade_v3.entry_execution_gate import (
   MarketDataCapabilityManifest,
 )
 from quantx_contracts import ExecutionEnvironment
-from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+from quantx_domain.trading.t_assistant_execution import (
+  TModelRuntimeBinding,
+  stable_manifest_hash,
+)
 from quantx_domain.trading.t_assistant_market_state import (
   TAssistantSymbolState,
   decode_candidate_evidence,
@@ -68,7 +71,8 @@ async def build_entry_gate(db, execution, intent, witness, now, *, environment):
     execution.feature_schema_version,
     capabilities.version,
     execution.scorer_mode,
-    None,
+    (TModelRuntimeBinding.from_mapping(execution.model_runtime_binding).binding_hash
+      if execution.model_runtime_binding is not None else None),
   )
   row = await db.scalar(
     select(TAssistantSymbolStateRecord)

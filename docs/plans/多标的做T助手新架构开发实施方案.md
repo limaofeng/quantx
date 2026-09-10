@@ -753,6 +753,19 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   这是接受流封存入口和组件链路，不是已接上实际 supervisor 的分钟调度；缺少边界时
   保持未封存。已向用户询问 P8 市场基准指数、行业分类及数据来源，现有 portfolio 行业
   分类证据不能冒充模型市场/行业行情上下文。Caddy 当前 503，Web 实际 codegen 门仍未完成。
+  PAPER SHADOW 规则执行链已接通，纠正此前将 SHADOW 与 ACTIVE 一并拦截的临时限制：
+  supervisor、组合 reader、allocation repository/allocator 和最终 EntryGate 接受
+  PAPER SHADOW；排序仍取规则 score/100，若 SHADOW 输入 rank 被另行替换则拒绝。
+  reader 核对配置与执行的完整模型绑定；Gate 构造及持久化复核携带真实 binding_hash，
+  SHADOW 要求冻结/当前模式和 hash 一致，但不以模型分数可用性作为规则开仓条件。
+  ACTIVE 与 LIVE 模型路径仍拒绝，未启用模型决策或业务运行。冷模型普通 PAPER 账本、
+  行情、容量及风控检查照常生效，不再被 PAPER_MODEL_ENTRY_NOT_ENABLED 提前遮蔽。
+  **247 项受影响回归通过，3 项显式 PG 迁移测试跳过**：含真实两标的 P3→组合分配→
+  admission→最终 Gate→PAPER 订单及幂等重试，RULE_ONLY/SHADOW 同序；纯域排序/金额
+  等价、模型 rank 篡改、Gate 模式/hash 错配、LIVE 隔离及冷启动 SEED_REQUIRED。扩展
+  首轮唯一失败为旧 BLOCKED 测试预期，按新语义修正后 7 项预加载复验通过，未改生产逻辑。
+  Ruff/差异检查通过，证据 `p8-paper-shadow-entry-final.log`、
+  `p8-paper-shadow-entry-preload.log`。未执行正式 SHADOW 观察或放宽模型准入门。
 
 
 
