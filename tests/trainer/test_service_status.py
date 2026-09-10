@@ -155,3 +155,57 @@ def test_reporter_projects_packaged_source_without_paths(monkeypatch):
 
   monkeypatch.setattr(packaged_source, "packaged_source_state", lambda root: {"commit": "a" * 40, "code_manifest_sha256": "b" * 64, "dirty": False, "unrelated": "/private/path"})
   assert module._code_identity() == {"commit": "a" * 40, "manifest_sha256": "b" * 64, "dirty": False}
+
+
+@pytest.mark.parametrize("transient", [True, False])
+def test_windows_status_replace_retries_are_bounded(tmp_path, monkeypatch, transient):
+  from quantx_trainer import service_status as module
+
+  target, temporary = tmp_path / "status.json", tmp_path / "status.partial"
+  target.write_text("old")
+  temporary.write_text("new")
+  original = Path.replace
+  attempts = []
+
+  def replace(path, destination):
+    attempts.append(path)
+    if transient and len(attempts) > 1:
+      return original(path, destination)
+    error = PermissionError("sharing conflict")
+    error.winerror = 32
+    raise error
+
+  clock = iter([0, 0] if transient else [0, 2])
+  monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
+  monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+  monkeypatch.setattr(Path, "replace", replace)
+  if transient:
+    module._replace_status(temporary, target)
+    assert target.read_text() == "new"
+    assert len(attempts) == 2
+  else:
+    with pytest.raises(PermissionError):
+      module._replace_status(temporary, target)
+    assert target.read_text() == "old"
+    assert len(attempts) == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file sharing")
+def test_windows_status_reader_does_not_abort_heartbeat(tmp_path):
+  import threading
+
+  config = tmp_path / "config.toml"
+  config.write_text("fixture")
+  root = tmp_path / "service"
+  root.mkdir()
+  reporter = ServiceReporter(root, config)
+  reporter.write()
+  with (root / "status.json").open("rb") as reader:
+    release = threading.Timer(0.2, reader.close)
+    release.start()
+    try:
+      reporter.write("REGISTERING")
+    finally:
+      release.join()
+  assert json.loads((root / "status.json").read_text())["phase"] == "REGISTERING"
+  assert not list(root.glob(".status-*.partial"))

@@ -49,6 +49,21 @@ def _valid_code_identity(value) -> bool:
   )
 
 
+def _replace_status(temporary: Path, target: Path) -> None:
+  # Windows readers may briefly hold a handle without FILE_SHARE_DELETE.
+  # Keep the prior complete snapshot until replacement succeeds; permanent
+  # access failures still stop publication within one second.
+  deadline = time.monotonic() + 1
+  while True:
+    try:
+      temporary.replace(target)
+      return
+    except PermissionError as exc:
+      if getattr(exc, "winerror", None) not in {5, 32, 33} or time.monotonic() >= deadline:
+        raise
+      time.sleep(0.02)
+
+
 class ServiceReporter:
   """One instance per held service lease. All paths remain local."""
 
@@ -83,7 +98,7 @@ class ServiceReporter:
         json.dump(payload, stream, sort_keys=True, allow_nan=False)
         stream.flush()
         os.fsync(stream.fileno())
-      temporary.replace(target)
+      _replace_status(temporary, target)
       if self.logged_phase != self.phase:
         self.event(self.phase)
         self.logged_phase = self.phase
