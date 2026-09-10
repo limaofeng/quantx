@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from quantx_contracts.realtime_archive import (
   MAX_ARCHIVE_REQUEST_BYTES,
   ArchiveAccepted,
+  ArchiveRecoveryScope,
   ArchiveRevision,
   ArchiveStatus,
 )
@@ -32,8 +33,7 @@ router = APIRouter(
 )
 
 
-@router.post("", status_code=202, response_model=ArchiveAccepted)
-async def submit(request: Request):
+async def _body(request, model):
   body = bytearray()
   try:
     async with asyncio.timeout(3):
@@ -41,11 +41,31 @@ async def submit(request: Request):
         if len(body) + len(chunk) > MAX_ARCHIVE_REQUEST_BYTES:
           raise HTTPException(413, "ARCHIVE_REQUEST_TOO_LARGE")
         body.extend(chunk)
-    value = ArchiveRevision.model_validate_json(body)
+    return model.model_validate_json(body)
   except (ValidationError, ValueError):
     raise HTTPException(422, "ARCHIVE_REQUEST_INVALID") from None
   except TimeoutError:
     raise HTTPException(408, "ARCHIVE_REQUEST_TIMEOUT") from None
+
+
+@router.post("/scopes", status_code=202, response_model=ArchiveRecoveryScope)
+async def register_scope(request: Request):
+  value = await _body(request, ArchiveRecoveryScope)
+  try:
+    return await RealtimeArchiveStore(request.app.state.store.engine).register_scope(
+      value
+    )
+  except ArchiveRejected as exc:
+    raise HTTPException(409, str(exc)) from None
+  except ArchiveCapacity:
+    raise HTTPException(429, "ARCHIVE_SCOPE_CAPACITY") from None
+  except (SQLAlchemyError, TimeoutError, RuntimeError):
+    raise HTTPException(503, "ARCHIVE_STORAGE_UNAVAILABLE") from None
+
+
+@router.post("", status_code=202, response_model=ArchiveAccepted)
+async def submit(request: Request):
+  value = await _body(request, ArchiveRevision)
   try:
     identity = await RealtimeArchiveStore(request.app.state.store.engine).submit(value)
   except ArchiveRejected as exc:

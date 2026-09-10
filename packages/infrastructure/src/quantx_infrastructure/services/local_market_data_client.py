@@ -29,6 +29,20 @@ from quantx_contracts.market_data_service import (
 
 
 class LocalMarketDataClient:
+  async def register_archive_scope(self, scope):
+    from quantx_contracts.realtime_archive import ArchiveRecoveryScope
+
+    result = ArchiveRecoveryScope.model_validate(
+      await self._json(
+        "POST",
+        "/market-data/internal/v1/archives/scopes",
+        json=scope.model_dump(mode="json"),
+      )
+    )
+    if result != scope:
+      raise ValueError("archive scope identity mismatch")
+    return result
+
   async def submit_archive(self, request):
     from quantx_contracts.realtime_archive import ArchiveAccepted
 

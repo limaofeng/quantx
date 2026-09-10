@@ -17,6 +17,31 @@ from pydantic import (
 
 MAX_ARCHIVE_REQUEST_BYTES = 4096
 MAX_ARCHIVE_PENDING = 20_000
+MAX_ARCHIVE_SCOPES_PER_GENERATION = 10_000
+
+
+class ArchiveRecoveryScope(BaseModel):
+  """Open instrument interval, persisted before any volatile archive work.
+
+  It stays open across unsubscribe/re-subscribe for the entire Engine generation.
+  Transport acceptance cannot close this interval or prove historical coverage.
+  """
+
+  model_config = ConfigDict(extra="forbid")
+  generation: int = Field(strict=True, gt=0, le=2**63 - 1)
+  instrument: str = Field(pattern=r"^[A-Z0-9]{1,16}\.(SH|SZ|BJ)$")
+  start_minute: AwareDatetime
+
+  @model_validator(mode="after")
+  def minute_boundary(self):
+    self.start_minute = self.start_minute.astimezone(timezone.utc)
+    if (
+      self.start_minute.second
+      or self.start_minute.microsecond
+      or not 1990 <= self.start_minute.year <= 2100
+    ):
+      raise ValueError("archive scope must start at an exact minute")
+    return self
 
 
 class ArchiveBar(BaseModel):

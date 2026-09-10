@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from quantx_contracts.realtime_archive import (
   MAX_ARCHIVE_PENDING,
   MAX_ARCHIVE_REQUEST_BYTES,
+  MAX_ARCHIVE_SCOPES_PER_GENERATION,
+  ArchiveRecoveryScope,
   ArchiveRevision,
   ArchiveStatus,
 )
@@ -27,6 +29,43 @@ class RealtimeArchiveStore:
   def __init__(self, engine):
     self.engine = engine
 
+  async def register_scope(self, scope: ArchiveRecoveryScope):
+    async with asyncio.timeout(3), self.engine.begin() as db:
+      await db.execute(text("SELECT pg_advisory_xact_lock(817234595)"))
+      params = scope.model_dump()
+      existing = await db.scalar(
+        text("""
+        SELECT start_minute FROM engine_archive_scope
+        WHERE generation=:generation AND instrument=:instrument
+      """),
+        params,
+      )
+      if existing is not None:
+        if existing != scope.start_minute:
+          raise ArchiveRejected("ARCHIVE_SCOPE_CONFLICT")
+        return scope
+      try:
+        await verify_engine_archive_generation(db, scope.generation)
+      except RuntimeError:
+        raise ArchiveRejected("ARCHIVE_GENERATION_INACTIVE") from None
+      count = await db.scalar(
+        text("""
+        SELECT count(*) FROM engine_archive_scope WHERE generation=:generation
+      """),
+        params,
+      )
+      if count >= MAX_ARCHIVE_SCOPES_PER_GENERATION:
+        raise ArchiveCapacity("ARCHIVE_SCOPE_CAPACITY")
+      await db.execute(
+        text("""
+        INSERT INTO engine_archive_scope(generation,instrument,start_minute)
+        VALUES (:generation,:instrument,:start_minute)
+      """),
+        params,
+      )
+      await verify_engine_archive_generation(db, scope.generation)
+    return scope
+
   async def submit(self, request: ArchiveRevision):
     identity = request.identity()
     encoded = request.model_dump_json()
@@ -34,6 +73,19 @@ class RealtimeArchiveStore:
       raise ArchiveCapacity("ARCHIVE_REQUEST_TOO_LARGE")
     async with asyncio.timeout(3), self.engine.begin() as db:
       await db.execute(text("SELECT pg_advisory_xact_lock(817234595)"))
+      covered = await db.scalar(
+        text("""
+        SELECT EXISTS(SELECT 1 FROM engine_archive_scope
+        WHERE generation=:generation AND instrument=:instrument AND start_minute<=:minute)
+      """),
+        {
+          "generation": request.generation,
+          "instrument": request.instrument,
+          "minute": request.minute,
+        },
+      )
+      if not covered:
+        raise ArchiveRejected("ARCHIVE_RECOVERY_SCOPE_MISSING")
       existing = await db.scalar(
         text("SELECT request FROM realtime_archive_revision WHERE request_id=:id"),
         {"id": identity},

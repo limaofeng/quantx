@@ -13,7 +13,7 @@ import httpx
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from quantx_contracts.realtime_archive import ArchiveRevision
+from quantx_contracts.realtime_archive import ArchiveRecoveryScope, ArchiveRevision
 from quantx_infrastructure.services import realtime_archive_store as catalog
 from quantx_infrastructure.services import realtime_archive_worker as archive_worker
 from quantx_infrastructure.services.engine_archive_generation import (
@@ -46,6 +46,7 @@ async def archive_case(archive_db, monkeypatch):
   for name in (
     "20260909_0065_market_data_worker_lease.py",
     "20260910_0085_realtime_archive_inbox.py",
+    "20260910_0087_archive_recovery_scope.py",
   ):
     spec = importlib.util.spec_from_file_location("archive_dependency", root / name)
     migration = importlib.util.module_from_spec(spec)
@@ -101,6 +102,12 @@ async def archive_case(archive_db, monkeypatch):
           transport=httpx.ASGITransport(app), token="internal"
         )
         try:
+          scope = ArchiveRecoveryScope(
+            generation=generation,
+            instrument=request.instrument,
+            start_minute=request.minute,
+          )
+          await client.register_archive_scope(scope)
           yield SimpleNamespace(
             engine=engine,
             first=owners[0],
@@ -108,6 +115,7 @@ async def archive_case(archive_db, monkeypatch):
             source=source,
             storage=storage,
             request=request,
+            scope=scope,
             store=catalog.RealtimeArchiveStore(engine),
             client=client,
             migration=migration,
@@ -155,7 +163,11 @@ async def test_engine_sender_recovers_lost_acceptance_without_duplicate_post(
     SimpleNamespace(
       submit_archive=lose_response, archive_status=case.client.archive_status
     ),
-    scope_is_durable=lambda _: True,
+    scope_is_durable=lambda request: (
+      request.generation == case.scope.generation
+      and request.instrument == case.scope.instrument
+      and request.minute >= case.scope.start_minute
+    ),
   )
   sender.start()
   try:
@@ -211,6 +223,101 @@ async def test_http_acceptance_is_not_proof_and_default_worker_publishes(
   assert selected.request_id == identity
   assert len(case.storage.lines) == 1
   assert all(table == "kline_1m_versions" for table, _ in case.storage.points.values())
+
+
+async def test_scope_survives_source_exit_without_any_accepted_revision(archive_case):
+  case = archive_case
+  async with case.engine.connect() as db:
+    assert await db.scalar(text("SELECT count(*) FROM realtime_archive_revision")) == 0
+    assert (
+      await db.scalar(text("SELECT start_minute FROM engine_archive_scope"))
+      == case.request.minute
+    )
+  await unlock(case.source)
+  try:
+    assert await case.client.register_archive_scope(case.scope) == case.scope
+    # A new store/process sees the same identity; neither replay widens the scope.
+    assert (
+      await catalog.RealtimeArchiveStore(case.engine).register_scope(case.scope)
+      == case.scope
+    )
+    for scope in (
+      case.scope.model_copy(update={"instrument": "600001.SH"}),
+      case.scope.model_copy(
+        update={"start_minute": case.scope.start_minute - timedelta(minutes=1)}
+      ),
+    ):
+      with pytest.raises(httpx.HTTPStatusError) as error:
+        await case.client.register_archive_scope(scope)
+      assert error.value.response.status_code == 409
+  finally:
+    await lock(case.source)
+
+
+@pytest.mark.parametrize("outside", ["instrument", "before_start"])
+async def test_revision_without_covering_scope_is_not_accepted(archive_case, outside):
+  case = archive_case
+  request = change(
+    case.request,
+    **(
+      {"instrument": "600001.SH"}
+      if outside == "instrument"
+      else {"minute": case.request.minute - timedelta(minutes=1)}
+    ),
+  )
+  response = await case.client.client.post(
+    "/market-data/internal/v1/archives", json=request.model_dump(mode="json")
+  )
+  assert response.status_code == 409
+  assert response.json()["detail"] == "ARCHIVE_RECOVERY_SCOPE_MISSING"
+  async with case.engine.connect() as db:
+    assert await db.scalar(text("SELECT count(*) FROM realtime_archive_revision")) == 0
+
+
+async def test_scope_capacity_preserves_idempotent_replay(archive_case, monkeypatch):
+  case = archive_case
+  monkeypatch.setattr(catalog, "MAX_ARCHIVE_SCOPES_PER_GENERATION", 1)
+  assert await case.client.register_archive_scope(case.scope) == case.scope
+  with pytest.raises(httpx.HTTPStatusError) as error:
+    await case.client.register_archive_scope(
+      case.scope.model_copy(update={"instrument": "600001.SH"})
+    )
+  assert error.value.response.status_code == 429
+
+
+@pytest.mark.parametrize(
+  "updates,expected",
+  [
+    ({"generation": "1"}, 422),
+    ({"start_minute": "2026-09-10T09:31:00"}, 422),
+    ({"start_minute": "2026-09-10T09:31:01+08:00"}, 422),
+    ({"unexpected": "x" * 4096}, 413),
+  ],
+)
+async def test_scope_http_contract_rejects_invalid_or_oversize_body(
+  archive_case, updates, expected
+):
+  case = archive_case
+  response = await case.client.client.post(
+    "/market-data/internal/v1/archives/scopes",
+    json={**case.scope.model_dump(mode="json"), **updates},
+  )
+  assert response.status_code == expected
+  async with case.engine.connect() as db:
+    assert await db.scalar(text("SELECT count(*) FROM engine_archive_scope")) == 1
+
+
+async def test_scope_migration_refuses_to_invent_legacy_recovery_start(archive_case):
+  case = archive_case
+  await case.client.submit_archive(case.request)
+  async with case.engine.begin() as db:
+
+    def upgrade(connection):
+      case.migration.op = Operations(MigrationContext.configure(connection))
+      case.migration.upgrade()
+
+    with pytest.raises(RuntimeError, match="explicit legacy evidence mapping"):
+      await db.run_sync(upgrade)
 
 
 async def test_conflict_old_revision_stream_change_and_seal_rules(archive_case):

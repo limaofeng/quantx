@@ -200,6 +200,7 @@ GET  /market-data/internal/v1/reference-requests/{request_id}
 
 ```text
 POST /market-data/internal/v1/archives
+POST /market-data/internal/v1/archives/scopes
 GET  /market-data/internal/v1/archives/{request_id}
 ```
 
@@ -209,6 +210,12 @@ continuity_generation、stream_id、sequence、分钟和 sealed 构成，同身�
 409。旧代次、新提交的倒序修订、同连续性代次换流、封口后同源继续修改均拒绝。
 相同内容重放不重置预算，原 Engine 退出后仍可确认已接收身份，但不能新增归档。
 待处理修订最多 20000 条，满时 429；超大请求 413；非法字段和时间 422。
+
+提交修订前须通过 scopes 登记 generation、instrument、start_minute，返回 202 的
+原范围才表示持久化成功。相同范围可在源退出后重放；同代次同标的不允许改变起点，
+新范围必须属于当前活跃 Engine，每代次最多 10000 个标的。修订无范围或早于起点时
+返回 409 / ARCHIVE_RECOVERY_SCOPE_MISSING。范围独立于发送队列、修订及接收确认
+保留，不能将接收成功当作缺口修复完成；运行结束区间和补数证明的对账尚待接通。
 
 GET 返回固定请求、WRITE / READBACK / VERIFIED / BLOCKED、写入和回读累计次数、
 下一次重试时间、原因及证明。独立 Data Worker 在每次 IO 前持久化尝试，写入与回读

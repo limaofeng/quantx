@@ -113,7 +113,7 @@ async def reader_case(archive_case, monkeypatch):
   async with case.engine.begin() as db:
     await db.execute(
       text(
-        "ALTER TABLE market_data_request ADD COLUMN status text, ADD COLUMN request_payload json, ADD COLUMN ingestion_result json"
+        "ALTER TABLE market_data_request ADD COLUMN status text, ADD COLUMN request_payload json, ADD COLUMN ingestion_result json, ADD COLUMN created_at timestamp"
       )
     )
     # Empty development publication directory. Its full publication transaction
@@ -247,13 +247,23 @@ async def test_development_without_history_delivery_reads_only_verified_archive(
 
 
 @pytest.mark.parametrize(
-  "source_kind", ["verified", "wrong_hash", "partial_window", "wrong_day"]
+  "source_kind",
+  [
+    "verified",
+    "wrong_hash",
+    "partial_window",
+    "wrong_day",
+    "intraday",
+    "cached",
+    "closing_minute",
+    "at_boundary",
+  ],
 )
 async def test_native_history_priority_requires_coverage_and_content_receipt(
   reader_case, source_kind
 ):
   case = reader_case
-  verified = source_kind == "verified"
+  verified = source_kind in {"verified", "at_boundary"}
   case.storage.canonical = [original(case)]
   await case.client.submit_archive(case.request)
   await publish(case)
@@ -279,6 +289,7 @@ async def test_native_history_priority_requires_coverage_and_content_receipt(
   }
   payload = {
     "operation": "bars",
+    "download": source_kind != "cached",
     "stock_list": [case.request.instrument],
     "periods": ["1m"],
     "start_time": day.strftime("%Y%m%d"),
@@ -288,12 +299,21 @@ async def test_native_history_priority_requires_coverage_and_content_receipt(
     payload["end_time"] += "100000"
   elif source_kind == "wrong_day":
     audit["day_coverage"][0]["trading_date"] = str(day - timedelta(days=1))
+  elapsed = {
+    "intraday": timedelta(),
+    "closing_minute": timedelta(hours=5, minutes=29),
+    "at_boundary": timedelta(hours=5, minutes=30),
+  }.get(source_kind, timedelta(hours=6))
   async with case.engine.begin() as db:
     await db.execute(
       text(
-        "INSERT INTO market_data_request(request_id,status,request_payload,ingestion_result) VALUES ('native','COMPLETED',CAST(:payload AS JSON),CAST(:audit AS JSON))"
+        "INSERT INTO market_data_request(request_id,status,request_payload,ingestion_result,created_at) VALUES ('native','COMPLETED',CAST(:payload AS JSON),CAST(:audit AS JSON),:created_at)"
       ),
-      {"payload": json.dumps(payload), "audit": json.dumps(audit)},
+      {
+        "payload": json.dumps(payload),
+        "audit": json.dumps(audit),
+        "created_at": (case.request.minute + elapsed).replace(tzinfo=None),
+      },
     )
   page = await history(case)
   assert page.records[0]["close"] == (9.5 if verified else 10.1)

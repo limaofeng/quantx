@@ -146,6 +146,7 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
     for filename in (
       "20260910_0084_engine_archive_generation.py",
       "20260910_0085_realtime_archive_inbox.py",
+      "20260910_0087_archive_recovery_scope.py",
     ):
       archive_path = path.with_name(filename)
       spec = importlib.util.spec_from_file_location("archive_tables", archive_path)
@@ -155,6 +156,8 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
       def upgrade_archive(sync_connection):
         operations = Operations(MigrationContext.configure(sync_connection))
         archive_migration.op = SimpleNamespace(
+          get_bind=operations.get_bind,
+          create_foreign_key=operations.create_foreign_key,
           create_index=operations.create_index,
           create_table=lambda *args, **kwargs: operations.create_table(
             *args, prefixes=["TEMPORARY"], **kwargs

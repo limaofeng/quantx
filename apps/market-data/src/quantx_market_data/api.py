@@ -143,6 +143,11 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
         await connection.execute(
           text("SELECT request_id,phase,proof FROM realtime_archive_revision LIMIT 0")
         )
+        await connection.execute(
+          text(
+            "SELECT generation,instrument,start_minute FROM engine_archive_scope LIMIT 0"
+          )
+        )
     except Exception:
       raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None
     return {"status": "ready", "capability": "request-storage"}

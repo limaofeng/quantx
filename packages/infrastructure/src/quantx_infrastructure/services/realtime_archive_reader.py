@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from datetime import timedelta
 
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from quantx_contracts.market_data_service import HistoryPage
@@ -76,11 +77,20 @@ async def _archive_heads(db, request):
 
 async def _verified_native_partition(db, request):
   day = request.trading_date.strftime("%Y%m%d")
+  # A date-shaped request made during the session can contain only a prefix of
+  # the day even if every returned point was verified. Require a fresh download
+  # requested after the final supported 15:00 minute closed; completion time is
+  # insufficient because ingestion may finish long after collection.
+  collection_after = (request.bounds()[0] + timedelta(hours=15, minutes=1)).replace(
+    tzinfo=None
+  )
   return bool(
     await db.scalar(
       text("""
     SELECT EXISTS(SELECT 1 FROM market_data_request r
       WHERE r.status='COMPLETED' AND r.request_payload->>'operation'='bars'
+        AND r.request_payload->>'download'='true'
+        AND r.created_at>=:collection_after
         AND (r.request_payload->'stock_list')::jsonb @> CAST(:codes AS jsonb)
         AND (r.request_payload->'periods')::jsonb @> '["1m"]'::jsonb
         AND r.request_payload->>'start_time' ~ '^[0-9]{8}$'
@@ -105,6 +115,7 @@ async def _verified_native_partition(db, request):
         "codes": json.dumps([request.instrument]),
         "instrument": request.instrument,
         "day": day,
+        "collection_after": collection_after,
       },
     )
   )
