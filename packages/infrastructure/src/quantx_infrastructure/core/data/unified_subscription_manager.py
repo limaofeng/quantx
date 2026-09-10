@@ -92,9 +92,12 @@ class UnifiedDataSubscriptionManager:
     period: str = "tick",
     *,
     latest_only: bool = False,
+    archive: bool = False,
   ) -> str:
     if callback is None:
       raise ValueError("callback cannot be None")
+    if archive and (latest_only or period != "tick"):
+      raise ValueError("archive delivery requires non-coalesced Tick subscription")
     handle = str(uuid.uuid4())
     record = _Handle(
       owner=str(subscriber_id),
@@ -107,7 +110,9 @@ class UnifiedDataSubscriptionManager:
         stock_code,
         callback,
         delivery=(
-          QuoteDeliveryMode.LATEST_ONLY
+          QuoteDeliveryMode.ARCHIVE
+          if archive
+          else QuoteDeliveryMode.LATEST_ONLY
           if latest_only
           else QuoteDeliveryMode.CRITICAL
         ),
@@ -202,18 +207,14 @@ class UnifiedDataSubscriptionManager:
 
   def get_subscription_stats(self) -> dict[str, Any]:
     tick_handles = [
-      handle
-      for handle, record in self._handles.items()
-      if record.period == "tick"
+      handle for handle, record in self._handles.items() if record.period == "tick"
     ]
     return {
       "whole_quote": self.hub.status_snapshot(),
       "total_tick_subscriptions": len(tick_handles),
       "total_period_subscriptions": len(self._period_subscriptions),
       "total_handles": len(self._handles),
-      "owners": {
-        owner: len(handles) for owner, handles in self._owner_handles.items()
-      },
+      "owners": {owner: len(handles) for owner, handles in self._owner_handles.items()},
     }
 
   def is_subscribed(self, stock_code: str, period: str = "tick") -> bool:

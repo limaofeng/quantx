@@ -259,7 +259,7 @@ class RealTimeDataManager:
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period="tick",
-        latest_only=True,
+        archive=True,
       )
       if not handle:
         self.tick_subscribers[stock_code].discard(queue)
@@ -540,9 +540,13 @@ class RealTimeDataManager:
     )
     return tick
 
-  def _build_tick_generated_kline(self, stock_code: str, tick: Tick) -> Optional[KLine]:
+  def _build_tick_generated_kline(
+    self, stock_code: str, tick: Tick, *, delivery_reset=False
+  ) -> Optional[KLine]:
     price = self._tick_price(tick)
     if price is None or not self._is_intraday_1m_minute(tick.time):
+      if stock_code in self.tick_minute_klines:
+        self.tick_minute_klines[stock_code]["origin_complete"] = False
       return None
 
     minute = self._minute_start(tick.time)
@@ -563,7 +567,7 @@ class RealTimeDataManager:
     has_lineage = generation > 0 and bool(stream_id) and sequence > 0
     if (generation or stream_id or sequence) and not has_lineage:
       return None
-    reset = bool(tick.market_stream_reset)
+    reset = bool(tick.market_stream_reset or delivery_reset)
     if state:
       if observed_at < state["last_observed_at"]:
         return None
@@ -617,6 +621,9 @@ class RealTimeDataManager:
         suspend_flag=int(getattr(tick, "stock_status", 0) or 0),
       )
       state = {
+        "origin_complete": bool(
+          state and has_lineage and stock_code in self._tick_handles
+        ),
         "base_amount": base_amount,
         "base_volume": base_volume,
         "kline": kline,
@@ -726,7 +733,9 @@ class RealTimeDataManager:
       self.kline_subscribers[key].discard(queue)
       logger.warning(f"K线队列失效，移除订阅者: {key}")
 
-  async def _handle_tick_generated_1m(self, stock_code: str, tick: Tick) -> None:
+  async def _handle_tick_generated_1m(
+    self, stock_code: str, tick: Tick, *, delivery_reset=False
+  ) -> None:
     previous_state = self.tick_minute_klines.get(stock_code)
     previous_minute = previous_state.get("minute") if previous_state else None
     previous_kline = (
@@ -735,7 +744,9 @@ class RealTimeDataManager:
       else None
     )
 
-    kline = self._build_tick_generated_kline(stock_code, tick)
+    kline = self._build_tick_generated_kline(
+      stock_code, tick, delivery_reset=delivery_reset
+    )
     if kline is None:
       return
 
@@ -751,7 +762,12 @@ class RealTimeDataManager:
         kline_snapshot.time > previous_minute
         and not self.tick_minute_klines[stock_code]["origin_reset"]
       ):
-        save_candidates.append((previous_kline, previous_state))
+        save_candidates.append(
+          (
+            previous_kline,
+            {**previous_state, "sealed": previous_state.get("origin_complete", False)},
+          )
+        )
 
     if self._should_save_tick_generated_kline(stock_code, tick, kline_snapshot):
       self._mark_tick_generated_kline_save_attempt(stock_code, tick, kline_snapshot)
@@ -922,7 +938,11 @@ class RealTimeDataManager:
 
       latest_market_quote_cache.stage_tick(tick_data)
 
-      await self._handle_tick_generated_1m(stock_code, tick_data)
+      await self._handle_tick_generated_1m(
+        stock_code,
+        tick_data,
+        delivery_reset=bool(latest_tick.get("_archive_delivery_reset", False)),
+      )
 
       # 推送给所有订阅者（使用优化的队列放入方法）
       if stock_code in self.tick_subscribers:
@@ -942,6 +962,7 @@ class RealTimeDataManager:
 
       traceback.print_exc()
       logger.error(f"处理XTQuant tick数据回调失败: {stock_code}, {e}")
+      raise
 
   async def _handle_xt_kline_data(self, stock_code: str, period: str, data: dict):
     """处理来自XTQuant的K线数据回调并转换为KLine领域模型"""

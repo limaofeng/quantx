@@ -80,8 +80,8 @@ class EngineArchiveSession:
     if self.task is None or self.task.done():
       self.failures["SESSION_STOPPED"] += 1
       return False
-    # Existing latest-only aggregation cannot prove a complete minute origin.
-    # These revisions remain unsealed even when the next minute arrives.
+    # Sealing is supplied only by a completed minute with a continuous local
+    # archive subscription; first snapshots and delivery gaps stay unsealed.
     try:
       minute = kline.time
       if minute.tzinfo is None:
@@ -94,7 +94,7 @@ class EngineArchiveSession:
         continuity_generation=generation,
         stream_id=stream_id,
         sequence=state["sequence"],
-        sealed=False,
+        sealed=bool(state.get("sealed", False)),
         bar={
           key: getattr(kline, key)
           for key in (

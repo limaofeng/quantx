@@ -1546,3 +1546,37 @@ async def test_tick_generated_1m_save_is_throttled_within_same_minute(
   assert saved[0].close == 65.0
   assert saved[1].close == 65.2
   assert saved[2].close == 65.1
+
+
+async def test_archive_sealing_requires_complete_origin_and_recovers_after_delivery_gap(
+  monkeypatch,
+):
+  manager = RealTimeDataManager()
+  first = _archive_tick()
+  manager._tick_handles[first.stock_code] = "archive-subscription"
+  offered = []
+  monkeypatch.setattr(
+    manager,
+    "_offer_archive",
+    lambda bar, state: offered.append((bar.time.minute, bool(state.get("sealed")))),
+  )
+  for sequence, (minute, second, reset) in enumerate(
+    (
+      (30, 10, False),
+      (31, 1, False),
+      (31, 40, False),
+      (32, 1, False),
+      (32, 20, True),
+      (33, 1, False),
+      (34, 1, False),
+    ),
+    start=1,
+  ):
+    tick = _archive_tick(sequence=sequence)
+    tick.time = datetime(2026, 9, 10, 9, minute, second)
+    await manager._handle_tick_generated_1m(tick.stock_code, tick, delivery_reset=reset)
+  assert (30, True) not in offered
+  assert (31, True) in offered
+  assert (32, True) not in offered
+  assert (33, True) in offered
+  assert (34, True) not in offered

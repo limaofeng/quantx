@@ -162,3 +162,94 @@ async def test_new_engine_recovers_old_unconfirmed_intent_without_write_permissi
     assert failure.value.response.status_code == 409
   finally:
     await session.stop()
+
+
+async def test_default_fifo_subscription_seals_completed_observation_minute(
+  archive_case, monkeypatch, tmp_path
+):
+  from quantx_infrastructure.core.data.unified_subscription_manager import (
+    UnifiedDataSubscriptionManager,
+  )
+  from quantx_infrastructure.core.data.whole_quote_hub import (
+    QuoteDeliveryMode,
+    WholeQuoteHub,
+    WholeQuoteStatus,
+  )
+
+  from tests.infrastructure.test_whole_quote_hub import AlwaysClosed, FakeStore
+
+  case = archive_case
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(tmp_path))
+  monkeypatch.setattr(archive_session, "LocalMarketDataClient", lambda: case.client)
+  hub = WholeQuoteHub(store=FakeStore(), trading_time_service=AlwaysClosed())
+  hub.status = WholeQuoteStatus.READY
+  subscriptions = object.__new__(UnifiedDataSubscriptionManager)
+  subscriptions.hub, subscriptions._handles, subscriptions._owner_handles = hub, {}, {}
+  manager = RealTimeDataManager()
+  manager.subscription_manager = subscriptions
+  monkeypatch.setattr(
+    manager, "_normalize_tick_pre_close", AsyncMock(side_effect=lambda code, tick: tick)
+  )
+  await manager.start(archive_generation=case.request.generation)
+  session = manager.archive_session
+  await session.observe_scope(case.request.instrument, case.request.minute)
+  stream = manager.subscribe_tick(case.request.instrument)
+  first = asyncio.create_task(anext(stream))
+  try:
+
+    async def ready():
+      while (
+        case.request.instrument not in manager._tick_handles
+        or case.request.instrument not in session.durable
+      ):
+        await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(ready(), 3)
+    consumer = next(iter(hub._consumers.values()))
+    assert consumer.delivery is QuoteDeliveryMode.ARCHIVE
+    for sequence, offset in enumerate((10, 61, 100, 121), start=1):
+      moment = case.request.minute + timedelta(seconds=offset)
+      await hub._dispatch(
+        {
+          case.request.instrument: {
+            "time": int(moment.timestamp() * 1000),
+            "lastPrice": 10.0,
+            "volume": 1000 + sequence * 5,
+            "amount": 10000.0 + sequence * 50,
+            "lastClose": 9.8,
+            "tickVol": 5,
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "continuity_generation": case.request.continuity_generation,
+            "market_stream_id": str(case.request.stream_id),
+            "market_stream_sequence": sequence,
+          }
+        }
+      )
+      await asyncio.wait_for(consumer.queue.join(), 2)
+    await asyncio.wait_for(first, 2)
+    await asyncio.wait_for(session.sender.wait_idle(), 3)
+    for _ in range(12):
+      if not await advance_realtime_archive(case.first):
+        break
+    async with case.engine.connect() as db:
+      sealed = (
+        (
+          await db.execute(
+            text(
+              "SELECT minute,phase,proof FROM realtime_archive_revision WHERE sealed"
+            )
+          )
+        )
+        .mappings()
+        .all()
+      )
+      assert len(sealed) == 1
+      assert sealed[0]["minute"] == case.request.minute + timedelta(minutes=1)
+      assert sealed[0]["phase"] == "VERIFIED" and sealed[0]["proof"]
+  finally:
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    await stream.aclose()
+    await manager.stop()

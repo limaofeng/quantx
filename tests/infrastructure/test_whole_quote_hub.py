@@ -241,9 +241,10 @@ async def test_empty_ready_barrier_dispatches_buffered_snapshot() -> None:
 
     assert hub.status is WholeQuoteStatus.READY
     assert len(batch_updates) == 1
-    assert {
-      code: tick["lastPrice"] for code, tick in batch_updates[0].items()
-    } == {"600000.SH": 10.0, "000001.SZ": 12.0}
+    assert {code: tick["lastPrice"] for code, tick in batch_updates[0].items()} == {
+      "600000.SH": 10.0,
+      "000001.SZ": 12.0,
+    }
     assert len(tick_updates) == 1
     delivered = tick_updates[0]["600000.SH"]
     assert delivered["lastPrice"] == 10.0
@@ -511,9 +512,7 @@ async def test_critical_callback_failure_closes_realtime_gate() -> None:
 
     assert hub.consumer_status(handle) is QuoteConsumerStatus.LAGGING
     assert hub.status is WholeQuoteStatus.STALE
-    assert store.watermarks[-1]["reason"] == (
-      "critical quote consumer callback failed"
-    )
+    assert store.watermarks[-1]["reason"] == ("critical quote consumer callback failed")
     assert hub.status_snapshot()["consumer_lag_events"] == 1
   finally:
     await hub.unsubscribe(handle)
@@ -560,7 +559,9 @@ async def test_subscribe_during_authority_check_only_sees_validated_cache(hydrat
 
   store.state_with_freshness = blocked
   task = asyncio.create_task(
-    hub._hydrate_from_store() if hydrate else hub._apply_payload(
+    hub._hydrate_from_store()
+    if hydrate
+    else hub._apply_payload(
       batch(2, {"600000.SH": {"lastPrice": 11.0, "time": 3_000}}).to_bytes()
     )
   )
@@ -798,14 +799,15 @@ async def test_ready_hub_dispatches_ordered_batches_while_api_is_ahead() -> None
       ("000001.SZ", 12.0),
       ("600000.SH", 10.4),
     ]
-    assert [next(iter(item.values()))["market_stream_sequence"] for item in received[1:]] == [
+    assert [
+      next(iter(item.values()))["market_stream_sequence"] for item in received[1:]
+    ] == [
       2,
       3,
       4,
     ]
     assert all(
-      next(iter(item.values()))["continuity_generation"] == 1
-      for item in received[1:]
+      next(iter(item.values()))["continuity_generation"] == 1 for item in received[1:]
     )
   finally:
     await hub.unsubscribe(handle)
@@ -1053,3 +1055,94 @@ async def test_processing_over_freshness_window_keeps_gate_stale() -> None:
   assert not accepted
   assert hub.status is WholeQuoteStatus.STALE
   assert hub.last_processing_age_ms >= 10_000
+
+
+async def test_archive_fifo_preserves_updates_and_marks_local_invalidation():
+  hub = WholeQuoteHub(store=FakeStore(), trading_time_service=AlwaysClosed())
+  received = []
+  handle = await hub.subscribe_tick(
+    "600000.SH", received.append, delivery=QuoteDeliveryMode.ARCHIVE
+  )
+  consumer = hub._consumers[handle]
+  try:
+    for value in range(4):
+      await hub._dispatch(
+        {"600000.SH": {"lastPrice": value, "market_stream_reset": False}}
+      )
+    await asyncio.wait_for(consumer.queue.join(), 1)
+    assert [row["600000.SH"]["lastPrice"] for row in received] == list(range(4))
+    assert received[0]["600000.SH"]["_archive_delivery_reset"] is True
+    assert all(
+      "_archive_delivery_reset" not in row["600000.SH"] for row in received[1:]
+    )
+    hub._invalidate_pending_batches()
+    await hub._dispatch({"600000.SH": {"lastPrice": 4, "market_stream_reset": False}})
+    await asyncio.wait_for(consumer.queue.join(), 1)
+    assert received[-1]["600000.SH"]["_archive_delivery_reset"] is True
+    assert received[-1]["600000.SH"]["market_stream_reset"] is False
+  finally:
+    await hub.unsubscribe(handle)
+
+
+async def test_archive_overflow_leaves_critical_delivery_and_authority_unchanged():
+  store = FakeStore()
+  hub = WholeQuoteHub(store=store, trading_time_service=AlwaysClosed())
+  hub.status = WholeQuoteStatus.READY
+  release = asyncio.Event()
+  archived, traded = [], []
+
+  async def blocked(data):
+    await release.wait()
+    archived.append(data)
+
+  archive = await hub.subscribe_tick(
+    "600000.SH", blocked, delivery=QuoteDeliveryMode.ARCHIVE
+  )
+  critical = await hub.subscribe_tick("600000.SH", traded.append)
+  try:
+    for value in range(12):
+      await hub._dispatch(
+        {"600000.SH": {"lastPrice": value, "market_stream_reset": False}}
+      )
+      await asyncio.sleep(0)
+    assert hub.status is WholeQuoteStatus.READY and not store.watermarks
+    assert len(traded) == 12
+    assert all("_archive_delivery_reset" not in row["600000.SH"] for row in traded)
+    consumer = hub._consumers[archive]
+    assert consumer.lag_events == 1 and consumer.invalidated_batches == 8
+    assert consumer.status is QuoteConsumerStatus.READY
+    release.set()
+    await asyncio.wait_for(consumer.queue.join(), 1)
+    assert [row["600000.SH"]["lastPrice"] for row in archived] == [0, 9, 10, 11]
+    assert archived[1]["600000.SH"]["_archive_delivery_reset"] is True
+  finally:
+    release.set()
+    await hub.unsubscribe(archive)
+    await hub.unsubscribe(critical)
+
+
+async def test_archive_callback_failure_resets_only_its_next_delivery():
+  hub = WholeQuoteHub(store=FakeStore(), trading_time_service=AlwaysClosed())
+  hub.status = WholeQuoteStatus.READY
+  received = []
+
+  def callback(data):
+    if not received:
+      received.append(data)
+      raise ValueError("injected archive callback failure")
+    received.append(data)
+
+  handle = await hub.subscribe_tick(
+    "600000.SH", callback, delivery=QuoteDeliveryMode.ARCHIVE
+  )
+  consumer = hub._consumers[handle]
+  try:
+    for value in range(2):
+      await hub._dispatch({"600000.SH": {"lastPrice": value}})
+      await asyncio.wait_for(consumer.queue.join(), 1)
+    assert hub.status is WholeQuoteStatus.READY
+    assert consumer.status is QuoteConsumerStatus.READY
+    assert consumer.lag_reason == "callback_failed"
+    assert received[1]["600000.SH"]["_archive_delivery_reset"] is True
+  finally:
+    await hub.unsubscribe(handle)

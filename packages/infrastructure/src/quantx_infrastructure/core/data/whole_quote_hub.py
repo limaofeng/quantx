@@ -44,6 +44,7 @@ class WholeQuoteStatus(str, Enum):
 class QuoteDeliveryMode(str, Enum):
   CRITICAL = "CRITICAL"
   LATEST_ONLY = "LATEST_ONLY"
+  ARCHIVE = "ARCHIVE"
 
 
 class QuoteConsumerStatus(str, Enum):
@@ -66,6 +67,7 @@ class _Consumer:
   lag_events: int = 0
   invalidated_batches: int = 0
   lag_reason: str = ""
+  archive_reset_pending: bool = False
 
 
 class WholeQuoteHub:
@@ -356,16 +358,11 @@ class WholeQuoteHub:
       previous_stream_id
       and (
         previous_stream_id != batch.stream_id
-        or (
-          previous_generation > 0
-          and previous_generation != authoritative_generation
-        )
+        or (previous_generation > 0 and previous_generation != authoritative_generation)
       )
     )
     decorate_target = (
-      accepted
-      if previous_status is WholeQuoteStatus.READY
-      else prepared_latest
+      accepted if previous_status is WholeQuoteStatus.READY else prepared_latest
     )
     decorated = self._decorate_dispatch_data(
       decorate_target,
@@ -389,9 +386,7 @@ class WholeQuoteHub:
       await self._publish_watermark()
     self.last_apply_ms = (time.monotonic() - apply_started) * 1000
     dispatch_data = (
-      accepted
-      if previous_status is WholeQuoteStatus.READY
-      else self._latest
+      accepted if previous_status is WholeQuoteStatus.READY else self._latest
     )
     if dispatch_data and self.is_ready:
       await self._dispatch(dispatch_data)
@@ -411,9 +406,7 @@ class WholeQuoteHub:
     decorated: dict[str, dict[str, Any]] = {}
     for code, raw_tick in data.items():
       tick = dict(raw_tick)
-      source_time_ms = int(
-        round(cls._tick_source_time(tick, None) * 1000)
-      )
+      source_time_ms = int(round(cls._tick_source_time(tick, None) * 1000))
       tick.update(
         {
           "source_time_ms": source_time_ms,
@@ -501,6 +494,10 @@ class WholeQuoteHub:
     if consumer.status is not QuoteConsumerStatus.READY:
       return True
     queued_payload = payload
+    if consumer.delivery is QuoteDeliveryMode.ARCHIVE and consumer.queue.full():
+      WholeQuoteHub._invalidate_archive_consumer(consumer)
+      consumer.lag_events += 1
+      consumer.lag_reason = "queue_overflow"
     if consumer.queue.full():
       if consumer.delivery is QuoteDeliveryMode.CRITICAL:
         consumer.status = QuoteConsumerStatus.LAGGING
@@ -522,8 +519,24 @@ class WholeQuoteHub:
       queued_payload = previous | payload
       consumer.coalesced_batches += 1
       consumer.coalesced_updates += len(previous)
+    if (
+      consumer.delivery is QuoteDeliveryMode.ARCHIVE and consumer.archive_reset_pending
+    ):
+      queued_payload = {
+        code: {**tick, "_archive_delivery_reset": True}
+        for code, tick in payload.items()
+      }
+      consumer.archive_reset_pending = False
     consumer.queue.put_nowait(queued_payload)
     return True
+
+  @staticmethod
+  def _invalidate_archive_consumer(consumer):
+    consumer.archive_reset_pending = True
+    while not consumer.queue.empty():
+      consumer.queue.get_nowait()
+      consumer.queue.task_done()
+      consumer.invalidated_batches += 1
 
   async def subscribe_tick(
     self,
@@ -550,11 +563,11 @@ class WholeQuoteHub:
   ) -> str:
     if callback is None:
       raise ValueError("whole-quote callback is required")
+    if delivery is QuoteDeliveryMode.ARCHIVE and stock_code is None:
+      raise ValueError("archive delivery requires one instrument")
     handle = str(uuid.uuid4())
     queue_size = 1 if delivery is QuoteDeliveryMode.LATEST_ONLY else 8
-    queue: asyncio.Queue[dict[str, dict[str, Any]]] = asyncio.Queue(
-      maxsize=queue_size
-    )
+    queue: asyncio.Queue[dict[str, dict[str, Any]]] = asyncio.Queue(maxsize=queue_size)
     placeholder = asyncio.create_task(asyncio.sleep(0))
     consumer = _Consumer(
       handle=handle,
@@ -563,6 +576,7 @@ class WholeQuoteHub:
       delivery=delivery,
       queue=queue,
       task=placeholder,
+      archive_reset_pending=delivery is QuoteDeliveryMode.ARCHIVE,
     )
     consumer.task = asyncio.create_task(
       self._consumer_loop(consumer),
@@ -575,11 +589,15 @@ class WholeQuoteHub:
       self._tick_consumers_by_code.setdefault(stock_code, {})[handle] = consumer
     placeholder.cancel()
     await asyncio.gather(placeholder, return_exceptions=True)
-    initial = dict(self._latest) if stock_code is None else {
-      stock_code: self._latest[stock_code]
-    } if stock_code in self._latest else {}
+    initial = (
+      dict(self._latest)
+      if stock_code is None
+      else {stock_code: self._latest[stock_code]}
+      if stock_code in self._latest
+      else {}
+    )
     if initial and self.is_ready:
-      consumer.queue.put_nowait(initial)
+      self._enqueue_consumer(consumer, initial)
     return handle
 
   async def _consumer_loop(self, consumer: _Consumer) -> None:
@@ -596,6 +614,10 @@ class WholeQuoteHub:
           "WholeQuoteHub consumer callback failed: handle=%s",
           consumer.handle,
         )
+        if consumer.delivery is QuoteDeliveryMode.ARCHIVE:
+          self._invalidate_archive_consumer(consumer)
+          consumer.lag_events += 1
+          consumer.lag_reason = "callback_failed"
         if consumer.delivery is QuoteDeliveryMode.CRITICAL:
           consumer.status = QuoteConsumerStatus.LAGGING
           consumer.lag_events += 1
@@ -733,9 +755,7 @@ class WholeQuoteHub:
       self.last_batch_age_seconds = validate_market_stream_capture_time(
         api_state.captured_at,
         received_at=datetime.now(timezone.utc),
-        max_age_seconds=(
-          self.stale_after_seconds if trading_session else None
-        ),
+        max_age_seconds=(self.stale_after_seconds if trading_session else None),
       )
     except ValueError as exc:
       self._set_status(WholeQuoteStatus.STALE)
@@ -763,8 +783,7 @@ class WholeQuoteHub:
         trading_session
         and (
           self._last_received_monotonic <= 0
-          or now_monotonic - self._last_received_monotonic
-          > self.stale_after_seconds
+          or now_monotonic - self._last_received_monotonic > self.stale_after_seconds
         )
       )
       if receipt_stale:
@@ -799,17 +818,13 @@ class WholeQuoteHub:
       if engine_is_progressing or within_grace:
         return
       self._set_status(WholeQuoteStatus.SYNCING)
-      await self._publish_watermark(
-        reason="Engine market watermark remained behind"
-      )
+      await self._publish_watermark(reason="Engine market watermark remained behind")
       await self._hydrate_from_store()
       return
     if api_state.sequence < self.sequence:
       self._authority_ahead_since_monotonic = None
       self._set_status(WholeQuoteStatus.SYNCING)
-      await self._publish_watermark(
-        reason="API market watermark is behind Engine"
-      )
+      await self._publish_watermark(reason="API market watermark is behind Engine")
       return
 
     self._authority_ahead_since_monotonic = None
@@ -827,14 +842,11 @@ class WholeQuoteHub:
       return
     if (
       self._last_received_monotonic <= 0
-      or now_monotonic - self._last_received_monotonic
-      > self.stale_after_seconds
+      or now_monotonic - self._last_received_monotonic > self.stale_after_seconds
     ):
       if self.status is not WholeQuoteStatus.STALE:
         self._set_status(WholeQuoteStatus.STALE)
-        await self._publish_watermark(
-          reason="no fresh market batch for 10 seconds"
-        )
+        await self._publish_watermark(reason="no fresh market batch for 10 seconds")
 
   def _has_lagging_consumer(self) -> bool:
     return any(
@@ -857,6 +869,8 @@ class WholeQuoteHub:
   def _invalidate_pending_batches(self) -> int:
     invalidated = 0
     for consumer in tuple(self._consumers.values()):
+      if consumer.delivery is QuoteDeliveryMode.ARCHIVE:
+        consumer.archive_reset_pending = True
       consumer_invalidated = 0
       while True:
         try:
@@ -939,9 +953,7 @@ class WholeQuoteHub:
       self.authority_rejections += 1
       self._authority_ahead_since_monotonic = None
       self._set_status(WholeQuoteStatus.SYNCING)
-      await self._publish_watermark(
-        reason="API market watermark is behind local batch"
-      )
+      await self._publish_watermark(reason="API market watermark is behind local batch")
       return None
     if api_state.sequence > sequence:
       if not allow_authority_ahead:
@@ -960,9 +972,7 @@ class WholeQuoteHub:
       captured_age = validate_market_stream_capture_time(
         captured_at,
         received_at=datetime.now(timezone.utc),
-        max_age_seconds=(
-          self.stale_after_seconds if trading_session else None
-        ),
+        max_age_seconds=(self.stale_after_seconds if trading_session else None),
       )
     except ValueError as exc:
       self.authority_rejections += 1
@@ -971,9 +981,7 @@ class WholeQuoteHub:
       await self._publish_watermark(reason=str(exc))
       return None
     self.last_batch_age_seconds = captured_age
-    processing_stale = (
-      self.last_processing_age_ms / 1000 > self.stale_after_seconds
-    )
+    processing_stale = self.last_processing_age_ms / 1000 > self.stale_after_seconds
     if processing_stale and trading_session:
       self.authority_rejections += 1
       self._set_status(WholeQuoteStatus.STALE)
@@ -1024,16 +1032,10 @@ class WholeQuoteHub:
       if pending:
         logger.error(
           "WholeQuoteHub critical consumer cancellation timed out: handles=%s",
-          ",".join(
-            consumer.handle
-            for consumer in lagging
-            if consumer.task in pending
-          ),
+          ",".join(consumer.handle for consumer in lagging if consumer.task in pending),
         )
         self._set_status(WholeQuoteStatus.SYNCING)
-        await self._publish_watermark(
-          reason="critical consumer cancellation timed out"
-        )
+        await self._publish_watermark(reason="critical consumer cancellation timed out")
         return False
       for consumer in lagging:
         if consumer.handle not in self._consumers:
