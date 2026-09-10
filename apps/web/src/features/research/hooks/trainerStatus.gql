@@ -10,4 +10,3 @@ query StockSelectionTrainerStatus {
     preparation { state status reason }
   }
 }
-
