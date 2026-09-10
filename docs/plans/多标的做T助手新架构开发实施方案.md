@@ -695,6 +695,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `p8-binding-lifecycle.log`、`p8-binding-snapshot.log`、`p8-binding-fields-final.log`。
   未改变 GraphQL SDL、未迁移或启用模型执行；加载器真实固定样本自检、完整 binding 到
   scorer identity 的原子切换、分钟 supervisor 与完整模型 snapshot 接线仍待实现。
+  加载层新增 load_self_tested_cpu_artifact：复验完整 binding、自检 manifest hash 与制品
+  索引 hash，沿用现有受限路径/SHA/size/格式加载器，再核对模型/特征/标签/校准/策略身份。
+  冻结自检材料必须明确三分类顺序、唯一 case id、完整 Feature Bar、期望概率和 OOD 状态；
+  实际调用 CPU scorer，按版本化绝对误差 1e-9 策略验证，最多 32 case / 1 MiB，不接受调用方
+  自选宽松容差。引用正确但数值、特征 hash、OOD 或制品身份不一致也拒绝返回制品。
+  **54 项自检/安全制品/binding 验证通过**，包含独立可计算非均匀 logits 的真实推理、
+  期望值不符、改 hash 后仍错误、未知容差、路径越界及大输入在制品 IO 前拒绝；Ruff/差异
+  检查通过，证据 `p8-runtime-self-test-final.log`。该数值一致性自检不等于 OOS/发布准入，
+  未正式登记或加载业务模型；scorer 完整 binding 与 supervisor 的实际加载接线仍待实现。
+
 
 
 
