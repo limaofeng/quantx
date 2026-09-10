@@ -149,8 +149,17 @@ def main(argv: list[str] | None = None) -> int:
       serve(config, args.config)
     except KeyboardInterrupt:
       return 130
-    except Exception:
+    except Exception as exc:
+      import traceback
+
       print("Trainer service stopped: SERVICE_START_OR_RUNTIME_FAILED", file=sys.stderr)
+      print(json.dumps({
+        "error_type": type(exc).__name__,
+        "frames": [
+          {"file": Path(frame.filename).name, "function": frame.name, "line": frame.lineno}
+          for frame in traceback.extract_tb(exc.__traceback__)[-8:]
+        ],
+      }), file=sys.stderr)
       return 3
     return 0
 

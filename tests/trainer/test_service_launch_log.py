@@ -66,3 +66,25 @@ def test_service_logs_cli_includes_redacted_launch_output(tmp_path, monkeypatch,
   assert main.main(["logs", "--config", "config.toml"]) == 0
   assert json.loads(capsys.readouterr().out)["message"] == "token=[REDACTED]"
   remote.assert_not_called()
+
+
+def test_service_failure_reports_location_without_exception_contents(monkeypatch, capsys):
+  from types import SimpleNamespace
+  from unittest.mock import Mock
+
+  from quantx_trainer import main, service
+
+  config = SimpleNamespace(validate_runtime=Mock())
+  monkeypatch.setattr(main.TrainerConfig, "load", lambda path: config)
+
+  def fail(*args):
+    raise RuntimeError("synthetic-private-message")
+
+  monkeypatch.setattr(service, "serve", fail)
+  assert main.main(["serve", "--config", "config.toml"]) == 3
+  output = capsys.readouterr().err
+  assert "synthetic-private-message" not in output
+  diagnostic = json.loads(output.splitlines()[-1])
+  assert diagnostic["error_type"] == "RuntimeError"
+  assert diagnostic["frames"][-1]["file"] == "test_service_launch_log.py"
+  assert diagnostic["frames"][-1]["function"] == "fail"

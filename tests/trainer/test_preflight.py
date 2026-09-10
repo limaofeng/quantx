@@ -298,3 +298,22 @@ def test_administrative_entrypoint_validates_local_identity_before_network(
   assert main(["preflight", "--config", "ignored.toml"]) == 2
   remote_check.assert_not_called()
   assert "Conda interpreter" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_missing_worker_dependency_rejects_before_control_plane(config, monkeypatch):
+  import importlib
+
+  original = importlib.import_module
+
+  def load(name, *args, **kwargs):
+    if name == "prefect.workers.process":
+      raise ModuleNotFoundError("synthetic-private-import-failure")
+    return original(name, *args, **kwargs)
+
+  database = AsyncMock()
+  monkeypatch.setattr(importlib, "import_module", load)
+  monkeypatch.setattr(module, "check_database", database)
+  with pytest.raises(TrainerPreflightError, match="^TRAINER_WORKER_RUNTIME_UNAVAILABLE$"):
+    await module.preflight(config)
+  database.assert_not_called()

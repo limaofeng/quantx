@@ -206,6 +206,16 @@ async def check_prefect(config: TrainerConfig) -> None:
     raise TrainerPreflightError("TRAINER_PREFECT_CHECK_UNAVAILABLE") from None
 
 
+def check_worker_runtime() -> None:
+  """Exercise the actual worker imports without registering or starting it."""
+  from importlib import import_module
+
+  try:
+    import_module("prefect.workers.process").ProcessWorker
+  except Exception:
+    raise TrainerPreflightError("TRAINER_WORKER_RUNTIME_UNAVAILABLE") from None
+
+
 async def preflight(config: TrainerConfig) -> dict[str, str]:
   try:
     await asyncio.to_thread(
@@ -213,6 +223,7 @@ async def preflight(config: TrainerConfig) -> dict[str, str]:
     )
   except RuntimePermissionsError as exc:
     raise TrainerPreflightError(str(exc)) from None
+  await asyncio.to_thread(check_worker_runtime)
   # Do not contact Prefect if database identity or privilege isolation is wrong.
   await check_database(config)
   await check_prefect(config)

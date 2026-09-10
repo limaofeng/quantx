@@ -3341,6 +3341,7 @@ name = "quantx-trainer"
 version = "0.1.0"
 source = { editable = "apps/trainer" }
 dependencies = [
+    { name = "importlib-metadata" },
     { name = "prefect" },
     { name = "quantx-application" },
     { name = "quantx-infrastructure" },
@@ -3349,6 +3350,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "importlib-metadata", specifier = ">=8.7" },
     { name = "prefect", specifier = "==3.6.15" },
     { name = "quantx-application", editable = "packages/application" },
     { name = "quantx-infrastructure", editable = "packages/infrastructure" },

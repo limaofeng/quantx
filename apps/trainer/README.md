@@ -115,6 +115,8 @@ conda run -n quantx-train quantx-trainer preflight --config D:\QuantXTraining\tr
 
 数据库预检成功后，才对配置的 Prefect 发起 GET，验证专用 Pool 名称、UUID、Process 类型及未暂停状态；不会跟随重定向或继承 HTTP 代理。随后验证 SFTP 身份与两个远端根目录的可读元数据。成功输出 `PREFLIGHT_PASSED`，拒绝退出码为 `2`，仅输出稳定错误码。此命令不领取任务、不注册部署、不写心跳或探测写权限，也不证明完整跨机器传输或 GPU 可用。
 
+预检还实际导入 Prefect ProcessWorker，导入失败返回 `TRAINER_WORKER_RUNTIME_UNAVAILABLE`，不会继续访问控制面。Trainer 显式声明 `importlib-metadata`，避免在干净的 Python 3.13 环境中仅安装 Prefect 后无法加载 Worker。服务失败日志保留异常类型和末尾调用位置，不记录异常消息、局部变量或完整路径。
+
 ## SFTP 身份与存储配置
 
 `transfer_config` 必须位于独立状态目录内，内容如下（替换为实际部署值）：
