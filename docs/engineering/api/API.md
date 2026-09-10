@@ -218,7 +218,11 @@ continuity_generation、stream_id、sequence、分钟和 sealed 构成，同身�
 保留，不能将接收成功当作缺口修复完成。Data Worker 独立循环按范围逐日关联原
 HistoryDemand，等待上海时间 15:01 后规划；交易日生成 WAITING 关联，周末/明确休市
 生成带依据的 NO_SESSION，缺少有效日历则等待。源失效时持久化保守结束时间，之后
-仅可重放已接受身份，不能新增修订。补数证明通过并关闭 WAITING 的接线仍待完成。
+仅可重放已接受身份，不能新增修订。默认恢复循环每轮另核验一个到期 WAITING：
+AGENT 需求在有收盘后原生固定版本证明时关闭为 VERIFIED，并记录原 demand_id、
+原关联源、实际证明源、版本、摘要、验证行数及时间；不替换原关联或重开预算。
+缺少版本、仅盘中版本或证明损坏时记录原因，5 分钟后再检查。REMOTE 尚缺整日来源
+证明时保持 WAITING_REMOTE_SESSION_PROOF；完成交付本身不等同于归档缺口已关闭。
 
 GET 返回固定请求、WRITE / READBACK / VERIFIED / BLOCKED、写入和回读累计次数、
 下一次重试时间、原因及证明。独立 Data Worker 在每次 IO 前持久化尝试，写入与回读

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from quantx_contracts.development_reference import CalendarSnapshot
-from quantx_contracts.market_data_service import HistoryDemand
+from quantx_contracts.market_data_service import HistoryDemand, HistoryRead
 from sqlalchemy import text
 
 from .engine_archive_generation import verify_engine_archive_generation
@@ -46,6 +46,12 @@ async def _session_evidence(db, day):
 
 
 async def advance_archive_recovery(owner):
+  planned = await _plan_archive_recovery(owner)
+  verified = await verify_archive_recovery(owner)
+  return planned or verified
+
+
+async def _plan_archive_recovery(owner):
   """No native IO here. Linking a demand does not verify or close a data gap."""
   async with asyncio.timeout(3), owner.engine.begin() as db:
     await owner._guard_ingestion_owner(db)
@@ -145,3 +151,82 @@ async def advance_archive_recovery(owner):
     )
     await owner._guard_ingestion_owner(db)
     return True
+
+
+async def verify_archive_recovery(owner):
+  """Close one due day using a published version; never create or replace a source."""
+  from .local_history_reader import HistoryReadInvalid
+  from .native_bar_publication import resolve_native_bar_version
+
+  async with asyncio.timeout(3), owner.engine.begin() as db:
+    await owner._guard_ingestion_owner(db)
+    row = (
+      (
+        await db.execute(
+          text("""
+        SELECT r.*,d.source_kind,d.source_request_id FROM engine_archive_recovery r
+        JOIN market_data_demand d ON d.demand_id=r.demand_id
+        WHERE r.state='WAITING' AND r.next_probe_at<=clock_timestamp()
+        ORDER BY r.next_probe_at,r.generation,r.instrument,r.trading_date
+        LIMIT 1 FOR UPDATE OF r SKIP LOCKED
+      """)
+        )
+      )
+      .mappings()
+      .one_or_none()
+    )
+    if row is None:
+      return False
+    reason, evidence = "WAITING_NATIVE_VERSION", None
+    if row["source_kind"] != "AGENT":
+      reason = "WAITING_REMOTE_SESSION_PROOF"
+    else:
+      try:
+        version = await resolve_native_bar_version(
+          db,
+          HistoryRead(
+            instrument=row["instrument"], period="1m", trading_date=row["trading_date"]
+          ),
+        )
+      except HistoryReadInvalid as exc:
+        reason = str(exc)
+      else:
+        if version is not None:
+          if not version.full_session:
+            reason = "WAITING_FULL_SESSION_VERSION"
+          else:
+            evidence = {
+              "schema_version": 1,
+              "kind": "NATIVE_FULL_SESSION_VERSION",
+              "demand_id": row["demand_id"],
+              "original_source_request_id": row["source_request_id"],
+              "proof_source_request_id": version.source_request_id,
+              "instrument": row["instrument"],
+              "period": "1m",
+              "trading_date": row["trading_date"].isoformat(),
+              "storage_version": version.storage_version,
+              "content_sha256": version.content_sha256,
+              "source_records_verified": version.records_verified,
+              "source_fields_verified": version.fields_verified,
+              "source_created_at": version.source_created_at.isoformat(),
+            }
+            reason = None
+    await db.execute(
+      text("""
+      UPDATE engine_archive_recovery SET state=:state,evidence=CAST(:evidence AS JSONB),
+        verified_at=CASE WHEN :verified THEN clock_timestamp() ELSE NULL END,
+        next_probe_at=clock_timestamp()+interval '5 minutes',reason=:reason
+      WHERE generation=:generation AND instrument=:instrument AND trading_date=:day
+    """),
+      {
+        "generation": row["generation"],
+        "instrument": row["instrument"],
+        "day": row["trading_date"],
+        "state": "VERIFIED" if evidence else "WAITING",
+        "verified": evidence is not None,
+        "evidence": json.dumps(evidence) if evidence else None,
+        "reason": reason,
+      },
+    )
+    await owner._guard_ingestion_owner(db)
+    return evidence is not None

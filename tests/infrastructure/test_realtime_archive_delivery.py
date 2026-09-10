@@ -49,6 +49,7 @@ async def archive_case(archive_db, monkeypatch):
     "20260910_0085_realtime_archive_inbox.py",
     "20260910_0087_archive_recovery_scope.py",
     "20260910_0088_archive_recovery_partitions.py",
+    "20260910_0089_archive_recovery_proof.py",
   ):
     spec = importlib.util.spec_from_file_location("archive_dependency", root / name)
     migration = importlib.util.module_from_spec(spec)
@@ -56,7 +57,9 @@ async def archive_case(archive_db, monkeypatch):
     async with engine.begin() as db:
       if name.startswith("20260909_0065"):
         await db.execute(
-          text("CREATE TABLE market_data_request(request_id text PRIMARY KEY)")
+          text(
+            "CREATE TABLE market_data_request(request_id text PRIMARY KEY, status text, request_payload json, ingestion_result json, created_at timestamp)"
+          )
         )
       if name.startswith("20260909_0066"):
         await db.execute(

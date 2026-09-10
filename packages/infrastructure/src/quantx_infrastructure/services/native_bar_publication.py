@@ -3,7 +3,7 @@
 import json
 import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
@@ -15,6 +15,10 @@ class NativeBarPublication:
   storage_version: str
   source_request_id: str
   full_session: bool
+  content_sha256: str
+  records_verified: int
+  fields_verified: int
+  source_created_at: datetime
 
 
 async def resolve_native_bar_version(db, request):
@@ -105,4 +109,8 @@ async def resolve_native_bar_version(db, request):
     row["version"],
     str(row["request_id"]),
     row["created_at"] >= cutoff and row["request_payload"].get("download") is True,
+    source_hash,
+    count,
+    proof["fields_verified"],
+    row["created_at"],
   )

@@ -150,7 +150,7 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
         )
         await connection.execute(
           text(
-            "SELECT generation,instrument,trading_date,demand_id,state FROM engine_archive_recovery LIMIT 0"
+            "SELECT generation,instrument,trading_date,demand_id,state,evidence,verified_at,next_probe_at,reason FROM engine_archive_recovery LIMIT 0"
           )
         )
     except Exception:

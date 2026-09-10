@@ -119,11 +119,6 @@ async def reader_case(archive_case, monkeypatch, tmp_path):
   )
   monkeypatch.setattr(settings, "environment", "production")
   async with case.engine.begin() as db:
-    await db.execute(
-      text(
-        "ALTER TABLE market_data_request ADD COLUMN status text, ADD COLUMN request_payload json, ADD COLUMN ingestion_result json, ADD COLUMN created_at timestamp"
-      )
-    )
     # Empty development publication directory. Its full publication transaction
     # is tested by the default delivery suite; here it must not route to raw data.
     await db.execute(

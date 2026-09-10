@@ -148,6 +148,7 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
       "20260910_0085_realtime_archive_inbox.py",
       "20260910_0087_archive_recovery_scope.py",
       "20260910_0088_archive_recovery_partitions.py",
+      "20260910_0089_archive_recovery_proof.py",
     ):
       archive_path = path.with_name(filename)
       spec = importlib.util.spec_from_file_location("archive_tables", archive_path)
