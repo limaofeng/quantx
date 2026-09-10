@@ -970,6 +970,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `p7-reducer-benchmark-smoke.json`。纯 domain RULE_ONLY，无模型、数据库、行情或交易 IO；
   尚未测量组合触发合并、跨标的调度和完整 Engine，performance_gate=NOT_EVALUATED，
   不据此勾选 P7-02 或宣称生产吞吐通过。
+  reducer 性能修复：非 material 更新原本仍序列化窗口并计算最终被丢弃的 manifest hash；
+  改为只在 material 转换时计算，普通 Tick 继续归约并维持原哈希及 cursor 语义。
+  相同 3×1024 输入逐 Tick 总耗时由 39.42 秒降到 18.81 秒（本机单次观察约 -52%）；
+  两种批量的完整计数、最终机会状态哈希和 fail-closed 结果均与原基线一致，17 项 reducer
+  回归及 Ruff 通过。证据 `p7-reducer-benchmark-optimized.json`、`p7-reducer-hash-regression.log`。
+  该优化不替代触发合并或正式性能门。
   LIVE supervisor 追加排队故障验证：暂停首批真实 run_cycle 时，两个后续回调等待同一
   lifecycle lock；正常路径三个周期逐次提交，cursor=1/2/3，无遗漏或并发决策。首批抛错
   则解除绑定，等待批次不再执行、不新增周期；显式 reconcile 后从新 ring/rewarm 恢复。

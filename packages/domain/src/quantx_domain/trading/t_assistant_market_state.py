@@ -1156,16 +1156,14 @@ class SymbolMarketStateReducer:
         ),
         "deferred_candidate_fence_sequence": deferred_fence,
       }
-    )
+    ) if material else previous.material_manifest_hash
     next_state = replace(
       previous,
       revision=previous.revision + (1 if material else 0),
       lifecycle=lifecycle,
       cursor=delta_slice.next_cursor,
       opportunity_state=state,
-      material_manifest_hash=(
-        manifest if material else previous.material_manifest_hash
-      ),
+      material_manifest_hash=manifest,
       rewarm_reason=None,
       deferred_candidate=deferred_candidate,
       deferred_candidate_fence_sequence=deferred_fence,
