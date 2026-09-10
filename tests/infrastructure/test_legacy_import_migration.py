@@ -6,17 +6,24 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from quantx_infrastructure.services import development_history_import as importer
+from quantx_infrastructure.services.legacy_export_migration import (
+  apply_export_migration,
+  plan_export_migration,
+)
 from quantx_infrastructure.services.legacy_import_migration import (
   apply_import_migration,
   plan_import_migration,
   recover_import_migration,
 )
 from quantx_market_data import worker
+from quantx_market_data.api import create_app
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -105,9 +112,53 @@ async def snapshot(case):
     }
 
 
+async def migrate_producer(case):
+  """Separate PG session/catalog: transfer the actual committed producer receipt."""
+  legacy, source = inputs(case)
+  legacy.pop("local_verification")
+  engine = create_async_engine(case.first.engine.url, pool_size=1, max_overflow=0)
+  try:
+    async with engine.begin() as db:
+      for ddl in (
+        "CREATE TEMP TABLE market_data_worker_lease(expires_at timestamptz)",
+        "CREATE TEMP TABLE market_data_request(request_id text,status text,created_at timestamptz,request_payload jsonb,ingestion_result jsonb)",
+        "CREATE TEMP TABLE development_data_export(id text,request jsonb,state text,manifest jsonb,source_request_id text,legacy_manifest jsonb,error text,updated_at timestamptz)",
+      ):
+        await db.execute(text(ddl))
+      await db.execute(
+        text(
+          "INSERT INTO market_data_request SELECT * FROM jsonb_populate_record(NULL::pg_temp.market_data_request,CAST(:row AS jsonb))"
+        ),
+        {"row": json.dumps(source, default=lambda value: value.isoformat())},
+      )
+      await db.execute(
+        text(
+          "INSERT INTO development_data_export(id,request,state,manifest,source_request_id) VALUES (:id,CAST(:request AS jsonb),'READY',CAST(:manifest AS jsonb),:source)"
+        ),
+        {
+          "id": case.identity,
+          "request": case.request.model_dump_json(),
+          "manifest": json.dumps(legacy),
+          "source": source["request_id"],
+        },
+      )
+    plan = await plan_export_migration(engine, case.identity)
+    assert (await apply_export_migration(engine, plan))["status"] == "migrated"
+    async with engine.connect() as db:
+      row = (
+        await db.execute(text("SELECT to_jsonb(e) FROM development_data_export e"))
+      ).scalar_one()
+    assert row["legacy_manifest"]["previous_export"]["manifest"] == legacy
+    assert row["source_request_id"] == source["request_id"]
+    return {key: row[key] for key in ("id", "state", "request", "manifest")}
+  finally:
+    await engine.dispose()
+
+
 async def test_migrated_receiver_recovers_without_network_or_budget_refund(delivery):
   case = delivery
-  remote = await seed(case)
+  await seed(case)
+  remote = await migrate_producer(case)
   before = await snapshot(case)
   calls = len(case.calls)
   writes = len(case.connection.lines)
@@ -146,6 +197,25 @@ async def test_migrated_receiver_recovers_without_network_or_budget_refund(deliv
   assert final["budget"] == before["budget"]
   assert final["export"]["legacy_manifest"]["previous_snapshot"] == before
   assert len(case.connection.lines) == writes + 1 and len(case.calls) == calls
+  app = create_app(store=SimpleNamespace(engine=case.first.engine), token="internal")
+  async with app.router.lifespan_context(app):
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app),
+      base_url="http://local",
+      headers={"Authorization": "Bearer internal"},
+    ) as client:
+      history = await client.get(
+        "/market-data/internal/v1/history",
+        params={
+          "instrument": case.request.instrument,
+          "period": "1d",
+          "trading_date": "2026-09-07",
+        },
+      )
+      assert history.status_code == 200
+      assert history.json()["records"][0]["storage_version"] == plan.storage_version
+      assert history.json()["records"][0]["close"] == 10.1
+  assert len(case.calls) == calls
   await case.first.release()
   assert (await apply_import_migration(case.first.engine, plan, remote))[
     "status"
