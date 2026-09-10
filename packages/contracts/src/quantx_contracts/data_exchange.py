@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+MAX_REMOTE_HISTORY_PARTITIONS = 5000
+
 
 class HistoryPartitionRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")

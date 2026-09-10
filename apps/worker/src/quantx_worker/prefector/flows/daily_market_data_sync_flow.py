@@ -272,8 +272,23 @@ async def _request_market_data_batches(
   ):
     raise ValueError("行情同步交易日历重复、无序或超出请求区间")
 
+  from quantx_contracts.data_exchange import MAX_REMOTE_HISTORY_PARTITIONS
+  from quantx_infrastructure.config.settings import settings
+
+  delivery_limit = (
+    MAX_REMOTE_HISTORY_PARTITIONS if settings.environment == "development" else None
+  )
+
   def partitions():
-    return iter_market_partitions(codes, days, start_time, end_time, periods, lifetimes)
+    return iter_market_partitions(
+      codes,
+      days,
+      start_time,
+      end_time,
+      periods,
+      lifetimes,
+      max_delivery_partitions=delivery_limit,
+    )
 
   total = await asyncio.to_thread(lambda: sum(1 for _ in partitions()))
   observer = observation.get()

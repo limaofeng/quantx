@@ -29,6 +29,8 @@ def iter_market_partitions(
   end: str,
   periods: list[str],
   lifetimes: InstrumentLifetimes,
+  *,
+  max_delivery_partitions: int | None = None,
 ) -> Iterator[MarketPartition]:
   """Round-robin periods, retaining only one bounded partition per period."""
 
@@ -49,6 +51,8 @@ def iter_market_partitions(
         500_000 // per_code,
         REQUEST_BYTE_BUDGET // (per_code * ESTIMATED_RECORD_BYTES[period]),
       )
+      if max_delivery_partitions is not None:
+        size = min(size, max_delivery_partitions // span)
       if size < 1:
         raise ValueError("单标的行情分区超出记录或字节预算")
       batch = []

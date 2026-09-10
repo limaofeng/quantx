@@ -130,8 +130,48 @@ async def test_nested_durable_requests_do_not_accumulate_in_observer(monkeypatch
   store = Mock(create_market_data_request=AsyncMock(return_value="request"),
     market_data_request=AsyncMock(return_value={"status":"COMPLETED", "ingestion_result":{"records_saved":1}}),
     close=AsyncMock())
-  monkeypatch.setattr(durable, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(durable, "LocalMarketDataClient", lambda: store)
   async with progress.observe_market_sync(Mock()) as observer:
     result = await durable._request_and_wait({"operation":"bars"})
     assert result["status"] == "completed"
     assert observer.requests == {}
+
+
+def test_development_long_range_partitions_fit_delivery_capacity_without_gaps():
+  from datetime import datetime
+
+  from quantx_contracts.data_exchange import MAX_REMOTE_HISTORY_PARTITIONS
+
+  codes = [f"{i:06d}.SZ" for i in range(300)]
+  days = trading_days("20260101", "20260331")
+  plans = list(
+    iter_market_partitions(
+      codes,
+      days,
+      "20260101",
+      "20260331",
+      ["1d", "1m"],
+      {},
+      max_delivery_partitions=MAX_REMOTE_HISTORY_PARTITIONS,
+    )
+  )
+  for plan in plans:
+    span = (
+      datetime.strptime(plan.end, "%Y%m%d") - datetime.strptime(plan.start, "%Y%m%d")
+    ).days + 1
+    assert span * len(plan.codes) * len(plan.periods) <= MAX_REMOTE_HISTORY_PARTITIONS
+  actual = [
+    (code, period, day)
+    for plan in plans
+    for code in plan.codes
+    for period in plan.periods
+    for day in plan.days
+  ]
+  expected = {
+    (code, period, day) for code in codes for period in ["1d", "1m"] for day in days
+  }
+  assert len(actual) == len(set(actual)) and set(actual) == expected
+  production = list(
+    iter_market_partitions(codes, days, "20260101", "20260331", ["1d"], {})
+  )
+  assert len(production) == 1 and production[0].codes == codes

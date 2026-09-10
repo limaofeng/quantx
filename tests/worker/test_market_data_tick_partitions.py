@@ -85,7 +85,7 @@ async def test_failed_tick_request_is_not_reopened(monkeypatch):
     ),
     close=AsyncMock(),
   )
-  monkeypatch.setattr(durable, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(durable, "LocalMarketDataClient", lambda: store)
   result = await durable._request_and_wait(
     {"operation": "bars"}
   )

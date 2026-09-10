@@ -13,7 +13,10 @@ from uuid import uuid4
 
 import httpx
 from quantx_application.market_data.ingestion import IngestionEvidenceConflict
-from quantx_contracts.data_exchange import HistoryPartitionRequest
+from quantx_contracts.data_exchange import (
+  MAX_REMOTE_HISTORY_PARTITIONS,
+  HistoryPartitionRequest,
+)
 from sqlalchemy import text
 
 from quantx_infrastructure.database.connection import AsyncSessionLocal
@@ -501,7 +504,7 @@ async def request_remote_history(
   scope = _parse_bars_request(payload)
   start = datetime.strptime(payload["start_time"], "%Y%m%d").date()
   end = datetime.strptime(payload["end_time"], "%Y%m%d").date()
-  if ((end - start).days + 1) * len(scope.groups) > 5000:
+  if ((end - start).days + 1) * len(scope.groups) > MAX_REMOTE_HISTORY_PARTITIONS:
     raise ValueError(
       "Split history requests into at most 5000 code/day/period partitions"
     )
