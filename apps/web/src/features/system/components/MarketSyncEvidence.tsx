@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { getAccessToken } from '@/core/auth';
+import { getAccessToken, useAuth } from '@/core/auth';
 
 const evidenceSchema = z.object({
   counts: z.array(
@@ -70,6 +70,8 @@ export function MarketSyncEvidence({
   runId: string;
   live: boolean;
 }) {
+  const { user } = useAuth();
+  const canResume = user?.permissions.includes('operations:write') ?? false;
   const [offset, setOffset] = useState(0);
   const [refresh, setRefresh] = useState(0);
   const [loadedOffset, setLoadedOffset] = useState(0);
@@ -80,7 +82,7 @@ export function MarketSyncEvidence({
   const [submitting, setSubmitting] = useState(false);
   const [actionMessage, setActionMessage] = useState('');
   const resume = async () => {
-    if (!resumeId || !resumeReason.trim() || submitting) return;
+    if (!canResume || !resumeId || !resumeReason.trim() || submitting) return;
     setSubmitting(true);
     setActionMessage('');
     try {
@@ -252,7 +254,10 @@ export function MarketSyncEvidence({
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={submitting}
+                        disabled={submitting || !canResume}
+                        title={
+                          canResume ? '按原请求恢复处理' : '需要运维操作权限'
+                        }
                         onClick={() => {
                           setResumeId(item.request_id);
                           setResumeReason('');
@@ -268,7 +273,7 @@ export function MarketSyncEvidence({
           </tbody>
         </table>
       </div>
-      {resumeId && (
+      {resumeId && canResume && (
         <form
           className="my-2 flex flex-wrap items-center gap-2"
           onSubmit={event => {

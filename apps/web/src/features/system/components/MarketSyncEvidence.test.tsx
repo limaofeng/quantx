@@ -9,7 +9,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MarketSyncEvidence } from './MarketSyncEvidence';
 
-vi.mock('@/core/auth', () => ({ getAccessToken: () => 'test-token' }));
+const auth = vi.hoisted(() => ({ permissions: ['operations:write'] }));
+vi.mock('@/core/auth', () => ({
+  getAccessToken: () => 'test-token',
+  useAuth: () => ({ user: { permissions: auth.permissions } }),
+}));
 
 const evidence = (status: string, count = 1) => ({
   counts: [{ coverage_status: 'PENDING', request_status: status, count }],
@@ -35,6 +39,7 @@ const evidence = (status: string, count = 1) => ({
 
 afterEach(() => {
   cleanup();
+  auth.permissions = ['operations:write'];
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -146,5 +151,50 @@ describe('MarketSyncEvidence', () => {
     });
     expect(fetchMock.mock.calls[1][1].method).toBe('POST');
     expect(screen.getByText('等待入库')).toBeInTheDocument();
+  });
+  it('disables recovery for viewers without operation permission', async () => {
+    auth.permissions = ['system-status:read'];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => evidence('BLOCKED') });
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => {
+      render(<MarketSyncEvidence runId="run" live={false} />);
+    });
+    expect(screen.getByText('恢复请求')).toBeDisabled();
+    expect(screen.getByText('恢复请求')).toHaveAttribute(
+      'title',
+      '需要运维操作权限'
+    );
+    expect(screen.queryByLabelText('恢复原因')).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry an uncertain recovery and tells the user to check state', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => evidence('BLOCKED') });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => evidence('BLOCKED'),
+    });
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503 });
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => {
+      render(<MarketSyncEvidence runId="run" live={false} />);
+    });
+    fireEvent.click(screen.getByText('恢复请求'));
+    fireEvent.change(screen.getByLabelText('恢复原因'), {
+      target: { value: '已修复连接' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('确认恢复'));
+    });
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '恢复结果未确认，请先刷新状态再操作'
+    );
+    expect(
+      fetchMock.mock.calls.filter(call => call[1]?.method === 'POST')
+    ).toHaveLength(1);
   });
 });
