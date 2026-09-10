@@ -16,6 +16,27 @@ from quantx_infrastructure.services.market_data_demand_store import (
 
 
 class MarketDataWorkerStore(MarketDataDemandStore):
+  async def block_legacy_verified_deliveries(self) -> int:
+    """Retire at most twenty obsolete success labels without touching evidence."""
+    if self.demand_source_kind != "REMOTE":
+      return 0
+    async with self.engine.begin() as db:
+      await self._guard_ingestion_owner(db)
+      rows = await db.execute(
+        text("""
+        UPDATE development_data_export SET state='BLOCKED',
+          error='SOURCE_PROVENANCE_MIGRATION_REQUIRED',updated_at=clock_timestamp()
+        WHERE id IN (
+          SELECT id FROM development_data_export
+          WHERE state='LOCAL_VERIFIED' AND manifest::jsonb->'version'='1'::jsonb
+          ORDER BY updated_at,id LIMIT 20 FOR UPDATE SKIP LOCKED
+        ) RETURNING id
+      """)
+      )
+      count = len(rows.all())
+      await self._guard_ingestion_owner(db)
+      return count
+
   async def next_development_delivery(self):
     """Select one due local import; successful/terminal deliveries are never swept."""
     if self.demand_source_kind != "REMOTE":

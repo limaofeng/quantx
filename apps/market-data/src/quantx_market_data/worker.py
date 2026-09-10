@@ -29,10 +29,11 @@ async def advance_development_delivery(store) -> bool:
     advance_reference_request,
   )
 
+  retired = await store.block_legacy_verified_deliveries()
   reference = await advance_reference_request(store)
   item = await store.next_development_delivery()
   if item is None:
-    return reference
+    return bool(retired) or reference
   try:
     await import_partition(
       HistoryPartitionRequest.model_validate(item["request"]), owner=store

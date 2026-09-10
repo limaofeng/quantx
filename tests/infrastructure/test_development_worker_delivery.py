@@ -217,3 +217,115 @@ async def test_range_partition_submits_and_queries_without_executing(
   client.submit_history_demand.assert_awaited_once()
   client.history_demand.assert_awaited_once()
   client.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+  "prepared", [{"period": "1d", "start_write": False}], indirect=True
+)
+async def test_worker_retires_v1_success_without_spending_budget_or_importing(delivery):
+  import json
+
+  from quantx_infrastructure.services.development_download_budget import (
+    DevelopmentDownloadBudget,
+  )
+  from quantx_infrastructure.services.development_ingestion_progress import (
+    DevelopmentIngestionStore,
+  )
+
+  case = delivery
+  case.first.demand_source_kind = "REMOTE"
+  budget = DevelopmentDownloadBudget(case.factory, case.identity, owner=case.first)
+  await budget.schedule()
+  for _ in range(4):
+    assert await budget.reserve_proof() is None
+  await DevelopmentIngestionStore(case.factory, case.identity, owner=case.first).begin()
+  receipt = {
+    "version": 1,
+    "local_verification": {"records_verified": 99},
+    "original": "kept",
+  }
+  async with case.factory() as db:
+    await db.execute(
+      text(
+        "UPDATE development_data_export SET state='LOCAL_VERIFIED',manifest=CAST(:receipt AS json)"
+      ),
+      {"receipt": json.dumps(receipt)},
+    )
+    await db.commit()
+    before_budget = (
+      (
+        await db.execute(
+          text(
+            "SELECT to_jsonb(b) FROM development_data_download_budget b ORDER BY delivery_id"
+          )
+        )
+      )
+      .scalars()
+      .all()
+    )
+    before_ingestion = (
+      (
+        await db.execute(
+          text(
+            "SELECT to_jsonb(i) FROM development_data_ingestion i ORDER BY delivery_id"
+          )
+        )
+      )
+      .scalars()
+      .all()
+    )
+  calls = (len(case.calls), len(case.connection.lines), len(case.connection.queries))
+  assert await worker.advance_development_delivery(case.first)
+  assert not await worker.advance_development_delivery(case.first)
+  assert calls == (
+    len(case.calls),
+    len(case.connection.lines),
+    len(case.connection.queries),
+  )
+  async with case.factory() as db:
+    row = (
+      await db.execute(
+        text("SELECT state,error,manifest FROM development_data_export WHERE id=:id"),
+        {"id": case.identity},
+      )
+    ).one()
+    assert row == ("BLOCKED", "SOURCE_PROVENANCE_MIGRATION_REQUIRED", receipt)
+    assert (
+      await db.execute(
+        text(
+          "SELECT to_jsonb(b) FROM development_data_download_budget b ORDER BY delivery_id"
+        )
+      )
+    ).scalars().all() == before_budget
+    assert (
+      await db.execute(
+        text(
+          "SELECT to_jsonb(i) FROM development_data_ingestion i ORDER BY delivery_id"
+        )
+      )
+    ).scalars().all() == before_ingestion
+
+
+@pytest.mark.parametrize(
+  "prepared", [{"period": "1d", "start_write": False}], indirect=True
+)
+async def test_legacy_success_retirement_is_bounded_and_lease_fenced(delivery):
+  case = delivery
+  case.first.demand_source_kind = "REMOTE"
+  async with case.factory() as db:
+    await db.execute(
+      text(
+        "INSERT INTO development_data_export(id,request,state,manifest,updated_at) SELECT 'legacy-'||n,'{}','LOCAL_VERIFIED',json_build_object('version',1),clock_timestamp() FROM generate_series(1,21) n"
+      )
+    )
+    await db.commit()
+  assert await case.first.block_legacy_verified_deliveries() == 20
+  await case.first.release()
+  assert await case.second.acquire()
+  with pytest.raises(RuntimeError, match="lease was lost"):
+    await case.first.block_legacy_verified_deliveries()
+  case.second.demand_source_kind = "AGENT"
+  assert await case.second.block_legacy_verified_deliveries() == 0
+  case.second.demand_source_kind = "REMOTE"
+  assert await case.second.block_legacy_verified_deliveries() == 1
+  assert await case.second.block_legacy_verified_deliveries() == 0
