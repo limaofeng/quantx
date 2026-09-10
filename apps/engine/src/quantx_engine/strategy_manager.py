@@ -76,7 +76,6 @@ from quantx_infrastructure.services.exit_plan_replay_projection_service import (
   exit_plan_replay_projection_service,
 )
 from quantx_infrastructure.services.historical_market_data_service import (
-  HistoricalMarketDataService,
   HistoricalTickPaginationError,
 )
 from quantx_infrastructure.services.limit_up_board_replay_projection_service import (
@@ -1295,15 +1294,13 @@ class StrategyManager:
     if end_time < start_time:
       end_time = start_time
 
-    service = HistoricalMarketDataService()
-
     is_t_trade_replay = bool(runtime.context.parameters.get("t_trade_replay"))
     if is_t_trade_replay:
       initial_portfolio = dict(
         runtime.context.parameters.get("initial_portfolio") or {}
       )
       if str(initial_portfolio.get("source") or "").upper() == "MANUAL":
-        await self._ensure_t_trade_portfolio_reference_data(runtime, service)
+        await self._ensure_t_trade_portfolio_reference_data(runtime)
       await self._set_t_trade_replay_phase(
         runtime,
         phase="CHECKING_DATA",
@@ -1346,7 +1343,6 @@ class StrategyManager:
     )
 
     missing_before = await self._find_missing_backtest_data(
-      service=service,
       instruments=runtime.instruments,
       start_time=start_time,
       end_time=end_time,
@@ -1466,7 +1462,6 @@ class StrategyManager:
           phase_message="行情下载完成，正在严格复核落库数据",
         )
       missing_after = await self._find_missing_backtest_data(
-        service=service,
         instruments=runtime.instruments,
         start_time=start_time,
         end_time=end_time,
@@ -1544,7 +1539,6 @@ class StrategyManager:
     )
 
     missing_after = await self._find_missing_backtest_data(
-      service=service,
       instruments=runtime.instruments,
       start_time=start_time,
       end_time=end_time,
@@ -2035,7 +2029,6 @@ class StrategyManager:
   async def _ensure_t_trade_portfolio_reference_data(
     self,
     runtime: StrategyRuntime,
-    service: HistoricalMarketDataService,
   ) -> None:
     portfolio = dict(runtime.context.parameters.get("initial_portfolio") or {})
     positions = list(portfolio.get("positions") or [])
@@ -2058,7 +2051,6 @@ class StrategyManager:
       phase_message="正在检查初始组合 D-1 日线估值数据",
     )
     missing = await self._find_missing_backtest_data(
-      service=service,
       instruments=instruments,
       start_time=reference_start,
       end_time=reference_end,
@@ -2072,7 +2064,6 @@ class StrategyManager:
         sync_periods={"1d"},
       )
       missing = await self._find_missing_backtest_data(
-        service=service,
         instruments=instruments,
         start_time=reference_start,
         end_time=reference_end,
@@ -2258,7 +2249,6 @@ class StrategyManager:
 
   async def _find_missing_backtest_data(
     self,
-    service: HistoricalMarketDataService,
     instruments: List[str],
     start_time: datetime,
     end_time: datetime,
@@ -2349,9 +2339,7 @@ class StrategyManager:
                 tick_missing_any = True
                 day_missing = True
                 quality_issues.append(inspection)
-          elif not await asyncio.to_thread(
-            self._has_tick_data, service, instrument, day_start, day_end
-          ):
+          elif not await self._has_tick_data(instrument, day_start, day_end):
             tick_missing_any = True
             day_missing = True
 
@@ -2361,9 +2349,7 @@ class StrategyManager:
           if period in {"1d", "1w", "1mon", "1q", "1hy", "1y"}:
             period_start = datetime.combine(trading_date, time(0, 0))
             period_end = datetime.combine(trading_date, time(23, 59, 59))
-          if not await asyncio.to_thread(
-            self._has_kline_data,
-            service,
+          if not await self._has_kline_data(
             instrument,
             period,
             period_start,
@@ -2648,112 +2634,72 @@ class StrategyManager:
       for issue in list(info.get("quality_issues") or [])
     )
 
-  def _has_kline_data(
+  async def _has_kline_data(
     self,
-    service: HistoricalMarketDataService,
     instrument: str,
     period: str,
     start_time: datetime,
     end_time: datetime,
   ) -> bool:
-    """检查指定周期的K线数据是否存在"""
-    measurement = f"kline_{period.lower()}"
-    period_lower = period.lower()
-    window_days = 30 if period_lower in {"1d", "1w", "1mon", "1q", "1hy", "1y"} else 7
-
-    if period_lower in {"1d", "1w", "1mon", "1q", "1hy", "1y"}:
+    """Existence of the native input partition, not aggregated-period coverage."""
+    period = period.lower()
+    if period in {"1d", "1w", "1mon", "1q", "1hy", "1y"}:
+      period = "1d"
       start_time = start_time.replace(hour=0, minute=0, second=0, microsecond=0)
-      end_time = end_time.replace(hour=23, minute=59, second=59, microsecond=0)
-
-    def _fetch(window_start: datetime, window_end: datetime):
-      return service.kline_repo.find_all(
-        measurement=measurement,
-        filters={"stock_code": instrument},
-        start_time=window_start,
-        end_time=window_end,
-        fields=["time"],
-        limit=1,
-        order_by="time DESC",
-      )
-
-    return self._has_data_in_windows(
-      fetcher=_fetch,
-      start_time=start_time,
-      end_time=end_time,
-      window_days=window_days,
-      label=f"K线数据 {instrument} {period}",
+      end_time = end_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+    elif period in {"1m", "5m", "15m", "30m", "60m", "1h"}:
+      period = "1m"
+    else:
+      raise ValueError(f"unsupported historical KLine period: {period}")
+    return await self._has_local_partition_data(
+      instrument, period, start_time, end_time
     )
 
-  def _has_tick_data(
+  async def _has_tick_data(
     self,
-    service: HistoricalMarketDataService,
     instrument: str,
     start_time: datetime,
     end_time: datetime,
   ) -> bool:
-    """检查tick数据是否存在"""
-    # 对齐到交易时段，避免无效时间段查询
     start_time = start_time.replace(hour=9, minute=30, second=0, microsecond=0)
     end_time = end_time.replace(hour=15, minute=30, second=0, microsecond=0)
-
-    def _fetch(window_start: datetime, window_end: datetime):
-      return service.tick_repo.find_all(
-        filters={"stock_code": instrument},
-        start_time=window_start,
-        end_time=window_end,
-        fields=["time"],
-        limit=1,
-        order_by="time DESC",
-      )
-
-    return self._has_data_in_windows(
-      fetcher=_fetch,
-      start_time=start_time,
-      end_time=end_time,
-      window_days=3,
-      label=f"tick数据 {instrument}",
+    return await self._has_local_partition_data(
+      instrument, "tick", start_time, end_time
     )
 
-  def _has_data_in_windows(
-    self,
-    fetcher,
-    start_time: datetime,
-    end_time: datetime,
-    window_days: int,
-    label: str,
-  ) -> bool:
-    """分段检查数据存在性，避免一次扫描过多文件"""
-    if not start_time or not end_time:
+  async def _has_local_partition_data(self, instrument, period, start_time, end_time):
+    start = time_utils.to_shanghai(start_time, keep_tz=True)
+    end = time_utils.to_shanghai(end_time, keep_tz=True)
+    if end < start or (end.date() - start.date()).days >= 366:
+      raise ValueError(
+        "history presence requires an ordered window of at most 366 dates"
+      )
+    client = LocalMarketDataClient()
+    try:
+      async with asyncio.timeout(30):
+        day = start.date()
+        while day <= end.date():
+          query = HistoryRead(
+            instrument=instrument, period=period, trading_date=day, page_size=1
+          )
+          lower, _ = query.bounds()
+          if start > lower:
+            query.after = start - timedelta(microseconds=1)
+          page = await client.read_history(query)
+          if page.records and page.records[0]["time"] <= end:
+            return True
+          day += timedelta(days=1)
       return False
-
-    if end_time < start_time:
-      end_time = start_time
-
-    current_end = end_time
-    window_days = max(1, int(window_days))
-
-    while current_end >= start_time:
-      window_start = max(start_time, current_end - timedelta(days=window_days))
-      try:
-        records = fetcher(window_start, current_end)
-      except Exception as exc:
-        self.logger.warning(
-          f"查询历史{label}失败: {exc} (window={window_start}~{current_end})"
-        )
-        if window_days > 1:
-          window_days = max(1, window_days // 2)
-          continue
-        return False
-
-      if hasattr(records, "empty"):
-        if not records.empty:
-          return True
-      elif records:
-        return True
-
-      current_end = window_start - timedelta(seconds=1)
-
-    return False
+    except Exception as exc:
+      self.logger.warning(
+        "本机行情存在性查询失败: instrument=%s, period=%s, error=%s",
+        instrument,
+        period,
+        type(exc).__name__,
+      )
+      return False
+    finally:
+      await client.close()
 
   def _format_missing_data(self, missing: Dict[str, Dict[str, Any]]) -> str:
     """格式化缺失数据明细"""

@@ -46,7 +46,6 @@ async def test_manual_portfolio_downloads_d1_for_exact_configured_stocks(
 
   await manager._ensure_t_trade_portfolio_reference_data(
     runtime,
-    SimpleNamespace(),
   )
 
   assert find_missing.await_count == 2

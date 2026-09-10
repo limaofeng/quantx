@@ -26,9 +26,6 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.repositories.strategy_repository import StrategyRepository
-from quantx_infrastructure.services.historical_market_data_service import (
-  HistoricalMarketDataService,
-)
 from sqlalchemy import select
 
 pytestmark = [pytest.mark.integration, pytest.mark.e2e]
@@ -90,9 +87,7 @@ async def _require_real_backtest_data(
 ) -> None:
   """Integration backtest requires readable historical data."""
   try:
-    service = HistoricalMarketDataService()
     missing = await strategy_manager._find_missing_backtest_data(
-      service=service,
       instruments=instruments,
       start_time=start_time,
       end_time=end_time,

@@ -1067,7 +1067,6 @@ class TestStrategyManager:
 
     local_tick_fixture(monkeypatch, tick_repo.find_all)
     missing = await manager._find_missing_backtest_data(
-      service=SimpleNamespace(tick_repo=tick_repo),
       instruments=["600887.SH"],
       start_time=datetime(2026, 7, 20, 9, 30),
       end_time=datetime(2026, 8, 14, 15, 0),
@@ -1114,7 +1113,6 @@ class TestStrategyManager:
 
     local_tick_fixture(monkeypatch, lambda **_: [])
     missing = await manager._find_missing_backtest_data(
-      service=SimpleNamespace(tick_repo=SimpleNamespace(find_all=lambda **_: [])),
       instruments=["600887.SH"],
       start_time=datetime(2026, 8, 3, 9, 30),
       end_time=datetime(2026, 8, 3, 15, 0),
@@ -1152,7 +1150,6 @@ class TestStrategyManager:
 
     local_tick_fixture(monkeypatch, lambda **_: [])
     missing = await manager._find_missing_backtest_data(
-      service=SimpleNamespace(tick_repo=SimpleNamespace(find_all=lambda **_: [])),
       instruments=["600887.SH"],
       start_time=datetime(2026, 8, 3, 9, 30),
       end_time=datetime(2026, 8, 3, 15, 0),
@@ -1196,7 +1193,6 @@ class TestStrategyManager:
 
     local_tick_fixture(monkeypatch, tick_repo.find_all)
     missing = await manager._find_missing_backtest_data(
-      service=SimpleNamespace(tick_repo=tick_repo),
       instruments=["600887.SH"],
       start_time=datetime(2026, 8, 3, 9, 30),
       end_time=datetime(2026, 8, 3, 15, 0),
@@ -1249,7 +1245,6 @@ class TestStrategyManager:
 
     local_tick_fixture(monkeypatch, tick_repo.find_all)
     missing = await manager._find_missing_backtest_data(
-      service=SimpleNamespace(tick_repo=tick_repo),
       instruments=["600887.SH"],
       start_time=datetime(2026, 8, 3, 9, 30),
       end_time=datetime(2026, 8, 3, 15, 0),
@@ -1335,10 +1330,6 @@ class TestStrategyManager:
     monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.request_market_data_sync", waited
-    )
-    monkeypatch.setattr(
-      "quantx_engine.strategy_manager.HistoricalMarketDataService",
-      lambda: SimpleNamespace(),
     )
     prepare_profiles = AsyncMock()
     monkeypatch.setattr(
@@ -1567,10 +1558,6 @@ class TestStrategyManager:
     monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
     monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
     monkeypatch.setattr(
-      "quantx_engine.strategy_manager.HistoricalMarketDataService",
-      lambda: SimpleNamespace(),
-    )
-    monkeypatch.setattr(
       manager,
       "_prepare_t_trade_replay_profiles",
       AsyncMock(),
@@ -1665,10 +1652,6 @@ class TestStrategyManager:
     monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
     monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
     monkeypatch.setattr(
-      "quantx_engine.strategy_manager.HistoricalMarketDataService",
-      lambda: SimpleNamespace(),
-    )
-    monkeypatch.setattr(
       manager,
       "_prepare_t_trade_replay_profiles",
       AsyncMock(),
@@ -1741,10 +1724,6 @@ class TestStrategyManager:
     )
     sync = AsyncMock()
     monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
-    monkeypatch.setattr(
-      "quantx_engine.strategy_manager.HistoricalMarketDataService",
-      lambda: SimpleNamespace(),
-    )
     monkeypatch.setattr(
       manager,
       "_prepare_t_trade_replay_profiles",
@@ -1844,10 +1823,6 @@ class TestStrategyManager:
     monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
     queued = AsyncMock()
     monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
-    monkeypatch.setattr(
-      "quantx_engine.strategy_manager.HistoricalMarketDataService",
-      lambda: SimpleNamespace(),
-    )
 
     await manager._ensure_backtest_data_available(runtime)
 

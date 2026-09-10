@@ -25,9 +25,6 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.repositories.strategy_repository import StrategyRepository
-from quantx_infrastructure.services.historical_market_data_service import (
-  HistoricalMarketDataService,
-)
 from sqlalchemy import select
 
 pytestmark = [pytest.mark.integration, pytest.mark.e2e]
@@ -105,9 +102,7 @@ async def _require_real_backtest_data(
 ) -> None:
   """真实回测集成测试需要外部历史行情；不可用时跳过。"""
   try:
-    service = HistoricalMarketDataService()
     missing = await strategy_manager._find_missing_backtest_data(
-      service=service,
       instruments=instruments,
       start_time=start_time.replace(hour=9, minute=30, second=0, microsecond=0),
       end_time=end_time.replace(hour=15, minute=30, second=0, microsecond=0),
