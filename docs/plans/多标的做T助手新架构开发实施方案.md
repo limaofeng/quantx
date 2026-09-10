@@ -725,6 +725,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   Ruff/差异检查通过。证据 `p8-supervisor-preload-final.log`、`p8-supervisor-preload-cancel.log`。
   未配置业务根目录或登记模型；当前只接预加载，完整分钟输入调度/模型视图进入 snapshot
   仍待实现，PAPER/LIVE 的模型下单限制未放开，不代表 SHADOW 观察验收已完成。
+  模型视图现已接入实际 PAPER snapshot：纯域 TModelSnapshotView 冻结完整 binding、
+  revision、可见时间、有效期、批次摘要、三分类分数及逐标的不可用原因，随周期输入持久化。
+  校验完整标的覆盖、身份/授权/制品一致性及时间边界；RULE_ONLY 不增加模型视图字段。
+  实际 quote→snapshot→周期落库测试发现并修复 repository 对完整 binding 重复摘要的错误，
+  准备和提交复验统一使用 binding_hash。冷启动记录明确 UNAVAILABLE，不伪造有效分数；
+  非 RULE_ONLY 的 PAPER entry dispatch 显式 BLOCKED，未开放模型交易。
+  **146 项域/评分/registry/PAPER/LIVE 定向回归通过**，覆盖真实 SQLite 周期落库、
+  SHADOW/ACTIVE 有效视图、身份篡改、未来/过期分数和 RULE_ONLY 回归；Ruff/差异检查通过。
+  证据 `.codex_screenshots/p8-model-snapshot-final.log`。下一步仍需接通实际分钟调度、
+  来源水位及 PIT 上下文；现有证据不替代 SHADOW 长时观察或正式模型准入。iOS 按用户要求暂停。
 
 
 

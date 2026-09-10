@@ -24,6 +24,7 @@ from quantx_domain.trading.t_assistant_market_state import (
   TDecisionSnapshot,
   TickAcceptanceResult,
 )
+from quantx_domain.trading.t_model_score import TModelSnapshotView
 from quantx_domain.trading.t_trade_opportunity_engine import (
   CandidateControl,
   OpportunityGateContext,
@@ -139,6 +140,7 @@ class TDecisionSnapshotBuilder:
     market_gate_context: OpportunityGateContext,
     market_context: Optional[Mapping[str, Any]] = None,
     candidate_controls: Optional[Mapping[str, CandidateControl]] = None,
+    model_view: TModelSnapshotView | None = None,
   ) -> TDecisionSnapshot:
     if decision_time.tzinfo is None:
       raise ValueError("T decision time must be timezone-aware")
@@ -221,6 +223,12 @@ class TDecisionSnapshotBuilder:
         )
       )
 
+    if execution.model_runtime_binding is not None and model_view is None:
+      model_view = TModelSnapshotView(
+        TModelRuntimeBinding.from_mapping(execution.model_runtime_binding),
+        0, "UNAVAILABLE", "MODEL_NOT_READY", None, "", None, (),
+        tuple((item.instrument_code, "MODEL_NOT_READY") for item in items),
+      )
     return TDecisionSnapshot(
       execution_ref=execution.execution_ref,
       decision_time=decision_time,
@@ -240,6 +248,7 @@ class TDecisionSnapshotBuilder:
       symbols=tuple(items),
       market_context=dict(market_context or {}),
       scorer_mode=execution.scorer_mode.value,
+      model_view=model_view,
       model_runtime_binding_hash=(
         TModelRuntimeBinding.from_mapping(execution.model_runtime_binding).binding_hash
         if execution.model_runtime_binding is not None

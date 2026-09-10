@@ -12,11 +12,11 @@ from quantx_application.t_trade_v3.model_features import (
   TModelFeatureBar,
 )
 from quantx_application.t_trade_v3.model_minute_window import TModelMinuteOutcome
-from quantx_application.t_trade_v3.model_score import TModelScore
 from quantx_domain.trading.t_assistant_execution import (
   TModelRuntimeBinding,
   stable_manifest_hash,
 )
+from quantx_domain.trading.t_model_score import TModelScore
 from quantx_infrastructure.services.t_model_cpu_artifact import TCpuArtifact
 
 

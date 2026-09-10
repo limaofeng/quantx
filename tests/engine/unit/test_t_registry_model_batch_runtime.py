@@ -47,6 +47,36 @@ async def registered(sessions, tmp_path, mode):
 
 
 @pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
+async def test_typed_snapshot_validates_frozen_score_identity(sessions, tmp_path, mode):
+  model, scorer = await registered(sessions, tmp_path, mode)
+  feature = bar()
+  await scorer.evaluate((feature,), model_as_of_ms=feature.available_at_ms, rule_order=())
+  view = await scorer.snapshot_view(as_of_ms=feature.available_at_ms + 10,
+    instrument_codes=(feature.instrument_code,), rule_order=())
+  scope = dict(mode=mode, binding_hash=model.authorization.runtime_binding.binding_hash,
+    feature_schema_version=feature.feature_schema_version, as_of_ms=feature.available_at_ms + 10,
+    instrument_codes=(feature.instrument_code,))
+  view.validate_for_snapshot(**scope)
+  assert view.status == "VALID" and len(view.scores) == 1
+  score = view.scores[0]
+  for changed in (
+    replace(view, revision=view.revision + 1),
+    replace(view, scores=()),
+    replace(view, model_as_of_ms=scope["as_of_ms"] + 1),
+    replace(view, max_age_ms=None),
+    replace(view, scores=(replace(score, model_authorization_revision=99),)),
+    replace(view, scores=(replace(score, artifact_manifest_sha256="f" * 64),)),
+    replace(view, scores=(replace(score, model_version="wrong"),)),
+  ):
+    with pytest.raises(ValueError, match="T_MODEL_SNAPSHOT_"):
+      changed.validate_for_snapshot(**scope)
+  for changed_scope in (scope | {"binding_hash": "f" * 64},
+    scope | {"as_of_ms": scope["as_of_ms"] + model.max_age_ms + 1}):
+    with pytest.raises(ValueError, match="T_MODEL_SNAPSHOT_"):
+      view.validate_for_snapshot(**changed_scope)
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "ACTIVE"])
 async def test_registry_revocation_invalidates_even_exact_replay(sessions, tmp_path, mode):
   model, scorer = await registered(sessions, tmp_path, mode)
   feature = bar()

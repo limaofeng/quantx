@@ -632,6 +632,12 @@ class TAssistantPaperShadowSupervisor:
           symbol_states=self._runtime.symbol_states(binding.execution.execution_id),
           as_of=now,
         )
+      model_view = None
+      if binding.model_runtime is not None:
+        model_view = await binding.model_runtime.snapshot_view(
+          as_of_ms=capture_time_ms, instrument_codes=tuple(item.instrument_code for item in binding.universe),
+          rule_order=(),
+        )
       try:
         snapshot = binding.builder.build(
           execution=binding.execution,
@@ -642,6 +648,7 @@ class TAssistantPaperShadowSupervisor:
           trade_date=now.date().isoformat(),
           market_gate_context=gate_context,
           candidate_controls=controls,
+          model_view=model_view,
           market_context={
             "session": gate_context.session_code,
             "paper_shadow_only": True,
@@ -753,6 +760,8 @@ class TAssistantPaperShadowSupervisor:
     self._last_allocation_at[key] = asyncio.get_running_loop().time()
 
   async def _dispatch_entries(self, binding):
+    if binding.execution.scorer_mode is not TAssistantScorerMode.RULE_ONLY:
+      return PaperEntryDispatchResult("BLOCKED", ("PAPER_MODEL_ENTRY_NOT_ENABLED",))
     async def witness(code):
       if not self._quote_hub.is_ready:
         return None

@@ -5,6 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_engine.t_registry_model_batch_runtime import TRegistryModelBatchRuntime
+from quantx_infrastructure.models.t_assistant_execution import (
+  TAssistantDecisionCycleRecord,
+)
 from quantx_infrastructure.models.t_model_registry import (
   TModelRegistryEventRecord,
   TModelVersionRecord,
@@ -13,6 +16,7 @@ from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfi
 from quantx_infrastructure.repositories.t_model_registry_repository import (
   TModelRegistryRepository,
 )
+from sqlalchemy import select
 
 from tests.engine.unit.test_t_assistant_paper_shadow_runtime import (
   _reconcile_cursor_probe,
@@ -77,6 +81,33 @@ async def test_paper_reconcile_loads_once_and_rechecks_registry_on_refresh(sessi
     with pytest.raises(ValueError, match="AUTHORIZATION_REVOKED"):
       await supervisor.reconcile(config=config, universe=universe)
     assert key not in supervisor._bindings
+  finally:
+    await supervisor.stop()
+
+
+async def test_paper_quote_persists_cold_model_observation(sessions, tmp_path):
+  config, hub, supervisor, universe, _ = await _reconcile_cursor_probe(sessions)
+  args = fixture(tmp_path)
+  supervisor._model_artifact_root = tmp_path
+  try:
+    await register(sessions, args["binding"], "SHADOW_ELIGIBLE", evidence=evidence(args))
+    config = await configure(sessions, config, args)
+    key = await supervisor.reconcile(config=config, universe=universe)
+    await hub.emit(5)
+    async with sessions() as db:
+      cycle = await db.scalar(select(TAssistantDecisionCycleRecord).where(
+        TAssistantDecisionCycleRecord.execution_id == key))
+      assert cycle is not None and cycle.status == "PROPOSALS_COMMITTED"
+      manifest = cycle.input_manifest
+      view = manifest["model_view"]
+      assert manifest["model_runtime_binding_hash"] == args["binding"].binding_hash
+      assert view["binding"] == args["binding"].to_dict()
+      assert view["status"] == "UNAVAILABLE" and view["revision"] == 0
+      assert view["reason"] == "MODEL_SNAPSHOT_UNAVAILABLE"
+      assert view["scores"] == [] and view["model_as_of_ms"] is None
+      assert view["unavailable"] == [["600000.SH", "MODEL_SNAPSHOT_UNAVAILABLE"]]
+    dispatch = await supervisor._dispatch_entries(supervisor._bindings[key])
+    assert dispatch.status == "BLOCKED"
   finally:
     await supervisor.stop()
 

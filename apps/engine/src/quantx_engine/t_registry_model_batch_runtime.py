@@ -13,6 +13,7 @@ from quantx_domain.trading.t_assistant_execution import (
   TModelRuntimeBinding,
   stable_manifest_hash,
 )
+from quantx_domain.trading.t_model_score import TModelSnapshotView
 from quantx_infrastructure.repositories.t_model_registry_repository import (
   TModelRegistryRepository,
 )
@@ -250,3 +251,19 @@ class TRegistryModelBatchRuntime:
       return TModelBatchResult(
         frozen.revision, "", mode == "ACTIVE", "MODEL_SNAPSHOT_UNAVAILABLE", rule_order, (), (),
       )
+
+
+  async def snapshot_view(self, *, as_of_ms, instrument_codes, rule_order):
+    codes = tuple(instrument_codes)
+    model = self._model
+    result = await self.freeze_for_snapshot(as_of_ms=as_of_ms, instrument_codes=codes, rule_order=rule_order)
+    if model.authorization is None:
+      raise ValueError("T_MODEL_SNAPSHOT_BINDING_REQUIRED")
+    valid = result.reason == "VALID"
+    return TModelSnapshotView(
+      model.authorization.runtime_binding, result.revision, "VALID" if valid else "UNAVAILABLE",
+      result.reason, result.model_as_of_ms if valid else None, result.manifest_hash if valid else "",
+      model.max_age_ms, result.active_scores + result.shadow_scores if valid else (),
+      tuple((item.instrument_code, item.reason) for item in result.unavailable)
+      if valid else tuple((code, result.reason) for code in sorted(codes)),
+    )

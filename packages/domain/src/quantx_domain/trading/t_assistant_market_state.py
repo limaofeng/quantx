@@ -19,6 +19,7 @@ from .t_assistant_execution import (
   canonical_json_payload,
   stable_manifest_hash,
 )
+from .t_model_score import TModelSnapshotView
 from .t_trade_opportunity_engine import (
   CandidateControl,
   OpportunityCandidate,
@@ -811,6 +812,7 @@ class TDecisionSnapshot:
   market_context: Mapping[str, Any] = field(default_factory=dict)
   scorer_mode: str = "RULE_ONLY"
   model_runtime_binding_hash: Optional[str] = None
+  model_view: TModelSnapshotView | None = None
 
   def __post_init__(self) -> None:
     if self.execution_ref.owner_type is not ExecutionOwnerType.T_ASSISTANT_EXECUTION:
@@ -846,6 +848,16 @@ class TDecisionSnapshot:
       item.state.execution_id != self.execution_ref.owner_id for item in normalized
     ):
       raise ValueError("T decision snapshot symbol state crosses execution")
+    if self.scorer_mode == "RULE_ONLY":
+      if self.model_view is not None:
+        raise ValueError("T_MODEL_RULE_ONLY_VIEW_FORBIDDEN")
+    else:
+      if self.model_view is None:
+        raise ValueError("T_MODEL_SNAPSHOT_VIEW_REQUIRED")
+      self.model_view.validate_for_snapshot(mode=self.scorer_mode,
+        binding_hash=self.model_runtime_binding_hash, feature_schema_version=self.feature_schema_version,
+        as_of_ms=int(self.decision_time.timestamp() * 1000),
+        instrument_codes=tuple(item.instrument_code for item in normalized))
     for item in normalized:
       delta = item.delta_slice
       if item.state.cursor != delta.from_cursor:
@@ -947,6 +959,7 @@ class TDecisionSnapshot:
       "entry_readiness_as_of": self.entry_readiness_as_of.isoformat(),
       "scorer_mode": self.scorer_mode,
       "model_runtime_binding_hash": self.model_runtime_binding_hash,
+      **({"model_view": self.model_view.to_dict()} if self.model_view is not None else {}),
       "market_delta_manifest_hash": self.market_delta_manifest_hash,
       "reducer_cursor_manifest_hash": self.reducer_cursor_manifest_hash,
       "market_context": dict(self.market_context),

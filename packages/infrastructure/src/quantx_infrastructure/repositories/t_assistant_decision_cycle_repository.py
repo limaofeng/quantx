@@ -30,6 +30,7 @@ from quantx_domain.trading.t_assistant_execution import (
   TAssistantExecutionEvent,
   TAssistantExecutionStatus,
   TDecisionCycleStatus,
+  TModelRuntimeBinding,
   stable_manifest_hash,
 )
 from quantx_domain.trading.t_assistant_market_state import (
@@ -740,7 +741,7 @@ class TAssistantDecisionCycleRepository:
       or _aware(execution.entry_readiness_as_of) != snapshot.entry_readiness_as_of
       or execution.scorer_mode != snapshot.scorer_mode
       or (
-        stable_manifest_hash(dict(execution.model_runtime_binding))
+        TModelRuntimeBinding.from_mapping(execution.model_runtime_binding).binding_hash
         if execution.model_runtime_binding is not None
         else None
       )
@@ -755,7 +756,7 @@ class TAssistantDecisionCycleRepository:
   ) -> bool:
     execution_ref = manifest.get("execution_ref")
     expected_binding_hash = (
-      stable_manifest_hash(dict(execution.model_runtime_binding))
+      TModelRuntimeBinding.from_mapping(execution.model_runtime_binding).binding_hash
       if execution.model_runtime_binding is not None
       else None
     )
