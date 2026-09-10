@@ -17,7 +17,7 @@ from ..types.t_assistant_paper_types import (
 
 @strawberry.type
 class TAssistantPaperQuery:
-  @strawberry.field
+  @strawberry.field(description="分页读取授权账户的 PAPER 做 T 执行实例")
   async def t_assistant_paper_executions(
     self,
     info: strawberry.Info,
@@ -29,7 +29,7 @@ class TAssistantPaperQuery:
       "executions", authorized_account_id(info, account_id), first=first, after=after
     )
 
-  @strawberry.field
+  @strawberry.field(description="读取授权账户内指定的 PAPER 做 T 执行实例")
   async def t_assistant_paper_execution(
     self, info: strawberry.Info, account_id: str, execution_id: str
   ) -> TAssistantPaperExecution | None:
@@ -37,7 +37,7 @@ class TAssistantPaperQuery:
       authorized_account_id(info, account_id), execution_id
     )
 
-  @strawberry.field
+  @strawberry.field(description="分页读取指定 PAPER 做 T 执行的机会记录")
   async def t_assistant_paper_opportunities(
     self,
     info: strawberry.Info,
@@ -54,7 +54,7 @@ class TAssistantPaperQuery:
       after,
     )
 
-  @strawberry.field
+  @strawberry.field(description="分页读取指定 PAPER 做 T 执行的分配记录")
   async def t_assistant_paper_allocations(
     self,
     info: strawberry.Info,
@@ -67,7 +67,7 @@ class TAssistantPaperQuery:
       "allocations", authorized_account_id(info, account_id), execution_id, first, after
     )
 
-  @strawberry.field
+  @strawberry.field(description="分页读取指定 PAPER 做 T 执行的决策原因")
   async def t_assistant_paper_reasons(
     self,
     info: strawberry.Info,
@@ -80,7 +80,7 @@ class TAssistantPaperQuery:
       "reasons", authorized_account_id(info, account_id), execution_id, first, after
     )
 
-  @strawberry.field
+  @strawberry.field(description="分页读取指定 PAPER 做 T 执行的模拟订单")
   async def t_assistant_paper_orders(
     self,
     info: strawberry.Info,
@@ -93,7 +93,7 @@ class TAssistantPaperQuery:
       "orders", authorized_account_id(info, account_id), execution_id, first, after
     )
 
-  @strawberry.field
+  @strawberry.field(description="分页读取指定 PAPER 做 T 执行的退出计划")
   async def t_assistant_paper_exit_plans(
     self,
     info: strawberry.Info,

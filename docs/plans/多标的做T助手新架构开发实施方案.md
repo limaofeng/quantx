@@ -1348,6 +1348,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `p6-legacy-contract-snapshots.log`、`p6-legacy-check-serial.log`、`p6-legacy-web-lint.log`、
   `p6-legacy-build-serial.log`、`p6-legacy-web-test-run.log`、`p6-legacy-web-timeout-recheck.log`
   均位于 .codex_screenshots/。解除本项 Caddy/codegen 阻塞，不代表 P6/P7/P8 整体验收完成。
+  后续清除既有契约说明缺失：实际 introspection 一次列出 14 个遗漏根字段（补采设置、
+  研究准备和 PAPER 查询），补 description 并同步 SDL，接口参数/权限/业务逻辑不变。
+  统一 dev/full/paper 应用 down→up→status 后全部受管进程 RUNNING，实际 Caddy 查询
+  确认 Query/Mutation 缺失说明均为零；未迁移数据库或启动训练/真实交易，iOS 仍暂停。
+  **9 项客户端契约测试、895 项 Web 测试全通过**；实际端点 codegen、顺序 root check、
+  lint、build 和包预算通过，Ruff/差异检查通过。此前单次 Web 超时在本次完整运行未复现。
+  证据 `.codex_screenshots/root-field-{dev-restart,codegen,contract-tests,check,lint,test-run,build}.log`。
+  该契约验收遗留已解决，P8 业务数据来源/正式实验预算与阶段运行观察门仍需单独完成。
   重启恢复独立修复：已复现 cut 提交后、命令完成前退出，重启没有旧运行时时遗漏迟到
   inbox 的错误成功。命令分发现在复核已有 cut 的当前义务，不依赖内存清理触发复核。
   **40 项定向测试与 Ruff 通过**，证据 `.codex_screenshots/p6-completion-restart-final.log`；

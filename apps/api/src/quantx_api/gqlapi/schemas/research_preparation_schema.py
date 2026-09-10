@@ -65,7 +65,7 @@ class ResearchPreparationState:
 
 @strawberry.type
 class ResearchPreparationQuery:
-  @strawberry.field
+  @strawberry.field(description="读取研究数据准备配置及任务状态")
   async def research_preparation(
     self, info: strawberry.types.Info
   ) -> ResearchPreparationState:
@@ -79,7 +79,7 @@ class ResearchPreparationQuery:
         jobs=[project(row) for row in await repo.jobs()],
       )
 
-  @strawberry.field
+  @strawberry.field(description="预览研究配置所需的行情下载范围")
   async def preview_research_download(
     self, info: strawberry.types.Info, config: JSON
   ) -> JSON:
@@ -89,7 +89,7 @@ class ResearchPreparationQuery:
 
 @strawberry.type
 class ResearchPreparationMutation:
-  @strawberry.mutation
+  @strawberry.mutation(description="保存研究数据准备配置")
   async def save_research_preparation(
     self, info: strawberry.types.Info, config: JSON
   ) -> JSON:
@@ -97,7 +97,7 @@ class ResearchPreparationMutation:
     async with AsyncSessionLocal() as db:
       return await ResearchPreparationRepository(db).save(config)
 
-  @strawberry.mutation
+  @strawberry.mutation(description="提交指定类型的研究数据准备任务")
   async def start_research_preparation(
     self,
     info: strawberry.types.Info,
@@ -116,7 +116,7 @@ class ResearchPreparationMutation:
       )
       return project(row)
 
-  @strawberry.mutation
+  @strawberry.mutation(description="重试指定研究数据准备任务")
   async def retry_research_preparation(
     self, info: strawberry.types.Info, job_id: str
   ) -> ResearchPreparationTask:

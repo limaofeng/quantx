@@ -63,7 +63,7 @@ def view(config):
 
 @strawberry.type
 class HistoryDownloadSettingsQuery:
-  @strawberry.field
+  @strawberry.field(description="读取历史行情补采策略、允许时段和配置版本")
   async def history_download_settings(
     self, info: strawberry.types.Info
   ) -> HistoryDownloadSettingsView:
@@ -74,7 +74,7 @@ class HistoryDownloadSettingsQuery:
 
 @strawberry.type
 class HistoryDownloadSettingsMutation:
-  @strawberry.mutation
+  @strawberry.mutation(description="按预期版本更新历史行情补采策略和允许时段")
   async def update_history_download_settings(
     self,
     info: strawberry.types.Info,

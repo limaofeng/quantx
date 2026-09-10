@@ -3814,6 +3814,7 @@ type MessageResponse {
 
 "QuantX 系统数据变更接口\n\n## 主要功能\n\n### 订单操作\n- 创建买入/卖出订单\n- 取消未成交订单\n\n### 持仓管理\n- 执行清仓操作\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 策略管理\n- 创建、更新、删除策略模板\n- 管理策略实例的生命周期\n"
 type Mutation {
+  """按预期版本更新历史行情补采策略和允许时段"""
   updateHistoryDownloadSettings(input: UpdateHistoryDownloadSettingsInput!): HistoryDownloadSettingsView!
 
   """更新 AI Runtime 全局非敏感配置"""
@@ -4226,8 +4227,14 @@ type Mutation {
 
   """注销当前安装并丢弃尚未发送的推送意图"""
   unregisterPushDevice(input: UnregisterPushDeviceInput!): UnregisterPushDeviceResult!
+
+  """保存研究数据准备配置"""
   saveResearchPreparation(config: JSON!): JSON!
+
+  """提交指定类型的研究数据准备任务"""
   startResearchPreparation(kind: ResearchPreparationKind!, config: JSON!, requestKey: String!, datasetVersion: String = null): ResearchPreparationTask!
+
+  """重试指定研究数据准备任务"""
   retryResearchPreparation(jobId: String!): ResearchPreparationTask!
 
   """从已完成研究运行登记 CANDIDATE 模型"""
@@ -4875,6 +4882,7 @@ type QuarantinedOrder {
 
 "QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
+  """读取历史行情补采策略、允许时段和配置版本"""
   historyDownloadSettings: HistoryDownloadSettingsView!
 
   """AI Runtime 全局非敏感配置与应用状态"""
@@ -5179,7 +5187,11 @@ type Query {
 
   """获取选股与历史研究共用的版本化指标目录"""
   stockIndicatorCatalog: [StockIndicatorDefinition!]!
+
+  """读取研究数据准备配置及任务状态"""
   researchPreparation: ResearchPreparationState!
+
+  """预览研究配置所需的行情下载范围"""
   previewResearchDownload(config: JSON!): JSON!
 
   """列出人工登记的概率模型版本"""
@@ -5217,12 +5229,26 @@ type Query {
 
   """获取自选股分组列表"""
   watchlistGroups(accountId: String = null): [WatchlistGroup!]!
+
+  """分页读取授权账户的 PAPER 做 T 执行实例"""
   tAssistantPaperExecutions(accountId: String!, first: Int! = 20, after: String = null): TAssistantPaperExecutionTAssistantPaperPage!
+
+  """读取授权账户内指定的 PAPER 做 T 执行实例"""
   tAssistantPaperExecution(accountId: String!, executionId: String!): TAssistantPaperExecution
+
+  """分页读取指定 PAPER 做 T 执行的机会记录"""
   tAssistantPaperOpportunities(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperOpportunityTAssistantPaperPage!
+
+  """分页读取指定 PAPER 做 T 执行的分配记录"""
   tAssistantPaperAllocations(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperAllocationTAssistantPaperPage!
+
+  """分页读取指定 PAPER 做 T 执行的决策原因"""
   tAssistantPaperReasons(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperReasonTAssistantPaperPage!
+
+  """分页读取指定 PAPER 做 T 执行的模拟订单"""
   tAssistantPaperOrders(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperOrderTAssistantPaperPage!
+
+  """分页读取指定 PAPER 做 T 执行的退出计划"""
   tAssistantPaperExitPlans(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperExitPlanTAssistantPaperPage!
 
   """当前原生设备最近的发布操作，不返回确认凭据"""
