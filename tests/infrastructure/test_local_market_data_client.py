@@ -265,3 +265,30 @@ async def test_engine_previous_daily_read_uses_local_api(store, monkeypatch):
     assert client.client.is_closed
     query = reader.read.call_args.args[0]
     assert query.period == "1d" and query.trading_date == date(2026, 6, 3)
+
+
+async def test_resume_uses_existing_service_endpoint_without_new_submission():
+  identity = str(uuid4())
+  backend = SimpleNamespace(
+    resume_market_data_request=AsyncMock(
+      return_value={"status": "UPLOADED", "attempt": 2}
+    )
+  )
+  app = create_app(store=backend, token="internal", reader=object())
+  async with app.router.lifespan_context(app):
+    client = LocalMarketDataClient(transport=httpx.ASGITransport(app), token="internal")
+    try:
+      result = await client.resume_market_data_request(
+        identity, reason="fixed connection"
+      )
+      assert result == {"request_id": identity, "status": "UPLOADED", "attempt": 2}
+      backend.resume_market_data_request.assert_awaited_once_with(
+        identity, reason="fixed connection"
+      )
+      backend.resume_market_data_request.side_effect = RuntimeError("not resumable")
+      with pytest.raises(httpx.HTTPStatusError) as caught:
+        await client.resume_market_data_request(identity, reason="operator retry")
+      assert caught.value.response.status_code == 409
+      assert backend.resume_market_data_request.await_count == 2
+    finally:
+      await client.close()

@@ -110,4 +110,41 @@ describe('MarketSyncEvidence', () => {
     expect(screen.queryByText('源数据不可用')).not.toBeInTheDocument();
     expect(screen.getByText(/后台处理中 0/)).toBeInTheDocument();
   });
+  it('resumes the selected request with an explicit reason and refreshes', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => evidence('UPLOADED') });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => evidence('BLOCKED'),
+    });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        request_id: 'request-1',
+        status: 'UPLOADED',
+        attempt: 2,
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => {
+      render(<MarketSyncEvidence runId="run" live={false} />);
+    });
+    fireEvent.click(screen.getByText('恢复请求'));
+    expect(screen.getByText('确认恢复')).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('恢复原因'), {
+      target: { value: '已修复连接' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('确认恢复'));
+    });
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      '/market-data-sync/run/partitions/request-1/resume'
+    );
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      reason: '已修复连接',
+    });
+    expect(fetchMock.mock.calls[1][1].method).toBe('POST');
+    expect(screen.getByText('等待入库')).toBeInTheDocument();
+  });
 });

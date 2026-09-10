@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { z } from 'zod';
 
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { getAccessToken } from '@/core/auth';
 
 const evidenceSchema = z.object({
@@ -74,6 +75,56 @@ export function MarketSyncEvidence({
   const [loadedOffset, setLoadedOffset] = useState(0);
   const [data, setData] = useState<Evidence | null>(null);
   const [error, setError] = useState('');
+  const [resumeId, setResumeId] = useState<string | null>(null);
+  const [resumeReason, setResumeReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [actionMessage, setActionMessage] = useState('');
+  const resume = async () => {
+    if (!resumeId || !resumeReason.trim() || submitting) return;
+    setSubmitting(true);
+    setActionMessage('');
+    try {
+      const token = getAccessToken();
+      const response = await fetch(
+        `/market-data-sync/${encodeURIComponent(runId)}/partitions/${encodeURIComponent(resumeId)}/resume`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ reason: resumeReason.trim() }),
+          signal: AbortSignal.timeout(15000),
+        }
+      );
+      if (!response.ok) {
+        if (response.status === 403) throw new Error('无权恢复同步请求');
+        if (response.status === 409 || response.status === 404)
+          throw new Error('请求当前不可恢复，请刷新状态');
+        throw new Error('恢复结果未确认，请先刷新状态再操作');
+      }
+      const receipt = z
+        .object({
+          request_id: z.string(),
+          status: z.string(),
+          attempt: z.number().int().positive(),
+        })
+        .parse(await response.json());
+      if (receipt.request_id !== resumeId)
+        throw new Error('恢复响应不匹配，请先刷新状态');
+      setResumeId(null);
+      setResumeReason('');
+      setActionMessage('恢复已受理，正在刷新状态');
+    } catch (cause) {
+      setActionMessage(
+        cause instanceof Error ? cause.message : '恢复结果未确认，请先刷新状态'
+      );
+    } finally {
+      setSubmitting(false);
+      setRefresh(value => value + 1);
+    }
+  };
+
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -156,6 +207,7 @@ export function MarketSyncEvidence({
               <th>覆盖状态</th>
               <th>记录数</th>
               <th>原因</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -193,11 +245,69 @@ export function MarketSyncEvidence({
                   <td>
                     {reasonLabel(item.request_reason ?? item.summary.reason)}
                   </td>
+                  <td>
+                    {['BLOCKED', 'FAILED'].includes(
+                      item.request_status ?? ''
+                    ) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={submitting}
+                        onClick={() => {
+                          setResumeId(item.request_id);
+                          setResumeReason('');
+                          setActionMessage('');
+                        }}
+                      >
+                        恢复请求
+                      </Button>
+                    )}
+                  </td>
                 </tr>
               ))}
           </tbody>
         </table>
       </div>
+      {resumeId && (
+        <form
+          className="my-2 flex flex-wrap items-center gap-2"
+          onSubmit={event => {
+            event.preventDefault();
+            void resume();
+          }}
+        >
+          <label htmlFor="market-sync-resume-reason">恢复原因</label>
+          <Input
+            id="market-sync-resume-reason"
+            value={resumeReason}
+            maxLength={256}
+            disabled={submitting}
+            onChange={event => setResumeReason(event.target.value)}
+            placeholder="例如：已修复存储连接"
+          />
+          <Button
+            type="submit"
+            size="sm"
+            disabled={submitting || !resumeReason.trim()}
+          >
+            {submitting ? '提交中' : '确认恢复'}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={submitting}
+            onClick={() => setResumeId(null)}
+          >
+            取消
+          </Button>
+        </form>
+      )}
+      {actionMessage && (
+        <p role="status" className="my-2 text-ui-caption">
+          {actionMessage}
+        </p>
+      )}
       <div className="mt-2 flex items-center gap-2">
         <Button
           size="sm"

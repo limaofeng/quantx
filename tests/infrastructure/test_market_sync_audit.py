@@ -47,6 +47,8 @@ async def test_paged_audit_survives_flow_exit_and_joins_later_ingestion():
         ('request-1','COMPLETED',timezone('utc',now()),json_build_object('records_saved',5166)),
         ('request-2','COMPLETED',timezone('utc',now()),json_build_object('records_saved',0))""")
       )
+      assert await audit.contains_request("request-1")
+      assert not await audit.contains_request("unrelated")
       page = await audit.page(offset=0, limit=1)
       assert len(page) == 1
       assert page[0]["coverage_status"] == "PENDING"

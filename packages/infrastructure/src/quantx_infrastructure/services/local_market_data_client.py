@@ -110,6 +110,26 @@ class LocalMarketDataClient:
     )
     return str(HistoryCollectionAccepted.model_validate(value).request_id)
 
+  async def resume_market_data_request(self, request_id, *, reason):
+    from quantx_contracts.market_data_service import ResumeHistory
+
+    identity = str(HistoryCollectionAccepted(request_id=request_id).request_id)
+    body = ResumeHistory(reason=reason)
+    result = await self._json(
+      "POST",
+      f"/market-data/internal/v1/requests/{identity}/resume",
+      json=body.model_dump(),
+    )
+    if (
+      not isinstance(result, dict)
+      or result.get("request_id") != identity
+      or not isinstance(result.get("status"), str)
+      or type(result.get("attempt")) is not int
+      or result["attempt"] < 1
+    ):
+      raise ValueError("local history resume response mismatch")
+    return result
+
   async def market_data_request(self, request_id):
     identity = str(HistoryCollectionAccepted(request_id=request_id).request_id)
     path = "/market-data/internal/v1/requests/" + identity

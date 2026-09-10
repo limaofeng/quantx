@@ -73,6 +73,18 @@ class MarketDataSyncAudit:
       )
       return [dict(row) for row in rows]
 
+  async def contains_request(self, request_id: str) -> bool:
+    async with self.store.engine.connect() as connection:
+      return bool(
+        await connection.scalar(
+          text("""
+        SELECT EXISTS(SELECT 1 FROM market_data_sync_partition
+        WHERE run_id=:run_id AND request_id=:request_id)
+      """),
+          {"run_id": self.run_id, "request_id": request_id},
+        )
+      )
+
   async def counts(self) -> list[dict[str, Any]]:
     async with self.store.engine.connect() as connection:
       rows = (
