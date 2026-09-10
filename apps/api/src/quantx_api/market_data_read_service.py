@@ -12,11 +12,11 @@ from quantx_infrastructure.core.data.tick_identity import merge_ticks_losslessly
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.tick import Tick
-from quantx_infrastructure.services.historical_market_data_service import (
-  HistoricalMarketDataService,
-)
 from quantx_infrastructure.services.latest_market_quote_cache import (
   latest_market_quote_cache,
+)
+from quantx_infrastructure.services.local_historical_market_reader import (
+  LocalHistoricalMarketReader,
 )
 from quantx_infrastructure.services.local_market_data_client import (
   LocalMarketDataClient,
@@ -53,7 +53,7 @@ def _model(model_type, payload: dict[str, Any]):
 
 class ApiMarketDataReadService:
   def __init__(self) -> None:
-    self.historical = HistoricalMarketDataService()
+    self.historical = LocalHistoricalMarketReader()
     self.positions = PositionService()
 
   async def _runtime_items(

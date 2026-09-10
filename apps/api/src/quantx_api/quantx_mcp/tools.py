@@ -425,8 +425,8 @@ class MarketDataTools:
         try:
             from datetime import timedelta
 
-            from quantx_infrastructure.services.historical_market_data_service import (
-                HistoricalMarketDataService,
+            from quantx_infrastructure.services.local_historical_market_reader import (
+                LocalHistoricalMarketReader,
             )
 
             symbol = args["symbol"]
@@ -438,7 +438,7 @@ class MarketDataTools:
             start_time = time_utils.now() - timedelta(days=365)  # 默认获取最近1年的数据
 
             # 获取最近的 K 线数据（使用 desc 排序，获取最新的 count 条）
-            klines = await HistoricalMarketDataService().get_kline_data(
+            klines = await LocalHistoricalMarketReader().get_kline_data(
                 stock_code=symbol,
                 period=period,
                 start_time=start_time,
@@ -460,7 +460,7 @@ class MarketDataTools:
             bars_data = []
             for kline in reversed(klines):  # 反转数组，让最早的数据在前
                 bars_data.append({
-                    "datetime": kline.datetime.isoformat() if hasattr(kline, 'datetime') else None,
+                    "datetime": kline.time.isoformat(),
                     "open": kline.open,
                     "high": kline.high,
                     "low": kline.low,

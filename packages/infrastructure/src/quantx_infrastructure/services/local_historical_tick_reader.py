@@ -58,6 +58,7 @@ class LocalHistoricalTickReader:
     page_size=10_000,
     max_pages=1024,
     max_source_ticks=2_000_000,
+    trading_dates=None,
   ):
     if (
       any(
@@ -81,10 +82,23 @@ class LocalHistoricalTickReader:
     data_reads = row_count = page_count = 0
     previous_key = None
     buffer = []
-    current = start.date()
+    days = (
+      list(trading_dates)
+      if trading_dates is not None
+      else [
+        start.date() + timedelta(days=i)
+        for i in range((end.date() - start.date()).days + 1)
+      ]
+    )
+    if (
+      len(days) > 366
+      or days != sorted(set(days))
+      or any(not start.date() <= day <= end.date() for day in days)
+    ):
+      raise HistoricalTickPaginationError("invalid local Tick date selection")
     client = LocalMarketDataClient()
     try:
-      while current <= end.date():
+      for current in days:
         query = HistoryRead(
           instrument=stock_code,
           period="tick",
@@ -143,9 +157,6 @@ class LocalHistoricalTickReader:
           # Short pages are not exhaustion. Even a full final budget gets an
           # empty probe; another nonempty response fails the original budget.
           query.after = page.next_after
-        if current == end.date():
-          break
-        current += timedelta(days=1)
       if buffer:
         if page_count >= max_pages:
           raise HistoricalTickPaginationError("local Tick output page budget exhausted")

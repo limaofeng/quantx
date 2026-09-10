@@ -487,3 +487,16 @@ conda run -n quantx python ops/prepare_t_assistant_release.py \
 账户动作绑定 `stateVersion`，独立于做 T 灰度 `policyVersion`；建立窗口绑定最新快照，
 熔断只提交处置原因。需要 `strategy:read`、`account-execution:control`、`trade:approve`，
 且确认前后均检查原设备会话。仅 APPLIED 且账户安全结果符合动作时展示已生效。
+
+### API/MCP 历史范围读取
+
+ApiMarketDataReadService 的历史 KLine/Tick 与 MCP KLine 通过 LocalHistoricalMarketReader
+读取本机 Data API；不再构造行情仓库。OHLC 聚合和前后复权复用抽出的价格变换逻辑，
+因子经 `/market-data/internal/v1/reference/divid-factors` 读取；Engine 暖数据合并规则保持。
+范围最多 366 日期，读取总期限 60 秒，结果最多 200000 条/规范化 JSON 64 MiB，
+超限失败，不返回截断历史。最终排序、limit 在范围读取及聚合后执行。
+
+新增受内部令牌保护的 `GET /market-data/internal/v1/reference/calendar?year=2026`，
+使用 CalendarRequest/CalendarSnapshot，按 SH 市场读取年度休市日，最多 366 行，
+单槽和 3 秒查询期限；忙返回 429，缺失/无效日历返回 503。范围查询先取得年度日历，
+跳过周末和明确休市日期；不把行情 503 当作休市。该接口只读，不启动采集或补数。

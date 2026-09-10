@@ -13,6 +13,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import Response
 from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
 from quantx_contracts.development_reference import (
+  CalendarRequest,
+  CalendarSnapshot,
   ReferenceAccepted,
   ReferenceRequest,
   ReferenceStatus,
@@ -37,6 +39,7 @@ from quantx_contracts.market_data_service import (
   HistoryRead,
   ResumeHistory,
 )
+from quantx_infrastructure.services.local_calendar_reader import LocalCalendarReader
 from quantx_infrastructure.services.local_divid_factor_reader import (
   LocalDividFactorReader,
 )
@@ -74,6 +77,9 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
       else LocalHistoryReader(
         session_factory=async_sessionmaker(app.state.store.engine)
       )
+    )
+    app.state.calendar_reader = LocalCalendarReader(
+      getattr(app.state.store, "engine", None)
     )
     app.state.factor_reader = LocalDividFactorReader(
       getattr(app.state.store, "engine", None)
@@ -172,6 +178,19 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     if epoch is None:
       raise HTTPException(503, "MARKET_DATA_WORKER_UNAVAILABLE")
     return {"status": "ready", "capability": "worker-lease", "epoch": epoch}
+
+  @app.get(
+    "/market-data/internal/v1/reference/calendar",
+    response_model=CalendarSnapshot,
+    dependencies=[Depends(authorize)],
+  )
+  async def calendar_window(request: Annotated[CalendarRequest, Query()]):
+    try:
+      return await app.state.calendar_reader.read(request)
+    except HistoryReadBusy:
+      raise HTTPException(429, "CALENDAR_READ_CAPACITY") from None
+    except (ValueError, TimeoutError, SQLAlchemyError):
+      raise HTTPException(503, "CALENDAR_READ_UNAVAILABLE") from None
 
   @app.get(
     "/market-data/internal/v1/reference/divid-factors",

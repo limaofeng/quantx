@@ -8,6 +8,8 @@ import httpx
 from quantx_contracts.daily_snapshot_read import DailySnapshotRead, DailySnapshotResult
 from quantx_contracts.development_reference import (
   REFERENCE_REQUEST,
+  CalendarRequest,
+  CalendarSnapshot,
   ReferenceAccepted,
   ReferenceStatus,
 )
@@ -207,6 +209,17 @@ class LocalMarketDataClient:
     if page.next_after != (previous if page.records else None):
       raise ValueError("local history page cursor mismatch")
     return page
+
+  async def read_calendar(self, request: CalendarRequest) -> CalendarSnapshot:
+    value = await self._json(
+      "GET",
+      "/market-data/internal/v1/reference/calendar",
+      params=request.model_dump(mode="json"),
+    )
+    snapshot = CalendarSnapshot.model_validate(value)
+    if snapshot.year != request.year or snapshot.market != request.market:
+      raise ValueError("local calendar response scope mismatch")
+    return snapshot
 
   async def read_divid_factors(self, request: DividFactorRead) -> DividFactorWindow:
     value = await self._json(
